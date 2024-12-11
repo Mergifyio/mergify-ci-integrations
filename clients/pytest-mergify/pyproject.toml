@@ -1,0 +1,45 @@
+[tool.poetry]
+name = "pytest-mergify"
+version = "0.1.0"
+description = "Pytest plugin for Mergify"
+authors = ["Julien Danjou <jd@mergify.com>"]
+license = "Apache"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.10"
+# We set this version explicitly to avoid breaking changes
+pytest-opentelemetry = "1.0.1"
+opentelemetry-exporter-otlp-proto-http = ">=1.25"
+opentelemetry-sdk = ">=1.25"
+
+
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.8.2"
+mypy = "^1.13.0"
+pytest = "^8.3.4"
+poethepoet = "^0.31.1"
+codespell = "^2.3.0"
+semgrep = "^1.99.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.plugins.pytest11]
+pytest_mergify = "pytest_mergify"
+
+[tool.poe]
+include = ["poe.toml"]
+
+[tool.mypy]
+strict = true
+warn_unreachable = true
+files = ["pytest_mergify", "tests"]
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = [
+  "pytest_opentelemetry.*"
+]
+ignore_missing_imports = true
