@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
-require "rspec_mergify"
-require "webmock/rspec"
-require "timecop"
+require 'rspec_mergify'
+require 'webmock/rspec'
+require 'timecop'
 
 WebMock.disable_net_connect!
 
