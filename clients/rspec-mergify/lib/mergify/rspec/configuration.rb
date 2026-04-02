@@ -53,11 +53,12 @@ module Mergify
 
             next unless fd&.rerunning_test?(example.id)
 
-            fd.set_test_deadline(example.id)
-            next if fd.test_too_slow?(example.id)
-
+            # Mark as flaky detection candidate (even if too slow to rerun)
             example.metadata[:mergify_flaky_detection] = true
             example.metadata[:mergify_new_test] = true if fd.mode == 'new'
+
+            fd.set_test_deadline(example.id)
+            next if fd.test_too_slow?(example.id)
 
             distinct_outcomes = Set.new
             distinct_outcomes.add(example.execution_result.status) if example.execution_result.status
