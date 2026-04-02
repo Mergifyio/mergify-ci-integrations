@@ -224,6 +224,45 @@ RSpec.describe Mergify::RSpec::Formatter do
       end
     end
 
+    context 'with flaky detection metadata' do
+      it 'sets cicd.test.flaky_detection when metadata is true' do
+        example.metadata[:mergify_flaky_detection] = true
+        formatter.example_finished(notification)
+        span = exporter.finished_spans.find { |s| s.name == example.id }
+        expect(span.attributes['cicd.test.flaky_detection']).to be(true)
+      end
+
+      it 'sets cicd.test.new when metadata is true' do
+        example.metadata[:mergify_new_test] = true
+        formatter.example_finished(notification)
+        span = exporter.finished_spans.find { |s| s.name == example.id }
+        expect(span.attributes['cicd.test.new']).to be(true)
+      end
+
+      it 'sets cicd.test.rerun_count from metadata' do
+        example.metadata[:mergify_rerun_count] = 5
+        formatter.example_finished(notification)
+        span = exporter.finished_spans.find { |s| s.name == example.id }
+        expect(span.attributes['cicd.test.rerun_count']).to eq(5)
+      end
+
+      it 'sets cicd.test.flaky when metadata is true' do
+        example.metadata[:mergify_flaky] = true
+        formatter.example_finished(notification)
+        span = exporter.finished_spans.find { |s| s.name == example.id }
+        expect(span.attributes['cicd.test.flaky']).to be(true)
+      end
+
+      it 'does not set flaky attributes when metadata is nil' do
+        formatter.example_finished(notification)
+        span = exporter.finished_spans.find { |s| s.name == example.id }
+        expect(span.attributes).not_to have_key('cicd.test.flaky_detection')
+        expect(span.attributes).not_to have_key('cicd.test.new')
+        expect(span.attributes).not_to have_key('cicd.test.rerun_count')
+        expect(span.attributes).not_to have_key('cicd.test.flaky')
+      end
+    end
+
     context 'with correct span attributes' do
       it 'sets test.scope attribute' do
         formatter.example_finished(notification)

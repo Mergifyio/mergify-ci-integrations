@@ -281,6 +281,87 @@ RSpec.describe Mergify::RSpec::FlakyDetector do
     end
   end
 
+  describe 'rerun_count tracking across multiple reruns' do
+    before { stub_context_request }
+
+    let(:detector) do
+      d = described_class.new(token: token, url: url, full_repository_name: full_repository_name, mode: 'new')
+      d.prepare_for_session(['./spec/new_spec.rb[1:1]'])
+      d
+    end
+
+    let(:test_id) { './spec/new_spec.rb[1:1]' }
+
+    it 'counts initial run as rerun_count 1' do
+      detector.fill_metrics_from_report(test_id, 'setup', 0.0, :passed)
+      detector.fill_metrics_from_report(test_id, 'call', 0.1, :passed)
+      detector.fill_metrics_from_report(test_id, 'teardown', 0.0, :passed)
+
+      metrics = detector.test_metrics(test_id)
+      expect(metrics.rerun_count).to eq(1)
+    end
+
+    it 'increments rerun_count on each subsequent call phase' do
+      detector.fill_metrics_from_report(test_id, 'setup', 0.0, :passed)
+      detector.fill_metrics_from_report(test_id, 'call', 0.1, :passed)
+      detector.fill_metrics_from_report(test_id, 'teardown', 0.0, :passed)
+
+      # Simulate 4 reruns (only call phase needed per rerun)
+      4.times { detector.fill_metrics_from_report(test_id, 'call', 0.1, :passed) }
+
+      metrics = detector.test_metrics(test_id)
+      expect(metrics.rerun_count).to eq(5) # 1 initial + 4 reruns
+    end
+
+    it 'accumulates total_duration across all phases and reruns' do
+      detector.fill_metrics_from_report(test_id, 'setup', 0.1, :passed)
+      detector.fill_metrics_from_report(test_id, 'call', 0.2, :passed)
+      detector.fill_metrics_from_report(test_id, 'teardown', 0.1, :passed)
+
+      3.times { detector.fill_metrics_from_report(test_id, 'call', 0.2, :passed) }
+
+      metrics = detector.test_metrics(test_id)
+      # 0.1 + 0.2 + 0.1 + (3 * 0.2) = 1.0
+      expect(metrics.total_duration).to be_within(0.001).of(1.0)
+    end
+
+    it 'only sets initial_call_duration from the first call' do
+      detector.fill_metrics_from_report(test_id, 'setup', 0.0, :passed)
+      detector.fill_metrics_from_report(test_id, 'call', 0.5, :passed)
+      detector.fill_metrics_from_report(test_id, 'teardown', 0.0, :passed)
+
+      detector.fill_metrics_from_report(test_id, 'call', 0.9, :passed)
+
+      metrics = detector.test_metrics(test_id)
+      expect(metrics.initial_call_duration).to eq(0.5)
+    end
+
+    it 'triggers last_rerun_for_test? at max_test_execution_count via fill_metrics' do
+      detector.fill_metrics_from_report(test_id, 'setup', 0.001, :passed)
+      detector.fill_metrics_from_report(test_id, 'call', 0.001, :passed)
+      detector.fill_metrics_from_report(test_id, 'teardown', 0.001, :passed)
+      detector.set_test_deadline(test_id)
+
+      # max_test_execution_count is 10, we already have 1
+      9.times { detector.fill_metrics_from_report(test_id, 'call', 0.001, :passed) }
+
+      expect(detector.test_metrics(test_id).rerun_count).to eq(10)
+      expect(detector.last_rerun_for_test?(test_id)).to be(true)
+    end
+
+    it 'does not trigger last_rerun_for_test? before max count' do
+      detector.fill_metrics_from_report(test_id, 'setup', 0.001, :passed)
+      detector.fill_metrics_from_report(test_id, 'call', 0.001, :passed)
+      detector.fill_metrics_from_report(test_id, 'teardown', 0.001, :passed)
+      detector.set_test_deadline(test_id)
+
+      8.times { detector.fill_metrics_from_report(test_id, 'call', 0.001, :passed) }
+
+      expect(detector.test_metrics(test_id).rerun_count).to eq(9)
+      expect(detector.last_rerun_for_test?(test_id)).to be(false)
+    end
+  end
+
   describe '#last_rerun_for_test?' do
     before { stub_context_request }
 
