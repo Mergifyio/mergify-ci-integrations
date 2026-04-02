@@ -16,6 +16,16 @@ module Mergify
           # Add formatter when in CI
           config.add_formatter(Mergify::RSpec::Formatter) if Utils.in_ci?
 
+          # Flaky detection: prepare session with all example IDs
+          config.before(:suite) do
+            ci = Mergify::RSpec.ci_insights
+            fd = ci&.flaky_detector
+            if fd
+              all_ids = ::RSpec.world.example_groups.flat_map(&:descendants).flat_map(&:examples).map(&:id)
+              fd.prepare_for_session(all_ids)
+            end
+          end
+
           # Quarantine: mark tests before execution
           config.before(:each) do |example|
             ci = Mergify::RSpec.ci_insights
@@ -31,6 +41,15 @@ module Mergify
             fd = ci&.flaky_detector
 
             example.run
+
+            # Feed metrics from the initial run so the detector can evaluate
+            if fd
+              run_time = example.execution_result.run_time || 0.0
+              status = example.execution_result.status
+              fd.fill_metrics_from_report(example.id, 'setup', 0.0, status)
+              fd.fill_metrics_from_report(example.id, 'call', run_time, status)
+              fd.fill_metrics_from_report(example.id, 'teardown', 0.0, status)
+            end
 
             next unless fd&.rerunning_test?(example.id)
 
