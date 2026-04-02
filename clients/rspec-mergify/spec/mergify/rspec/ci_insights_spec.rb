@@ -155,19 +155,125 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
         expect(insights.exporter).to be_a(OpenTelemetry::SDK::Trace::Export::InMemorySpanExporter)
       end
 
-      it 'has nil flaky_detector' do
+      it 'has nil flaky_detector when flag is not set' do
         insights = described_class.new
         expect(insights.flaky_detector).to be_nil
       end
 
-      it 'has nil quarantined_tests' do
+      it 'has nil quarantined_tests without branch_name' do
         insights = described_class.new
         expect(insights.quarantined_tests).to be_nil
       end
 
-      it 'returns false for mark_test_as_quarantined_if_needed' do
+      it 'returns false for mark_test_as_quarantined_if_needed without quarantine' do
         insights = described_class.new
         expect(insights.mark_test_as_quarantined_if_needed('some/example/id')).to be(false)
+      end
+    end
+
+    describe 'when in CI with flaky detection enabled' do
+      before do
+        clear_ci_env
+        allow(Mergify::RSpec::Utils).to receive_messages(in_ci?: true, repository_name: 'owner/repo')
+        allow(Mergify::RSpec::Utils).to receive(:env_truthy?).with('_MERGIFY_TEST_NEW_FLAKY_DETECTION').and_return(true)
+        ENV['MERGIFY_TOKEN'] = 'test-token'
+        ENV['_RSPEC_MERGIFY_TEST'] = 'true'
+
+        empty = OpenTelemetry::SDK::Resources::Resource.create({})
+        allow(Mergify::RSpec::Resources::CI).to receive(:detect).and_return(empty)
+        allow(Mergify::RSpec::Resources::Git).to receive(:detect).and_return(empty)
+        allow(Mergify::RSpec::Resources::GitHubActions).to receive(:detect).and_return(empty)
+        allow(Mergify::RSpec::Resources::Jenkins).to receive(:detect).and_return(empty)
+        allow(Mergify::RSpec::Resources::Mergify).to receive(:detect).and_return(empty)
+        allow(Mergify::RSpec::Resources::RSpec).to receive(:detect).and_return(empty)
+      end
+
+      it 'loads flaky_detector when API succeeds' do
+        stub_request(:get, 'https://api.mergify.com/v1/ci/owner/repositories/repo/flaky-detection-context')
+          .to_return(
+            status: 200,
+            body: {
+              budget_ratio_for_new_tests: 0.1,
+              budget_ratio_for_unhealthy_tests: 0.2,
+              existing_test_names: ['./spec/old_spec.rb[1:1]'],
+              existing_tests_mean_duration_ms: 100,
+              unhealthy_test_names: [],
+              max_test_execution_count: 10,
+              max_test_name_length: 500,
+              min_budget_duration_ms: 5000,
+              min_test_execution_count: 3
+            }.to_json,
+            headers: { 'Content-Type' => 'application/json' }
+          )
+
+        insights = described_class.new
+        expect(insights.flaky_detector).to be_a(Mergify::RSpec::FlakyDetector)
+        expect(insights.flaky_detector_error_message).to be_nil
+      end
+
+      it 'sets error message when API fails' do
+        stub_request(:get, 'https://api.mergify.com/v1/ci/owner/repositories/repo/flaky-detection-context')
+          .to_return(status: 500, body: 'Internal Server Error')
+
+        insights = described_class.new
+        expect(insights.flaky_detector).to be_nil
+        expect(insights.flaky_detector_error_message).to include('Could not load flaky detector')
+      end
+
+      it 'sets error message when connection times out' do
+        stub_request(:get, 'https://api.mergify.com/v1/ci/owner/repositories/repo/flaky-detection-context')
+          .to_timeout
+
+        insights = described_class.new
+        expect(insights.flaky_detector).to be_nil
+        expect(insights.flaky_detector_error_message).to include('Could not load flaky detector')
+      end
+    end
+
+    describe 'when in CI with branch_name available' do
+      before do
+        clear_ci_env
+        allow(Mergify::RSpec::Utils).to receive_messages(in_ci?: true, repository_name: 'owner/repo')
+        ENV['MERGIFY_TOKEN'] = 'test-token'
+        ENV['_RSPEC_MERGIFY_TEST'] = 'true'
+
+        empty = OpenTelemetry::SDK::Resources::Resource.create({})
+        branch_resource = OpenTelemetry::SDK::Resources::Resource.create('vcs.ref.head.name' => 'main')
+        allow(Mergify::RSpec::Resources::CI).to receive(:detect).and_return(empty)
+        allow(Mergify::RSpec::Resources::Git).to receive(:detect).and_return(branch_resource)
+        allow(Mergify::RSpec::Resources::GitHubActions).to receive(:detect).and_return(empty)
+        allow(Mergify::RSpec::Resources::Jenkins).to receive(:detect).and_return(empty)
+        allow(Mergify::RSpec::Resources::Mergify).to receive(:detect).and_return(empty)
+        allow(Mergify::RSpec::Resources::RSpec).to receive(:detect).and_return(empty)
+      end
+
+      it 'loads quarantined_tests' do
+        stub_request(:get, 'https://api.mergify.com/v1/ci/owner/repositories/repo/quarantines')
+          .with(query: { branch: 'main' })
+          .to_return(
+            status: 200,
+            body: { quarantined_tests: [{ test_name: './spec/foo_spec.rb[1:1]' }] }.to_json,
+            headers: { 'Content-Type' => 'application/json' }
+          )
+
+        insights = described_class.new
+        expect(insights.branch_name).to eq('main')
+        expect(insights.quarantined_tests).to be_a(Mergify::RSpec::Quarantine)
+        expect(insights.quarantined_tests.include?('./spec/foo_spec.rb[1:1]')).to be true
+      end
+
+      it 'returns true for mark_test_as_quarantined_if_needed with quarantined test' do
+        stub_request(:get, 'https://api.mergify.com/v1/ci/owner/repositories/repo/quarantines')
+          .with(query: { branch: 'main' })
+          .to_return(
+            status: 200,
+            body: { quarantined_tests: [{ test_name: './spec/foo_spec.rb[1:1]' }] }.to_json,
+            headers: { 'Content-Type' => 'application/json' }
+          )
+
+        insights = described_class.new
+        expect(insights.mark_test_as_quarantined_if_needed('./spec/foo_spec.rb[1:1]')).to be true
+        expect(insights.mark_test_as_quarantined_if_needed('./spec/bar_spec.rb[1:1]')).to be false
       end
     end
   end
