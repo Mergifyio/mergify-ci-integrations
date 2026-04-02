@@ -25,3 +25,6 @@ RSpec/NestedGroups:
 RSpec/SpecFilePathFormat:
   CustomTransform:
     GitHubActions: github_actions
+
+RSpec/MultipleMemoizedHelpers:
+  Max: 7
