@@ -3,7 +3,7 @@
 module Mergify
   module RSpec
     VERSION = begin
-      v = `git describe --tags --match 'v*' 2>/dev/null`.strip.delete_prefix('v')
+      v = `git describe --tags 2>/dev/null`.strip.delete_prefix('v')
       if v.empty?
         '0.0.0.dev'
       elsif v.include?('-')
