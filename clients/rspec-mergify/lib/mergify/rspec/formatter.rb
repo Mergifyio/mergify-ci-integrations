@@ -196,6 +196,13 @@ module Mergify
           @ci_insights.tracer_provider.force_flush
         rescue StandardError => e
           output.puts "Error while exporting traces: #{e.message}"
+          output.puts ''
+          output.puts 'Common issues:'
+          output.puts '  - Your MERGIFY_TOKEN might not be set or could be invalid'
+          output.puts '  - CI Insights might not be enabled for this repository'
+          output.puts '  - There might be a network connectivity issue with the Mergify API'
+          output.puts ''
+          output.puts 'Documentation: https://docs.mergify.com/ci-insights/test-frameworks/'
         end
 
         begin
