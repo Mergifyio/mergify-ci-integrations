@@ -56,7 +56,7 @@ module Mergify
         end
       end
 
-      attr_reader :tests_to_process, :budget
+      attr_reader :tests_to_process, :budget, :mode
 
       def initialize(token:, url:, full_repository_name:, mode:)
         @token = token

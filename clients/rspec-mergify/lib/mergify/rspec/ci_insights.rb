@@ -40,9 +40,11 @@ module Mergify
       end
       # rubocop:enable Metrics/MethodLength
 
-      # Returns false for now — quarantine not yet implemented.
-      def mark_test_as_quarantined_if_needed(_example_id) # rubocop:disable Naming/PredicateMethod
-        false
+      def mark_test_as_quarantined_if_needed(example_id) # rubocop:disable Naming/PredicateMethod
+        return false unless @quarantined_tests&.include?(example_id)
+
+        @quarantined_tests.mark_as_used(example_id)
+        true
       end
 
       private
@@ -137,16 +139,34 @@ module Mergify
       end
       # rubocop:enable Metrics/MethodLength
 
+      # rubocop:disable Metrics/MethodLength
       def load_flaky_detector
-        require_relative 'flaky_detector'
-      rescue LoadError
-        # Not yet implemented — will be added in Task 7
+        return unless @token && @repo_name
+        return unless Utils.env_truthy?('_MERGIFY_TEST_NEW_FLAKY_DETECTION')
+
+        require_relative 'flaky_detection'
+        mode = @branch_name ? 'new' : 'unhealthy'
+        @flaky_detector = FlakyDetector.new(
+          token: @token,
+          url: @api_url,
+          full_repository_name: @repo_name,
+          mode: mode
+        )
+      rescue StandardError => e
+        @flaky_detector_error_message = "Could not load flaky detector: #{e.message}"
       end
+      # rubocop:enable Metrics/MethodLength
 
       def load_quarantine
+        return unless @token && @repo_name && @branch_name
+
         require_relative 'quarantine'
-      rescue LoadError
-        # Not yet implemented — will be added in Task 6
+        @quarantined_tests = Quarantine.new(
+          api_url: @api_url,
+          token: @token,
+          repo_name: @repo_name,
+          branch_name: @branch_name
+        )
       end
     end
     # rubocop:enable Metrics/ClassLength
