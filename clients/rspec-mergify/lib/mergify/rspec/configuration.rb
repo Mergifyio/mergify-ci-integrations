@@ -75,7 +75,13 @@ module Mergify
               end
 
               example.run
-              distinct_outcomes.add(example.execution_result.status)
+
+              # Feed rerun metrics so budget/deadline tracking stays accurate
+              rerun_time = example.execution_result.run_time || 0.0
+              rerun_status = example.execution_result.status
+              fd.fill_metrics_from_report(example.id, 'call', rerun_time, rerun_status)
+
+              distinct_outcomes.add(rerun_status)
               rerun_count += 1
             end
 
