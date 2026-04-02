@@ -21,3 +21,7 @@ RSpec/MultipleExpectations:
 
 RSpec/NestedGroups:
   Max: 4
+
+RSpec/SpecFilePathFormat:
+  CustomTransform:
+    GitHubActions: github_actions
