@@ -18,10 +18,10 @@ RSpec.describe Mergify::RSpec::SynchronousBatchSpanProcessor do
   end
 
   describe '#on_finish' do
-    it 'queues sampled spans' do
+    it 'queues sampled spans as span data' do
       span = build_span(sampled: true)
       processor.on_finish(span)
-      expect(processor.instance_variable_get(:@queue)).to contain_exactly(span)
+      expect(processor.instance_variable_get(:@queue)).to contain_exactly(span.to_span_data)
     end
 
     it 'skips unsampled spans' do
@@ -35,14 +35,16 @@ RSpec.describe Mergify::RSpec::SynchronousBatchSpanProcessor do
     it 'exports all queued spans and clears the queue' do
       span1 = build_span(sampled: true)
       span2 = build_span(sampled: true)
-      allow(exporter).to receive(:export).with([span1, span2]).and_return(OpenTelemetry::SDK::Trace::Export::SUCCESS)
+      span_data1 = span1.to_span_data
+      span_data2 = span2.to_span_data
+      allow(exporter).to receive(:export).with([span_data1, span_data2]).and_return(OpenTelemetry::SDK::Trace::Export::SUCCESS)
 
       processor.on_finish(span1)
       processor.on_finish(span2)
       result = processor.force_flush
 
       expect(result).to eq(OpenTelemetry::SDK::Trace::Export::SUCCESS)
-      expect(exporter).to have_received(:export).with([span1, span2])
+      expect(exporter).to have_received(:export).with([span_data1, span_data2])
       expect(processor.instance_variable_get(:@queue)).to be_empty
     end
 

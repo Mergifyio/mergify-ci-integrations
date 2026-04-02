@@ -192,8 +192,17 @@ module Mergify
       def flush_and_shutdown
         return unless @ci_insights&.tracer_provider
 
-        @ci_insights.tracer_provider.force_flush
-        @ci_insights.tracer_provider.shutdown
+        begin
+          @ci_insights.tracer_provider.force_flush
+        rescue StandardError => e
+          output.puts "Error while exporting traces: #{e.message}"
+        end
+
+        begin
+          @ci_insights.tracer_provider.shutdown
+        rescue StandardError => e
+          output.puts "Error while shutting down the tracer: #{e.message}"
+        end
       end
     end
     # rubocop:enable Metrics/ClassLength

@@ -18,7 +18,7 @@ module Mergify
       def on_finish(span)
         return unless span.context.trace_flags.sampled?
 
-        @queue << span
+        @queue << span.to_span_data
       end
 
       def force_flush(timeout: nil) # rubocop:disable Lint/UnusedMethodArgument
