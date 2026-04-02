@@ -8,7 +8,7 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
     let(:exporter) { OpenTelemetry::SDK::Trace::Export::InMemorySpanExporter.new }
     let(:processor) { described_class.new(exporter) }
 
-    def build_span(sampled: true) # rubocop:disable Metrics/MethodLength
+    def build_span(sampled: true)
       trace_flags = sampled ? OpenTelemetry::Trace::TraceFlags::SAMPLED : OpenTelemetry::Trace::TraceFlags::DEFAULT
       span_context = OpenTelemetry::Trace::SpanContext.new(
         trace_id: Random.bytes(16),
