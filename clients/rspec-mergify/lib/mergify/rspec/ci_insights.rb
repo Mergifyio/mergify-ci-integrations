@@ -115,7 +115,8 @@ module Mergify
 
       def extract_branch_name(resource)
         attrs = resource.attribute_enumerator.to_h
-        attrs['vcs.ref.base.name'] || attrs['vcs.ref.head.name']
+        @base_branch_name = attrs['vcs.ref.base.name']
+        @base_branch_name || attrs['vcs.ref.head.name']
       end
 
       # rubocop:disable Metrics/MethodLength
@@ -145,7 +146,7 @@ module Mergify
         return unless Utils.env_truthy?('_MERGIFY_TEST_NEW_FLAKY_DETECTION')
 
         require_relative 'flaky_detection'
-        mode = @branch_name ? 'new' : 'unhealthy'
+        mode = @base_branch_name ? 'new' : 'unhealthy'
         @flaky_detector = FlakyDetector.new(
           token: @token,
           url: @api_url,
