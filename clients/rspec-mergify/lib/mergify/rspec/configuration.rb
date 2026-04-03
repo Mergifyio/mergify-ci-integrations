@@ -71,7 +71,13 @@ module Mergify
               example.instance_variable_set(:@exception, nil)
               if example.example_group_instance
                 memoized = example.example_group_instance.instance_variable_get(:@__memoized)
-                memoized&.clear
+                if memoized.respond_to?(:clear)
+                  memoized.clear
+                elsif memoized
+                  # RSpec >= 3.12 uses ThreadsafeMemoized which wraps an internal hash
+                  inner = memoized.instance_variable_get(:@memoized)
+                  inner&.clear
+                end
               end
 
               example.run
