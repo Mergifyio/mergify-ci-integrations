@@ -64,6 +64,10 @@ module Mergify
             distinct_outcomes.add(example.execution_result.status) if example.execution_result.status
 
             rerun_count = 0
+            # Use a null reporter to prevent reruns from being reported as
+            # individual failures. The final outcome is set after the loop.
+            null_reporter = ::RSpec::Core::NullReporter
+
             until example.metadata[:is_last_rerun]
               example.metadata[:is_last_rerun] = fd.last_rerun_for_test?(example.id)
 
@@ -80,7 +84,7 @@ module Mergify
                 end
               end
 
-              example.run
+              example.run(example.example_group_instance, null_reporter)
 
               # Feed rerun metrics so budget/deadline tracking stays accurate
               rerun_time = example.execution_result.run_time || 0.0
