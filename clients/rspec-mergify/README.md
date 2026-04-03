@@ -1,6 +1,6 @@
 # rspec-mergify
 
-RSpec plugin for [Mergify CI Insights](https://docs.mergify.com/ci-insights/).
+RSpec plugin for [Mergify Test Insights](https://docs.mergify.com/ci-insights/).
 
 ## Features
 

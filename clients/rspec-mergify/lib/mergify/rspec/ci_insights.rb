@@ -13,7 +13,7 @@ require_relative 'resources/rspec'
 
 module Mergify
   module RSpec
-    # Central orchestrator for CI Insights: sets up OpenTelemetry tracing,
+    # Central orchestrator for Mergify Test Insights: sets up OpenTelemetry tracing,
     # manages the tracer provider, and coordinates flaky detection and quarantine.
     # rubocop:disable Metrics/ClassLength
     class CIInsights

@@ -5,7 +5,7 @@ require 'opentelemetry-sdk'
 
 module Mergify
   module RSpec
-    # RSpec formatter that creates OpenTelemetry spans for CI Insights and
+    # RSpec formatter that creates OpenTelemetry spans for Mergify Test Insights and
     # prints a terminal report. It is purely observational and does not modify
     # test execution.
     # rubocop:disable Metrics/ClassLength
@@ -154,7 +154,7 @@ module Mergify
         output.puts '--- Mergify CI ---'
 
         unless @ci_insights
-          output.puts 'Mergify CI Insights is not configured.'
+          output.puts 'Mergify Test Insights is not configured.'
           return
         end
 
@@ -210,7 +210,7 @@ module Mergify
         output.puts ''
         output.puts 'Common issues:'
         output.puts '  - Your MERGIFY_TOKEN might not be set or could be invalid'
-        output.puts '  - CI Insights might not be enabled for this repository'
+        output.puts '  - Mergify Test Insights might not be enabled for this repository'
         output.puts '  - There might be a network connectivity issue with the Mergify API'
         output.puts ''
         output.puts 'Documentation: https://docs.mergify.com/ci-insights/test-frameworks/'

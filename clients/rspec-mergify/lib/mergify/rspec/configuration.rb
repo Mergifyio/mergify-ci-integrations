@@ -5,7 +5,7 @@ require 'set'
 module Mergify
   module RSpec
     # Registers RSpec hooks for quarantine and flaky detection, and adds the
-    # CI Insights formatter when running inside CI.
+    # Mergify Test Insights formatter when running inside CI.
     module Configuration
       module_function
 
@@ -107,7 +107,7 @@ module Mergify
 
             example.instance_variable_set(:@exception, nil)
             example.execution_result.status = :pending
-            example.execution_result.pending_message = 'Test is quarantined from Mergify CI Insights'
+            example.execution_result.pending_message = 'Test is quarantined from Mergify Test Insights'
           end
         end
       end

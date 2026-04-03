@@ -123,7 +123,7 @@ module SandboxHelper
     if example.metadata[:mergify_quarantined] && example.exception
       example.instance_variable_set(:@exception, nil)
       example.execution_result.status = :pending
-      example.execution_result.pending_message = 'Test is quarantined from Mergify CI Insights'
+      example.execution_result.pending_message = 'Test is quarantined from Mergify Test Insights'
     end
 
     # Notify formatter of finish based on status
