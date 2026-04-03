@@ -108,7 +108,10 @@ module Mergify
               ENV.fetch(env_or_callable, nil)
             end
 
-          result[attr] = value.public_send(cast) unless value.nil?
+          next if value.nil?
+          next if value.respond_to?(:empty?) && value.empty?
+
+          result[attr] = value.public_send(cast)
         end
       end
 
