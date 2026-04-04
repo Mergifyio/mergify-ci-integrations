@@ -79,7 +79,8 @@ RSpec.describe Mergify::RSpec::Formatter do
   def build_failed_execution_result(exception_message: 'expected true, got false')
     result = instance_double(RSpec::Core::Example::ExecutionResult)
     exception = instance_double(Exception)
-    allow(exception).to receive_messages(message: exception_message, class: RSpec::Expectations::ExpectationNotMetError)
+    allow(exception).to receive_messages(message: exception_message, class: RSpec::Expectations::ExpectationNotMetError,
+                                         backtrace: ['spec/foo_spec.rb:42:in `block`'])
     allow(result).to receive_messages(status: :failed, exception: exception)
     result
   end

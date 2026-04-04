@@ -134,6 +134,7 @@ module Mergify
       def set_error_attributes(span, exception)
         span.set_attribute('exception.type', exception.class.to_s)
         span.set_attribute('exception.message', exception.message)
+        span.set_attribute('exception.stacktrace', exception.backtrace&.join("\n") || '')
         span.status = OpenTelemetry::Trace::Status.error(exception.message)
       end
 
