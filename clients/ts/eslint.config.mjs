@@ -1,6 +1,7 @@
 import js from '@eslint/js';
 import tsEslint from '@typescript-eslint/eslint-plugin';
 import tsParser from '@typescript-eslint/parser';
+import globals from 'globals';
 
 /** @type {import('eslint').Linter.FlatConfig[]} */
 export default [
@@ -11,6 +12,9 @@ export default [
       parser: tsParser,
       parserOptions: {
         project: ['./tsconfig.json'],
+      },
+      globals: {
+        ...globals.node,
       },
     },
     plugins: {

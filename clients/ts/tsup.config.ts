@@ -6,4 +6,11 @@ export default defineConfig({
   dts: true,
   clean: true,
   sourcemap: true,
+  external: [
+    '@opentelemetry/api',
+    '@opentelemetry/core',
+    '@opentelemetry/sdk-trace-base',
+    '@opentelemetry/exporter-trace-otlp-proto',
+    '@opentelemetry/resources',
+  ],
 });

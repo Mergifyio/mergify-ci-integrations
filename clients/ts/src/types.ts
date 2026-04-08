@@ -31,6 +31,13 @@ export interface TestCaseResult {
   flaky: boolean;
 }
 
+export interface MergifyReporterOptions {
+  apiUrl?: string;
+  token?: string;
+  /** Inject a custom SpanExporter (useful for testing). Bypasses CI and token checks. */
+  exporter?: import('@opentelemetry/sdk-trace-base').SpanExporter;
+}
+
 export interface TestRunSession {
   /** 16-char hex ID (8 random bytes), matching Mergify CI Insights API format */
   testRunId: string;
