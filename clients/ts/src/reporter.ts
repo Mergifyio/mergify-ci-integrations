@@ -1,6 +1,9 @@
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { type Span, SpanStatusCode, context, trace } from '@opentelemetry/api';
 import { W3CTraceContextPropagator } from '@opentelemetry/core';
 import type { Reporter, TestCase, TestModule, Vitest } from 'vitest/node';
+import { fetchQuarantineList } from './quarantine.js';
 import type { TracingContext } from './tracing.js';
 import { createTracing } from './tracing.js';
 import type { MergifyReporterOptions, TestCaseResult, TestRunSession } from './types.js';
@@ -28,6 +31,9 @@ export class MergifyReporter implements Reporter {
   private sessionSpan: Span | undefined;
   private options: MergifyReporterOptions;
   private _testRunId: string | undefined;
+  private quarantineList: Set<string> = new Set();
+  private quarantinedCaught: string[] = [];
+  private _quarantinePromise: Promise<void> | undefined;
 
   constructor(options?: MergifyReporterOptions) {
     this.options = options ?? {};
@@ -64,9 +70,60 @@ export class MergifyReporter implements Reporter {
     }
 
     this._testRunId = testRunId;
+
+    // If quarantine list was provided via options (for testing), use it directly
+    if (this.options.quarantineList) {
+      this.quarantineList = new Set(this.options.quarantineList);
+      this._configureRunner(vitest);
+    } else if (this.tracing && token && repoName) {
+      const attrs = this.tracing.resource.attributes;
+      const branch = (attrs['vcs.ref.base.name'] ?? attrs['vcs.ref.head.name']) as
+        | string
+        | undefined;
+      if (branch) {
+        this._initQuarantine(vitest, { apiUrl, token, repoName, branch });
+      }
+    }
   }
 
-  onTestRunStart(): void {
+  private _initQuarantine(
+    vitest: Vitest,
+    config: { apiUrl: string; token: string; repoName: string; branch: string }
+  ): void {
+    // Fetch is async but onInit is sync — we use a top-level await workaround
+    // by storing the promise and resolving it in onTestRunStart
+    const log = (msg: string) => vitest.logger.log(msg);
+    this._quarantinePromise = fetchQuarantineList(config, log).then((list) => {
+      this.quarantineList = list;
+      if (list.size > 0) {
+        this._configureRunner(vitest);
+      }
+    });
+  }
+
+  private _configureRunner(vitest: Vitest): void {
+    // Provide quarantine list to workers via ProvidedContext
+    vitest.provide('mergify:quarantine', [...this.quarantineList]);
+
+    // Auto-configure the custom runner if not already set
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const mergifyRunner = resolve(dir, 'runner.js');
+    if (!vitest.config.runner) {
+      vitest.config.runner = mergifyRunner;
+    } else if (vitest.config.runner !== mergifyRunner) {
+      vitest.logger.log(
+        `[@mergifyio/vitest] Custom runner already configured (${vitest.config.runner}), quarantine may not work`
+      );
+    }
+  }
+
+  async onTestRunStart(): Promise<void> {
+    // Wait for quarantine list to be fetched
+    if (this._quarantinePromise) {
+      await this._quarantinePromise;
+      this._quarantinePromise = undefined;
+    }
+
     const testRunId = this._testRunId ?? generateTestRunId();
 
     this.session = {
@@ -110,6 +167,12 @@ export class MergifyReporter implements Reporter {
 
     const diagnostic = testCase.diagnostic();
     const module = testCase.module;
+    const meta = testCase.meta() as Record<string, unknown>;
+    const isQuarantined = meta.quarantined === true;
+
+    if (isQuarantined) {
+      this.quarantinedCaught.push(testCase.fullName);
+    }
 
     const testCaseResult: TestCaseResult = {
       filepath: module.relativeModuleId,
@@ -154,6 +217,7 @@ export class MergifyReporter implements Reporter {
             'code.line.number': testCaseResult.lineno,
             'test.scope': 'case',
             'test.case.result.status': testCaseResult.status,
+            'cicd.test.quarantined': isQuarantined,
           },
           startTime: startTimeMs,
         },
@@ -187,6 +251,28 @@ export class MergifyReporter implements Reporter {
 
     this.session.endTime = Date.now();
     this.session.status = reason;
+
+    // Print quarantine summary
+    if (this.quarantineList.size > 0) {
+      const logger = this.vitest?.logger;
+      logger?.log('');
+      logger?.log('[@mergifyio/vitest] Quarantine report:');
+      logger?.log(`  Quarantined tests fetched: ${this.quarantineList.size}`);
+
+      if (this.quarantinedCaught.length > 0) {
+        logger?.log(
+          `  Quarantined tests caught (failures absorbed): ${this.quarantinedCaught.length}`
+        );
+        for (const name of this.quarantinedCaught) {
+          logger?.log(`    - ${name}`);
+        }
+      }
+
+      const unusedCount = this.quarantineList.size - this.quarantinedCaught.length;
+      if (unusedCount > 0) {
+        logger?.log(`  Unused quarantine entries: ${unusedCount}`);
+      }
+    }
 
     if (this.sessionSpan) {
       if (reason === 'failed') {

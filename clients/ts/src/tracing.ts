@@ -1,5 +1,6 @@
 import type { Tracer } from '@opentelemetry/api';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
+import type { Resource } from '@opentelemetry/resources';
 import {
   BasicTracerProvider,
   ConsoleSpanExporter,
@@ -25,6 +26,7 @@ export interface TracingContext {
   tracer: Tracer;
   tracerProvider: BasicTracerProvider;
   exporter: SpanExporter;
+  resource: Resource;
   /** Whether the provider should be shut down on test run end. */
   ownsExporter: boolean;
 }
@@ -110,5 +112,5 @@ export function createTracing(config: TracingConfig): TracingContext | null {
 
   const tracer = tracerProvider.getTracer('@mergifyio/vitest');
 
-  return { tracer, tracerProvider, exporter, ownsExporter };
+  return { tracer, tracerProvider, exporter, resource, ownsExporter };
 }

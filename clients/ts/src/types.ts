@@ -36,6 +36,8 @@ export interface MergifyReporterOptions {
   token?: string;
   /** Inject a custom SpanExporter (useful for testing). Bypasses CI and token checks. */
   exporter?: import('@opentelemetry/sdk-trace-base').SpanExporter;
+  /** Inject a quarantine list directly (useful for testing). Bypasses API fetch. */
+  quarantineList?: string[];
 }
 
 export interface TestRunSession {
