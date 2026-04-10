@@ -3,6 +3,11 @@ import { fileURLToPath } from 'node:url';
 import { type Span, SpanStatusCode, context, trace } from '@opentelemetry/api';
 import { W3CTraceContextPropagator } from '@opentelemetry/core';
 import type { Reporter, TestCase, TestModule, Vitest } from 'vitest/node';
+import {
+  type FlakyDetectionContext,
+  type FlakyDetectionMode,
+  fetchFlakyDetectionContext,
+} from './flaky-detection.js';
 import { fetchQuarantineList } from './quarantine.js';
 import type { TracingContext } from './tracing.js';
 import { createTracing } from './tracing.js';
@@ -34,6 +39,15 @@ export class MergifyReporter implements Reporter {
   private quarantineList: Set<string> = new Set();
   private quarantinedCaught: string[] = [];
   private _quarantinePromise: Promise<void> | undefined;
+  private flakyContext: FlakyDetectionContext | null = null;
+  private flakyMode: FlakyDetectionMode | null = null;
+  private flakyResults: Array<{
+    name: string;
+    rerunCount: number;
+    flaky: boolean;
+    tooSlow: boolean;
+  }> = [];
+  private _flakyPromise: Promise<void> | undefined;
 
   constructor(options?: MergifyReporterOptions) {
     this.options = options ?? {};
@@ -84,6 +98,22 @@ export class MergifyReporter implements Reporter {
         this._initQuarantine(vitest, { apiUrl, token, repoName, branch });
       }
     }
+
+    // If flaky context was provided via options (for testing), use it directly
+    if (this.options.flakyContext && this.options.flakyMode) {
+      this.flakyContext = this.options.flakyContext;
+      this.flakyMode = this.options.flakyMode;
+      this._configureFlakyDetection(vitest);
+    } else {
+      // Flaky detection
+      const flakyModeEnv = process.env._MERGIFY_TEST_NEW_FLAKY_DETECTION;
+      if (flakyModeEnv === 'new' || flakyModeEnv === 'unhealthy') {
+        this.flakyMode = flakyModeEnv;
+        if (token && repoName) {
+          this._initFlakyDetection(vitest, { apiUrl, token, repoName });
+        }
+      }
+    }
   }
 
   private _initQuarantine(
@@ -99,6 +129,25 @@ export class MergifyReporter implements Reporter {
         this._configureRunner(vitest);
       }
     });
+  }
+
+  private _initFlakyDetection(
+    vitest: Vitest,
+    config: { apiUrl: string; token: string; repoName: string }
+  ): void {
+    const log = (msg: string) => vitest.logger.log(msg);
+    this._flakyPromise = fetchFlakyDetectionContext(config, log).then((ctx) => {
+      if (ctx) {
+        this.flakyContext = ctx;
+        this._configureFlakyDetection(vitest);
+      }
+    });
+  }
+
+  private _configureFlakyDetection(vitest: Vitest): void {
+    vitest.provide('mergify:flakyContext', this.flakyContext);
+    vitest.provide('mergify:flakyMode', this.flakyMode);
+    this._configureRunner(vitest);
   }
 
   private _configureRunner(vitest: Vitest): void {
@@ -118,10 +167,14 @@ export class MergifyReporter implements Reporter {
   }
 
   async onTestRunStart(): Promise<void> {
-    // Wait for quarantine list to be fetched
+    // Wait for async initialization to complete
     if (this._quarantinePromise) {
       await this._quarantinePromise;
       this._quarantinePromise = undefined;
+    }
+    if (this._flakyPromise) {
+      await this._flakyPromise;
+      this._flakyPromise = undefined;
     }
 
     const testRunId = this._testRunId ?? generateTestRunId();
@@ -174,6 +227,15 @@ export class MergifyReporter implements Reporter {
       this.quarantinedCaught.push(testCase.fullName);
     }
 
+    if (meta.flakyDetection === true) {
+      this.flakyResults.push({
+        name: testCase.fullName,
+        rerunCount: (meta.rerunCount as number) ?? 0,
+        flaky: meta.flaky === true,
+        tooSlow: meta.tooSlow === true,
+      });
+    }
+
     const testCaseResult: TestCaseResult = {
       filepath: module.relativeModuleId,
       absoluteFilepath: module.moduleId,
@@ -218,6 +280,12 @@ export class MergifyReporter implements Reporter {
             'test.scope': 'case',
             'test.case.result.status': testCaseResult.status,
             'cicd.test.quarantined': isQuarantined,
+            ...(meta.flakyDetection === true && {
+              'cicd.test.flaky_detection': true,
+              'cicd.test.flaky': meta.flaky === true,
+              'cicd.test.new': meta.isNew === true,
+              'cicd.test.rerun_count': (meta.rerunCount as number) ?? 0,
+            }),
           },
           startTime: startTimeMs,
         },
@@ -271,6 +339,32 @@ export class MergifyReporter implements Reporter {
       const unusedCount = this.quarantineList.size - this.quarantinedCaught.length;
       if (unusedCount > 0) {
         logger?.log(`  Unused quarantine entries: ${unusedCount}`);
+      }
+    }
+
+    // Print flaky detection summary
+    if (this.flakyResults.length > 0 && this.flakyMode) {
+      const logger = this.vitest?.logger;
+      logger?.log('');
+      logger?.log(`[@mergifyio/vitest] Flaky detection report (mode: ${this.flakyMode}):`);
+      logger?.log(`  Tests rerun: ${this.flakyResults.length}`);
+
+      const flakyTests = this.flakyResults.filter((r) => r.flaky);
+      if (flakyTests.length > 0) {
+        logger?.log(`  Flaky tests detected: ${flakyTests.length}`);
+        for (const t of flakyTests) {
+          logger?.log(`    - ${t.name} (reruns: ${t.rerunCount})`);
+        }
+      } else {
+        logger?.log('  Flaky tests detected: 0');
+      }
+
+      const tooSlowTests = this.flakyResults.filter((r) => r.tooSlow);
+      if (tooSlowTests.length > 0) {
+        logger?.log(`  Tests too slow to rerun: ${tooSlowTests.length}`);
+        for (const t of tooSlowTests) {
+          logger?.log(`    - ${t.name}`);
+        }
       }
     }
 

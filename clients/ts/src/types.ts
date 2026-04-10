@@ -38,6 +38,10 @@ export interface MergifyReporterOptions {
   exporter?: import('@opentelemetry/sdk-trace-base').SpanExporter;
   /** Inject a quarantine list directly (useful for testing). Bypasses API fetch. */
   quarantineList?: string[];
+  /** Inject flaky detection context directly (useful for testing). Bypasses API fetch. */
+  flakyContext?: import('./flaky-detection.js').FlakyDetectionContext;
+  /** Flaky detection mode (useful for testing). */
+  flakyMode?: import('./flaky-detection.js').FlakyDetectionMode;
 }
 
 export interface TestRunSession {
