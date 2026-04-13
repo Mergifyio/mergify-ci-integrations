@@ -35,6 +35,8 @@ The plugin activates automatically when running in CI (detected via the `CI` env
 | `MERGIFY_TRACEPARENT` | W3C distributed trace context | — |
 | `MERGIFY_TEST_JOB_NAME` | Mergify test job name | — |
 
+For detailed documentation, see the [official guide](https://docs.mergify.com/ci-insights/test-frameworks/rspec/).
+
 ## Development
 
 ### Prerequisites
