@@ -31,6 +31,8 @@ export default defineConfig({
 Set `MERGIFY_TOKEN` in your CI environment so the reporter can upload test
 traces. Without it, the reporter stays silent and tests run normally.
 
+For detailed documentation, see the [official guide](https://docs.mergify.com/ci-insights/test-frameworks/vitest/).
+
 ## Development
 
 Clone the repo and install dependencies:
