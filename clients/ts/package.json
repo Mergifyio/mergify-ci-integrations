@@ -1,6 +1,6 @@
 {
   "name": "@mergifyio/vitest",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "Vitest reporter for Mergify CI Insights",
   "license": "GPL-3.0-only",
   "type": "module",
@@ -62,5 +62,18 @@
     "eslint": "eslint src tests",
     "format": "biome check --write .",
     "format:check": "biome check ."
-  }
+  },
+  "directories": {
+    "test": "tests"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mergifyio/vitest-mergify.git"
+  },
+  "keywords": ["vitest", "test", "flaky-tests", "testing", "ci"],
+  "author": "Mergify <hello@mergify.com>",
+  "bugs": {
+    "url": "https://github.com/Mergifyio/vitest-mergify/issues"
+  },
+  "homepage": "https://github.com/Mergifyio/vitest-mergify#readme"
 }
