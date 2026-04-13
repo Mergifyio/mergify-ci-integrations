@@ -101,12 +101,7 @@ module Mergify
       # Attributes whose env var is unset or whose callable returns nil are omitted.
       def get_attributes(mapping)
         mapping.each_with_object({}) do |(attr, (cast, env_or_callable)), result|
-          value =
-            if env_or_callable.respond_to?(:call)
-              env_or_callable.call
-            else
-              ENV.fetch(env_or_callable, nil)
-            end
+          value = env_or_callable.respond_to?(:call) ? env_or_callable.call : ENV.fetch(env_or_callable, nil)
 
           next if value.nil?
           next if value.respond_to?(:empty?) && value.empty?
