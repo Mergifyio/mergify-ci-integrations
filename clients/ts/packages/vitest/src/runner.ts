@@ -1,10 +1,10 @@
-import type { Suite, Task, Test } from '@vitest/runner';
-import { VitestTestRunner } from 'vitest/runners';
 import {
   type FlakyDetectionContext,
   type FlakyDetectionMode,
   FlakyDetector,
-} from './flaky-detection.js';
+} from '@mergifyio/ci-core';
+import type { Suite, Task, Test } from '@vitest/runner';
+import { VitestTestRunner } from 'vitest/runners';
 
 export default class MergifyRunner extends VitestTestRunner {
   private quarantinedTests: Set<string>;

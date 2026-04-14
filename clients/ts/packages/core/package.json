@@ -1,0 +1,45 @@
+{
+  "name": "@mergifyio/ci-core",
+  "version": "0.0.0",
+  "description": "Shared core for Mergify CI test framework plugins",
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": ["dist"],
+  "engines": {
+    "node": "^20.0.0 || >=22.0.0"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/exporter-trace-otlp-proto": "^0.57.2",
+    "@opentelemetry/resources": "^1.30.0",
+    "@opentelemetry/sdk-trace-base": "^1.30.0"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.4"
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mergifyio/mergify-ci-plugins.git",
+    "directory": "packages/core"
+  },
+  "author": "Mergify <hello@mergify.com>"
+}

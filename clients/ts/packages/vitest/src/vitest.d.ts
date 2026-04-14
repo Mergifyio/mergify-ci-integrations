@@ -1,5 +1,5 @@
 import 'vitest';
-import type { FlakyDetectionContext, FlakyDetectionMode } from './flaky-detection.js';
+import type { FlakyDetectionContext, FlakyDetectionMode } from '@mergifyio/ci-core';
 
 declare module 'vitest' {
   interface ProvidedContext {

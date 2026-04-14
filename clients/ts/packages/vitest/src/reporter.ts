@@ -1,18 +1,28 @@
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type {
+  FlakyDetectionContext,
+  FlakyDetectionMode,
+  TestCaseResult,
+  TestRunSession,
+  TracingContext,
+} from '@mergifyio/ci-core';
+import {
+  createTracing,
+  envToBool,
+  extractNamespace,
+  fetchFlakyDetectionContext,
+  fetchQuarantineList,
+  generateTestRunId,
+  getRepositoryNameFromUrl,
+  git,
+  isInCI,
+} from '@mergifyio/ci-core';
 import { type Span, SpanStatusCode, context, trace } from '@opentelemetry/api';
 import { W3CTraceContextPropagator } from '@opentelemetry/core';
 import type { Reporter, TestCase, TestModule, Vitest } from 'vitest/node';
-import {
-  type FlakyDetectionContext,
-  type FlakyDetectionMode,
-  fetchFlakyDetectionContext,
-} from './flaky-detection.js';
-import { fetchQuarantineList } from './quarantine.js';
-import type { TracingContext } from './tracing.js';
-import { createTracing } from './tracing.js';
-import type { MergifyReporterOptions, TestCaseResult, TestRunSession } from './types.js';
-import { extractNamespace, generateTestRunId, getRepositoryNameFromUrl, git } from './utils.js';
+import * as vitestResource from './resources/vitest.js';
+import type { MergifyReporterOptions } from './types.js';
 
 const DEFAULT_API_URL = 'https://api.mergify.com';
 
@@ -62,16 +72,22 @@ export class MergifyReporter implements Reporter {
     const apiUrl = this.options.apiUrl ?? process.env.MERGIFY_API_URL ?? DEFAULT_API_URL;
     const repoName = getRepoName();
 
-    this.tracing = createTracing({
-      token,
-      repoName,
-      apiUrl,
-      testRunId,
-      vitestVersion: vitest.version,
-      exporter: this.options.exporter,
-    });
+    const enabled =
+      isInCI() || envToBool(process.env.VITEST_MERGIFY_ENABLE, false) || !!this.options.exporter;
 
-    if (!this.tracing && (process.env.CI || process.env.VITEST_MERGIFY_ENABLE)) {
+    if (enabled) {
+      this.tracing = createTracing({
+        token,
+        repoName,
+        apiUrl,
+        testRunId,
+        frameworkAttributes: vitestResource.detect(vitest.version),
+        tracerName: '@mergifyio/vitest',
+        exporter: this.options.exporter,
+      });
+    }
+
+    if (!this.tracing && enabled) {
       if (!token) {
         vitest.logger.log(
           '[@mergifyio/vitest] MERGIFY_TOKEN not set, skipping CI Insights reporting'
@@ -122,7 +138,7 @@ export class MergifyReporter implements Reporter {
   ): void {
     // Fetch is async but onInit is sync — we use a top-level await workaround
     // by storing the promise and resolving it in onTestRunStart
-    const log = (msg: string) => vitest.logger.log(msg);
+    const log = (msg: string) => vitest.logger.log(`[@mergifyio/vitest] ${msg}`);
     this._quarantinePromise = fetchQuarantineList(config, log).then((list) => {
       this.quarantineList = list;
       if (list.size > 0) {
@@ -135,7 +151,7 @@ export class MergifyReporter implements Reporter {
     vitest: Vitest,
     config: { apiUrl: string; token: string; repoName: string }
   ): void {
-    const log = (msg: string) => vitest.logger.log(msg);
+    const log = (msg: string) => vitest.logger.log(`[@mergifyio/vitest] ${msg}`);
     this._flakyPromise = fetchFlakyDetectionContext(config, log).then((ctx) => {
       if (ctx) {
         this.flakyContext = ctx;
@@ -155,7 +171,8 @@ export class MergifyReporter implements Reporter {
     vitest.provide('mergify:quarantine', [...this.quarantineList]);
 
     // Auto-configure the custom runner if not already set
-    const dir = dirname(fileURLToPath(import.meta.url));
+    const dir =
+      typeof __dirname !== 'undefined' ? __dirname : dirname(fileURLToPath(import.meta.url));
     const mergifyRunner = resolve(dir, 'runner.js');
     if (!vitest.config.runner) {
       vitest.config.runner = mergifyRunner;

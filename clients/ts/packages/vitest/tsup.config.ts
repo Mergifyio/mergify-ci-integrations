@@ -7,6 +7,7 @@ export default defineConfig({
   clean: true,
   sourcemap: true,
   external: [
+    '@mergifyio/ci-core',
     '@opentelemetry/api',
     '@opentelemetry/core',
     '@opentelemetry/sdk-trace-base',

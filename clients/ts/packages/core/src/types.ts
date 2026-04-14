@@ -31,19 +31,6 @@ export interface TestCaseResult {
   flaky: boolean;
 }
 
-export interface MergifyReporterOptions {
-  apiUrl?: string;
-  token?: string;
-  /** Inject a custom SpanExporter (useful for testing). Bypasses CI and token checks. */
-  exporter?: import('@opentelemetry/sdk-trace-base').SpanExporter;
-  /** Inject a quarantine list directly (useful for testing). Bypasses API fetch. */
-  quarantineList?: string[];
-  /** Inject flaky detection context directly (useful for testing). Bypasses API fetch. */
-  flakyContext?: import('./flaky-detection.js').FlakyDetectionContext;
-  /** Flaky detection mode (useful for testing). */
-  flakyMode?: import('./flaky-detection.js').FlakyDetectionMode;
-}
-
 export interface TestRunSession {
   /** 16-char hex ID (8 random bytes), matching Mergify CI Insights API format */
   testRunId: string;

@@ -34,7 +34,7 @@ export function strtobool(value: string): boolean {
   throw new Error(`Could not convert '${value}' to boolean`);
 }
 
-function envToBool(value: string | undefined, fallback: boolean): boolean {
+export function envToBool(value: string | undefined, fallback: boolean): boolean {
   if (value === undefined) return false;
   try {
     return strtobool(value);
@@ -45,10 +45,7 @@ function envToBool(value: string | undefined, fallback: boolean): boolean {
 
 /** Check if running in a CI environment. */
 export function isInCI(): boolean {
-  return (
-    envToBool(process.env.CI, !!(process.env.CI ?? '').length) ||
-    envToBool(process.env.VITEST_MERGIFY_ENABLE, false)
-  );
+  return envToBool(process.env.CI, !!(process.env.CI ?? '').length);
 }
 
 /** Detect the current CI provider from environment variables. */

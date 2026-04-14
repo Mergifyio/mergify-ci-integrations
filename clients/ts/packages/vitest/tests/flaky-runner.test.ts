@@ -1,8 +1,8 @@
 import { resolve } from 'node:path';
+import type { FlakyDetectionContext } from '@mergifyio/ci-core';
 import { InMemorySpanExporter } from '@opentelemetry/sdk-trace-base';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { startVitest } from 'vitest/node';
-import type { FlakyDetectionContext } from '../src/flaky-detection.js';
 import { MergifyReporter } from '../src/reporter.js';
 
 const fixturesDir = resolve(import.meta.dirname, 'fixtures');

@@ -1,4 +1,4 @@
-import type { Tracer } from '@opentelemetry/api';
+import type { Attributes, Tracer } from '@opentelemetry/api';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
 import type { Resource } from '@opentelemetry/resources';
 import {
@@ -10,14 +10,15 @@ import {
   type SpanProcessor,
 } from '@opentelemetry/sdk-trace-base';
 import { detectResources } from './resources/index.js';
-import { isInCI, splitRepoName } from './utils.js';
+import { envToBool, splitRepoName } from './utils.js';
 
 export interface TracingConfig {
   token: string | undefined;
   repoName: string | undefined;
   apiUrl: string;
   testRunId: string;
-  vitestVersion: string;
+  frameworkAttributes: Attributes;
+  tracerName: string;
   /** Injected exporter — bypasses CI and token checks. */
   exporter?: SpanExporter;
 }
@@ -31,7 +32,7 @@ export interface TracingContext {
   ownsExporter: boolean;
 }
 
-class SynchronousBatchSpanProcessor implements SpanProcessor {
+export class SynchronousBatchSpanProcessor implements SpanProcessor {
   private queue: ReadableSpan[] = [];
 
   constructor(private exporter: SpanExporter) {}
@@ -63,7 +64,7 @@ class SynchronousBatchSpanProcessor implements SpanProcessor {
 }
 
 function createExporter(config: TracingConfig): SpanExporter | null {
-  if (process.env.VITEST_MERGIFY_DEBUG) {
+  if (envToBool(process.env.MERGIFY_CI_DEBUG, false)) {
     return new ConsoleSpanExporter();
   }
 
@@ -89,18 +90,17 @@ export function createTracing(config: TracingConfig): TracingContext | null {
     exporter = config.exporter;
     ownsExporter = false;
   } else {
-    if (!isInCI()) return null;
     exporter = createExporter(config);
     ownsExporter = true;
   }
 
   if (!exporter) return null;
 
-  const resource = detectResources(config.vitestVersion, config.testRunId);
+  const resource = detectResources(config.frameworkAttributes, config.testRunId);
 
   // Use SimpleSpanProcessor for injected/debug exporters (exports on each span end)
   // Use SynchronousBatchSpanProcessor for production (batches and exports on flush)
-  const useSimpleProcessor = config.exporter || process.env.VITEST_MERGIFY_DEBUG;
+  const useSimpleProcessor = config.exporter || envToBool(process.env.MERGIFY_CI_DEBUG, false);
   const processor: SpanProcessor = useSimpleProcessor
     ? new SimpleSpanProcessor(exporter)
     : new SynchronousBatchSpanProcessor(exporter);
@@ -110,7 +110,7 @@ export function createTracing(config: TracingConfig): TracingContext | null {
     spanProcessors: [processor],
   });
 
-  const tracer = tracerProvider.getTracer('@mergifyio/vitest');
+  const tracer = tracerProvider.getTracer(config.tracerName);
 
   return { tracer, tracerProvider, exporter, resource, ownsExporter };
 }

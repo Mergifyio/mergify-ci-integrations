@@ -1,79 +1,28 @@
 {
-  "name": "@mergifyio/vitest",
-  "version": "0.0.0",
-  "description": "Vitest reporter for Mergify CI Insights",
-  "license": "GPL-3.0-only",
+  "name": "mergify-ci-plugins",
+  "private": true,
   "type": "module",
-  "main": "./dist/index.cjs",
-  "module": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "exports": {
-    ".": {
-      "import": {
-        "types": "./dist/index.d.ts",
-        "default": "./dist/index.js"
-      },
-      "require": {
-        "types": "./dist/index.d.cts",
-        "default": "./dist/index.cjs"
-      }
-    },
-    "./runner": {
-      "import": {
-        "types": "./dist/runner.d.ts",
-        "default": "./dist/runner.js"
-      },
-      "require": {
-        "types": "./dist/runner.d.cts",
-        "default": "./dist/runner.cjs"
-      }
-    }
-  },
-  "files": ["dist"],
+  "packageManager": "pnpm@10.33.0",
   "engines": {
     "node": "^20.0.0 || >=22.0.0"
   },
-  "dependencies": {
-    "@opentelemetry/api": "^1.9.0",
-    "@opentelemetry/exporter-trace-otlp-proto": "^0.57.2",
-    "@opentelemetry/resources": "^1.30.0",
-    "@opentelemetry/sdk-trace-base": "^1.30.0"
-  },
-  "peerDependencies": {
-    "vitest": ">=3.0.0"
+  "scripts": {
+    "build": "pnpm -r run build",
+    "test": "pnpm -r run test",
+    "typecheck": "tsc --noEmit",
+    "eslint": "eslint packages/*/src packages/*/tests",
+    "format": "biome check --write .",
+    "format:check": "biome check ."
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.0",
     "@eslint/js": "^10.0.1",
     "@types/node": "^25.6.0",
-    "@typescript-eslint/eslint-plugin": "^8.58.1",
-    "@typescript-eslint/parser": "^8.58.1",
+    "@typescript-eslint/eslint-plugin": "^8.58.2",
+    "@typescript-eslint/parser": "^8.58.2",
     "eslint": "^10.2.0",
     "globals": "^17.5.0",
     "tsup": "^8.0.0",
-    "typescript": "^5.9.0",
-    "vitest": "^4.1.4"
-  },
-  "scripts": {
-    "build": "tsup",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "typecheck": "tsc --noEmit",
-    "eslint": "eslint src tests",
-    "format": "biome check --write .",
-    "format:check": "biome check ."
-  },
-  "directories": {
-    "test": "tests"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/Mergifyio/vitest-mergify.git"
-  },
-  "keywords": ["vitest", "test", "flaky-tests", "testing", "ci"],
-  "author": "Mergify <hello@mergify.com>",
-  "bugs": {
-    "url": "https://github.com/Mergifyio/vitest-mergify/issues"
-  },
-  "homepage": "https://github.com/Mergifyio/vitest-mergify#readme"
+    "typescript": "^5.9.0"
+  }
 }

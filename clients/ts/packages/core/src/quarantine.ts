@@ -25,12 +25,12 @@ export async function fetchQuarantineList(
     });
 
     if (response.status === 402) {
-      logger('[@mergifyio/vitest] Quarantine not available (no subscription)');
+      logger('Quarantine not available (no subscription)');
       return new Set();
     }
 
     if (!response.ok) {
-      logger(`[@mergifyio/vitest] Failed to fetch quarantine list: HTTP ${response.status}`);
+      logger(`Failed to fetch quarantine list: HTTP ${response.status}`);
       return new Set();
     }
 
@@ -38,9 +38,9 @@ export async function fetchQuarantineList(
     return new Set(data.quarantined_tests.map((t) => t.test_name));
   } catch (err) {
     if (err instanceof DOMException && err.name === 'TimeoutError') {
-      logger('[@mergifyio/vitest] Quarantine API request timed out');
+      logger('Quarantine API request timed out');
     } else {
-      logger(`[@mergifyio/vitest] Failed to fetch quarantine list: ${err}`);
+      logger(`Failed to fetch quarantine list: ${err}`);
     }
     return new Set();
   }

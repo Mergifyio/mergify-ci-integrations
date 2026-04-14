@@ -34,23 +34,21 @@ export async function fetchFlakyDetectionContext(
     });
 
     if (response.status === 402) {
-      logger('[@mergifyio/vitest] Flaky detection not available (no subscription)');
+      logger('Flaky detection not available (no subscription)');
       return null;
     }
 
     if (!response.ok) {
-      logger(
-        `[@mergifyio/vitest] Failed to fetch flaky detection context: HTTP ${response.status}`
-      );
+      logger(`Failed to fetch flaky detection context: HTTP ${response.status}`);
       return null;
     }
 
     return (await response.json()) as FlakyDetectionContext;
   } catch (err) {
     if (err instanceof DOMException && err.name === 'TimeoutError') {
-      logger('[@mergifyio/vitest] Flaky detection API request timed out');
+      logger('Flaky detection API request timed out');
     } else {
-      logger(`[@mergifyio/vitest] Failed to fetch flaky detection context: ${err}`);
+      logger(`Failed to fetch flaky detection context: ${err}`);
     }
     return null;
   }
