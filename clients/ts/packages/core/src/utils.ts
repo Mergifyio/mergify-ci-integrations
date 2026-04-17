@@ -1,7 +1,7 @@
 import { execSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 
-export type CIProvider = 'github_actions' | 'jenkins' | 'circleci';
+export type CIProvider = 'github_actions' | 'jenkins' | 'circleci' | 'buildkite';
 
 /**
  * Generate a 16-character hex test run ID (8 random bytes).
@@ -53,6 +53,7 @@ export function getCIProvider(): CIProvider | null {
   if (process.env.GITHUB_ACTIONS) return 'github_actions';
   if (process.env.CIRCLECI) return 'circleci';
   if (process.env.JENKINS_URL) return 'jenkins';
+  if (process.env.BUILDKITE) return 'buildkite';
   return null;
 }
 

@@ -1,5 +1,6 @@
 import type { Attributes } from '@opentelemetry/api';
 import { Resource } from '@opentelemetry/resources';
+import * as buildkite from './buildkite.js';
 import * as ci from './ci.js';
 import * as git from './git.js';
 import * as githubActions from './github-actions.js';
@@ -12,6 +13,7 @@ export function detectResources(frameworkAttributes: Attributes, testRunId: stri
     ...ci.detect(),
     ...githubActions.detect(),
     ...jenkins.detect(),
+    ...buildkite.detect(),
     ...mergify.detect(),
     ...frameworkAttributes,
     'test.run.id': testRunId,

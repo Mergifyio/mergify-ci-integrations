@@ -10,6 +10,7 @@ describe('CI resource detector', () => {
     vi.stubEnv('GITHUB_ACTIONS', '');
     vi.stubEnv('CIRCLECI', '');
     vi.stubEnv('JENKINS_URL', '');
+    vi.stubEnv('BUILDKITE', '');
     expect(detect()).toEqual({});
   });
 
@@ -28,5 +29,11 @@ describe('CI resource detector', () => {
     vi.stubEnv('GITHUB_ACTIONS', '');
     vi.stubEnv('CIRCLECI', 'true');
     expect(detect()).toEqual({ 'cicd.provider.name': 'circleci' });
+  });
+
+  it('detects Buildkite', () => {
+    vi.stubEnv('GITHUB_ACTIONS', '');
+    vi.stubEnv('BUILDKITE', 'true');
+    expect(detect()).toEqual({ 'cicd.provider.name': 'buildkite' });
   });
 });
