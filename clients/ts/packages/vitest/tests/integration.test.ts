@@ -55,7 +55,7 @@ describe('OTel integration', () => {
     expect(testSpan!.attributes['code.filepath']).toContain('passing.test.ts');
 
     // Test span should be child of session span
-    expect(testSpan!.parentSpanId).toBe(sessionSpan!.spanContext().spanId);
+    expect(testSpan!.parentSpanContext?.spanId).toBe(sessionSpan!.spanContext().spanId);
   });
 
   it('sets exception attributes on failed test span', async () => {

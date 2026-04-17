@@ -42,7 +42,7 @@
     "vitest": ">=3.0.0"
   },
   "devDependencies": {
-    "@opentelemetry/sdk-trace-base": "^1.30.0",
+    "@opentelemetry/sdk-trace-base": "^2.6.1",
     "@vitest/runner": "^4.1.4",
     "vitest": "^4.1.4"
   },
