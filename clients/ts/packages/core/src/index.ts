@@ -26,6 +26,7 @@ export {
   extractNamespace,
   generateTestRunId,
   getCIProvider,
+  getRepoName,
   getRepositoryNameFromUrl,
   git,
   isInCI,

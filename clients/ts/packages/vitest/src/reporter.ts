@@ -14,8 +14,7 @@ import {
   fetchFlakyDetectionContext,
   fetchQuarantineList,
   generateTestRunId,
-  getRepositoryNameFromUrl,
-  git,
+  getRepoName,
   isInCI,
 } from '@mergifyio/ci-core';
 import { type Span, SpanStatusCode, context, trace } from '@opentelemetry/api';
@@ -25,19 +24,6 @@ import * as vitestResource from './resources/vitest.js';
 import type { MergifyReporterOptions } from './types.js';
 
 const DEFAULT_API_URL = 'https://api.mergify.com';
-
-function getRepoName(): string | undefined {
-  if (process.env.GITHUB_REPOSITORY) return process.env.GITHUB_REPOSITORY;
-
-  if (process.env.GIT_URL) {
-    return getRepositoryNameFromUrl(process.env.GIT_URL) ?? undefined;
-  }
-
-  const remoteUrl = git('config', '--get', 'remote.origin.url');
-  if (remoteUrl) return getRepositoryNameFromUrl(remoteUrl) ?? undefined;
-
-  return undefined;
-}
 
 export class MergifyReporter implements Reporter {
   private vitest: Vitest | undefined;

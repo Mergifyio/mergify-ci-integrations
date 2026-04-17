@@ -78,6 +78,20 @@ export function splitRepoName(fullName: string): { owner: string; repo: string }
   return { owner: parts[0], repo: parts[1] };
 }
 
+/**
+ * Resolve the repository name ("owner/repo") from env vars or the git remote.
+ * Checks GITHUB_REPOSITORY, then GIT_URL, then falls back to `git config`.
+ */
+export function getRepoName(): string | undefined {
+  if (process.env.GITHUB_REPOSITORY) return process.env.GITHUB_REPOSITORY;
+  if (process.env.GIT_URL) {
+    return getRepositoryNameFromUrl(process.env.GIT_URL) ?? undefined;
+  }
+  const remoteUrl = git('config', '--get', 'remote.origin.url');
+  if (remoteUrl) return getRepositoryNameFromUrl(remoteUrl) ?? undefined;
+  return undefined;
+}
+
 /** Parse a repository name from a git remote URL (SSH or HTTPS). */
 export function getRepositoryNameFromUrl(url: string): string | null {
   // SSH: git@github.com:owner/repo.git
