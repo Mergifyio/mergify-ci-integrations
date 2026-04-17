@@ -36,7 +36,7 @@
   "dependencies": {
     "@mergifyio/ci-core": "workspace:*",
     "@opentelemetry/api": "^1.9.0",
-    "@opentelemetry/core": "^2.6.1"
+    "@opentelemetry/core": "^2.7.0"
   },
   "peerDependencies": {
     "vitest": ">=3.0.0"
