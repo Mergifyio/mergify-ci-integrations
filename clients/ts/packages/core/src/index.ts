@@ -1,25 +1,24 @@
 // Tracing
-export { createTracing, SynchronousBatchSpanProcessor } from './tracing.js';
-export type { TracingConfig, TracingContext } from './tracing.js';
 
-// Resource detection
-export { detectResources } from './resources/index.js';
-
-// Quarantine
-export { fetchQuarantineList } from './quarantine.js';
-export type { QuarantineConfig } from './quarantine.js';
-
-// Flaky detection
-export { FlakyDetector, fetchFlakyDetectionContext } from './flaky-detection.js';
 export type {
   FlakyDetectionConfig,
   FlakyDetectionContext,
   FlakyDetectionMode,
 } from './flaky-detection.js';
+// Flaky detection
+export { FlakyDetector, fetchFlakyDetectionContext } from './flaky-detection.js';
+export type { QuarantineConfig } from './quarantine.js';
+
+// Quarantine
+export { fetchQuarantineList } from './quarantine.js';
+// Resource detection
+export { detectResources } from './resources/index.js';
+export type { TracingConfig, TracingContext } from './tracing.js';
+export { createTracing, SynchronousBatchSpanProcessor } from './tracing.js';
 
 // Types
 export type { TestCaseError, TestCaseResult, TestRunSession } from './types.js';
-
+export type { CIProvider } from './utils.js';
 // Utilities
 export {
   envToBool,
@@ -33,4 +32,3 @@ export {
   splitRepoName,
   strtobool,
 } from './utils.js';
-export type { CIProvider } from './utils.js';

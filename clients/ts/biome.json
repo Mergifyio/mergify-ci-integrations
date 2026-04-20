@@ -1,8 +1,7 @@
 {
   "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
   "files": {
-    "include": ["**/*"],
-    "ignore": ["dist/**/*"]
+    "includes": ["**/*", "!**/dist/**/*"]
   },
   "formatter": {
     "enabled": true,
@@ -13,9 +12,7 @@
     "lineWidth": 100,
     "attributePosition": "auto"
   },
-  "organizeImports": {
-    "enabled": true
-  },
+  "assist": { "actions": { "source": { "organizeImports": "on" } } },
   "linter": {
     "enabled": false,
     "rules": {

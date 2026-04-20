@@ -17,7 +17,7 @@ import {
   getRepoName,
   isInCI,
 } from '@mergifyio/ci-core';
-import { type Span, SpanStatusCode, context, trace } from '@opentelemetry/api';
+import { context, type Span, SpanStatusCode, trace } from '@opentelemetry/api';
 import { W3CTraceContextPropagator } from '@opentelemetry/core';
 import type { Reporter, TestCase, TestModule, Vitest } from 'vitest/node';
 import * as vitestResource from './resources/vitest.js';

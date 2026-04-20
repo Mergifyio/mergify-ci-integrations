@@ -29,7 +29,9 @@
       }
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "engines": {
     "node": "^20.0.0 || >=22.0.0"
   },
@@ -50,7 +52,13 @@
     "build": "tsdown",
     "test": "vitest run"
   },
-  "keywords": ["vitest", "test", "flaky-tests", "testing", "ci"],
+  "keywords": [
+    "vitest",
+    "test",
+    "flaky-tests",
+    "testing",
+    "ci"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Mergifyio/mergify-ci-plugins.git",

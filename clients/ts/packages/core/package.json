@@ -19,7 +19,9 @@
       }
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "engines": {
     "node": "^20.0.0 || >=22.0.0"
   },
