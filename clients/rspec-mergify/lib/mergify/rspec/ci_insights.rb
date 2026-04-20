@@ -8,6 +8,7 @@ require_relative 'resources/ci'
 require_relative 'resources/git'
 require_relative 'resources/github_actions'
 require_relative 'resources/jenkins'
+require_relative 'resources/buildkite'
 require_relative 'resources/mergify'
 require_relative 'resources/rspec'
 
@@ -102,6 +103,7 @@ module Mergify
           Resources::Git.detect,
           Resources::GitHubActions.detect,
           Resources::Jenkins.detect,
+          Resources::Buildkite.detect,
           Resources::Mergify.detect,
           Resources::RSpec.detect
         ]

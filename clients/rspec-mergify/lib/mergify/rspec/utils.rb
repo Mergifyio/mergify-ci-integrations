@@ -15,6 +15,7 @@ module Mergify
         'GITHUB_ACTIONS' => :github_actions,
         'CIRCLECI' => :circleci,
         'JENKINS_URL' => :jenkins,
+        'BUILDKITE' => :buildkite,
         '_RSPEC_MERGIFY_TEST' => :rspec_mergify_suite
       }.freeze
 
@@ -124,6 +125,9 @@ module Mergify
           return ENV.fetch('GITHUB_REPOSITORY', nil)
         when :circleci
           url = ENV.fetch('CIRCLE_REPOSITORY_URL', nil)
+          return repository_name_from_url(url) if url
+        when :buildkite
+          url = ENV.fetch('BUILDKITE_REPO', nil)
           return repository_name_from_url(url) if url
         when :rspec_mergify_suite
           return 'Mergifyio/rspec-mergify'
