@@ -13,16 +13,22 @@ export type { QuarantineConfig } from './quarantine.js';
 export { fetchQuarantineList } from './quarantine.js';
 // Resource detection
 export { detectResources } from './resources/index.js';
+// Span helpers
+export { emitTestCaseSpan, endSessionSpan, startSessionSpan } from './spans.js';
 export type { TracingConfig, TracingContext } from './tracing.js';
 export { createTracing, SynchronousBatchSpanProcessor } from './tracing.js';
 
 // Types
-export type { TestCaseError, TestCaseResult, TestRunSession } from './types.js';
+export type {
+  TestCaseError,
+  TestCaseFlakyDetection,
+  TestCaseResult,
+  TestRunSession,
+} from './types.js';
 export type { CIProvider } from './utils.js';
 // Utilities
 export {
   envToBool,
-  extractNamespace,
   generateTestRunId,
   getCIProvider,
   getRepoName,

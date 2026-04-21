@@ -9,19 +9,21 @@ import type {
 } from '@mergifyio/ci-core';
 import {
   createTracing,
+  emitTestCaseSpan,
+  endSessionSpan,
   envToBool,
-  extractNamespace,
   fetchFlakyDetectionContext,
   fetchQuarantineList,
   generateTestRunId,
   getRepoName,
   isInCI,
+  startSessionSpan,
 } from '@mergifyio/ci-core';
-import { context, type Span, SpanStatusCode, trace } from '@opentelemetry/api';
-import { W3CTraceContextPropagator } from '@opentelemetry/core';
+import type { Span } from '@opentelemetry/api';
 import type { Reporter, TestCase, TestModule, Vitest } from 'vitest/node';
 import * as vitestResource from './resources/vitest.js';
 import type { MergifyReporterOptions } from './types.js';
+import { extractNamespace } from './utils.js';
 
 const DEFAULT_API_URL = 'https://api.mergify.com';
 
@@ -191,27 +193,7 @@ export class MergifyReporter implements Reporter {
     };
 
     if (this.tracing) {
-      let parentContext = context.active();
-
-      const traceparent = process.env.MERGIFY_TRACEPARENT;
-      if (traceparent) {
-        const carrier = { traceparent };
-        const propagator = new W3CTraceContextPropagator();
-        parentContext = propagator.extract(context.active(), carrier, {
-          get(c: Record<string, string>, key: string) {
-            return c[key];
-          },
-          keys(c: Record<string, string>) {
-            return Object.keys(c);
-          },
-        });
-      }
-
-      this.sessionSpan = this.tracing.tracer.startSpan(
-        'vitest session start',
-        { attributes: { 'test.scope': 'session' } },
-        parentContext
-      );
+      this.sessionSpan = startSessionSpan(this.tracing, 'vitest session start');
     }
   }
 
@@ -248,10 +230,22 @@ export class MergifyReporter implements Reporter {
       scope: 'case',
       status: result.state,
       duration: diagnostic?.duration ?? 0,
-      startTime: diagnostic?.startTime ?? 0,
+      startTime: diagnostic?.startTime ?? Date.now(),
       retryCount: diagnostic?.retryCount ?? 0,
       flaky: diagnostic?.flaky ?? false,
     };
+
+    if (isQuarantined) {
+      testCaseResult.quarantined = true;
+    }
+
+    if (meta.flakyDetection === true) {
+      testCaseResult.flakyDetection = {
+        new: meta.isNew === true,
+        flaky: meta.flaky === true,
+        rerunCount: (meta.rerunCount as number) ?? 0,
+      };
+    }
 
     if (result.state === 'failed' && result.errors?.length) {
       const firstError = result.errors[0];
@@ -266,50 +260,7 @@ export class MergifyReporter implements Reporter {
 
     // Create OTel span for this test case
     if (this.tracing && this.sessionSpan) {
-      const parentCtx = trace.setSpan(context.active(), this.sessionSpan);
-      const startTimeMs = diagnostic?.startTime ?? Date.now();
-      const endTimeMs = startTimeMs + (diagnostic?.duration ?? 0);
-
-      const span = this.tracing.tracer.startSpan(
-        testCase.fullName,
-        {
-          attributes: {
-            'code.filepath': testCaseResult.filepath,
-            'code.function': testCaseResult.function,
-            'code.lineno': testCaseResult.lineno,
-            'code.namespace': testCaseResult.namespace,
-            'code.file.path': testCaseResult.absoluteFilepath,
-            'code.line.number': testCaseResult.lineno,
-            'test.scope': 'case',
-            'test.case.result.status': testCaseResult.status,
-            'cicd.test.quarantined': isQuarantined,
-            ...(meta.flakyDetection === true && {
-              'cicd.test.flaky_detection': true,
-              'cicd.test.flaky': meta.flaky === true,
-              'cicd.test.new': meta.isNew === true,
-              'cicd.test.rerun_count': (meta.rerunCount as number) ?? 0,
-            }),
-          },
-          startTime: startTimeMs,
-        },
-        parentCtx
-      );
-
-      if (testCaseResult.error) {
-        span.setAttributes({
-          'exception.type': testCaseResult.error.type,
-          'exception.message': testCaseResult.error.message,
-          'exception.stacktrace': testCaseResult.error.stacktrace,
-        });
-      }
-
-      if (result.state === 'failed') {
-        span.setStatus({ code: SpanStatusCode.ERROR });
-      } else {
-        span.setStatus({ code: SpanStatusCode.OK });
-      }
-
-      span.end(endTimeMs);
+      emitTestCaseSpan(this.tracing.tracer, this.sessionSpan, testCaseResult);
     }
   }
 
@@ -371,27 +322,11 @@ export class MergifyReporter implements Reporter {
       }
     }
 
-    if (this.sessionSpan) {
-      if (reason === 'failed') {
-        this.sessionSpan.setStatus({ code: SpanStatusCode.ERROR });
-      } else {
-        this.sessionSpan.setStatus({ code: SpanStatusCode.OK });
-      }
-      this.sessionSpan.end();
-    }
-
-    if (this.tracing) {
+    if (this.tracing && this.sessionSpan) {
       try {
-        await this.tracing.tracerProvider.forceFlush();
+        await endSessionSpan(this.tracing, this.sessionSpan, reason);
       } catch (err) {
         this.vitest?.logger.log(`[@mergifyio/vitest] Failed to flush spans: ${err}`);
-      }
-      if (this.tracing.ownsExporter) {
-        try {
-          await this.tracing.tracerProvider.shutdown();
-        } catch {
-          // ignore shutdown errors
-        }
       }
     }
   }

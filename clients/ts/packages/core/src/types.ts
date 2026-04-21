@@ -4,16 +4,22 @@ export interface TestCaseError {
   stacktrace: string;
 }
 
+export interface TestCaseFlakyDetection {
+  new: boolean;
+  flaky: boolean;
+  rerunCount: number;
+}
+
 export interface TestCaseResult {
-  /** Relative file path (TestModule.relativeModuleId) */
+  /** Relative file path (e.g. Vitest TestModule.relativeModuleId) */
   filepath: string;
-  /** Absolute file path (TestModule.moduleId) */
+  /** Absolute file path (e.g. Vitest TestModule.moduleId) */
   absoluteFilepath: string;
-  /** Test name (TestCase.name) */
+  /** Test name (e.g. Vitest TestCase.name) */
   function: string;
-  /** Line number in the file (requires includeTaskLocation) */
+  /** Line number in the file (Vitest requires includeTaskLocation) */
   lineno: number;
-  /** Parent suite chain (derived from fullName) */
+  /** Parent suite chain (e.g. derived from Vitest fullName) */
   namespace: string;
 
   scope: 'case';
@@ -27,8 +33,15 @@ export interface TestCaseResult {
   startTime: number;
   /** Number of retries */
   retryCount: number;
-  /** Whether the test passed on a retry (flaky) */
+  /** Whether the test passed on a retry (native framework flaky) */
   flaky: boolean;
+
+  /** Framework sub-identity (Playwright project name). Optional. */
+  project?: string;
+  /** Whether the test is quarantined. Set by Vitest runner when the quarantine feature is active. */
+  quarantined?: boolean;
+  /** Flaky-detection metadata. Set by Vitest runner when flaky detection is active. */
+  flakyDetection?: TestCaseFlakyDetection;
 }
 
 export interface TestRunSession {
