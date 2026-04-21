@@ -1,54 +1,35 @@
-# vitest-mergify
+# Mergify CI plugins (pnpm monorepo)
 
-A **vitest** plugin that integrates seamlessly with **Mergify**, enabling
-tracing of test executions.
+Test-framework plugins that integrate with **Mergify CI Insights** — OpenTelemetry
+trace upload for every test run.
 
 More information at https://mergify.com
 
-## Installation
+## Packages
 
-Install the package as a dev dependency alongside `vitest` (>= 3.0.0):
+| Package | Description |
+|---|---|
+| [`@mergifyio/vitest`](./packages/vitest) | Vitest reporter (with quarantine + flaky detection) |
+| [`@mergifyio/playwright`](./packages/playwright) | Playwright reporter (tracing) |
+| [`@mergifyio/ci-core`](./packages/core) | Shared core (tracing, resources, APIs) — internal |
 
-```bash
-npm install --save-dev @mergifyio/vitest
-```
-
-## Usage
-
-Register `MergifyReporter` in your `vitest.config.ts`:
-
-```ts
-import { defineConfig } from 'vitest/config';
-import MergifyReporter from '@mergifyio/vitest';
-
-export default defineConfig({
-  test: {
-    reporters: ['default', new MergifyReporter()],
-  },
-});
-```
-
-Set `MERGIFY_TOKEN` in your CI environment so the reporter can upload test
-traces. Without it, the reporter stays silent and tests run normally.
-
-For detailed documentation, see the [official guide](https://docs.mergify.com/ci-insights/test-frameworks/vitest/).
+See each package's README for installation and usage.
 
 ## Development
 
-Clone the repo and install dependencies:
-
 ```bash
-npm install
+pnpm install
+pnpm -r run build
+pnpm -r test
 ```
 
-Available scripts:
+Available root scripts:
 
-| Command                 | What it does                                   |
-| ----------------------- | ---------------------------------------------- |
-| `npm test`              | Run the test suite once (`vitest run`)         |
-| `npm run test:watch`    | Run tests in watch mode                        |
-| `npm run eslint`        | Lint `src/` and `tests/` with ESLint           |
-| `npm run format`        | Format and auto-fix with Biome                 |
-| `npm run format:check`  | Check formatting with Biome (no writes)        |
-| `npm run typecheck`     | Type-check with `tsc --noEmit`                 |
-| `npm run build`         | Bundle the package with `tsup`                 |
+| Command | What it does |
+|---|---|
+| `pnpm -r test` | Run every package's test suite |
+| `pnpm -r run build` | Build every package |
+| `pnpm run typecheck` | Type-check the workspace |
+| `pnpm run eslint` | Lint `src/` and `tests/` across packages |
+| `pnpm run format` | Format and auto-fix with Biome |
+| `pnpm run format:check` | Check formatting with Biome |

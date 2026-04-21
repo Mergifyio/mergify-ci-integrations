@@ -1,0 +1,57 @@
+{
+  "name": "@mergifyio/playwright",
+  "version": "0.0.0",
+  "description": "Playwright reporter for Mergify CI Insights",
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.mts",
+        "default": "./dist/index.mjs"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": "^20.0.0 || >=22.0.0"
+  },
+  "dependencies": {
+    "@mergifyio/ci-core": "workspace:*",
+    "@opentelemetry/api": "^1.9.0"
+  },
+  "peerDependencies": {
+    "@playwright/test": ">=1.40.0"
+  },
+  "devDependencies": {
+    "@opentelemetry/sdk-trace-base": "^2.6.1",
+    "@playwright/test": "^1.50.0",
+    "vitest": "^4.1.4"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "playwright",
+    "test",
+    "flaky-tests",
+    "testing",
+    "ci"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mergifyio/mergify-ci-plugins.git",
+    "directory": "packages/playwright"
+  },
+  "author": "Mergify <hello@mergify.com>"
+}
