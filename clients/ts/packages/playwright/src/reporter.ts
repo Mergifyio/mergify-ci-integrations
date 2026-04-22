@@ -106,7 +106,7 @@ export class MergifyReporter implements Reporter {
     const filepath = rootDir ? relative(rootDir, absoluteFilepath) : absoluteFilepath;
 
     const titlePath = test.titlePath();
-    const namespace = extractNamespace(titlePath);
+    const namespace = extractNamespace(filepath, titlePath);
     const project = projectNameFromTest(test);
 
     const testCaseResult: TestCaseResult = {

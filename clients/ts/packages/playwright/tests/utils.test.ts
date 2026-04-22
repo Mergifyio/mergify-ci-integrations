@@ -2,18 +2,32 @@ import { describe, expect, it } from 'vitest';
 import { extractNamespace, mapStatus, projectNameFromTest } from '../src/utils.js';
 
 describe('extractNamespace', () => {
-  it('returns the describe chain between project+file and title', () => {
-    expect(extractNamespace(['chromium', 'tests/foo.spec.ts', 'outer', 'inner', 'my test'])).toBe(
-      'outer > inner'
-    );
+  it('prefixes the describe chain with the filepath', () => {
+    expect(
+      extractNamespace('tests/foo.spec.ts', [
+        'chromium',
+        'tests/foo.spec.ts',
+        'outer',
+        'inner',
+        'my test',
+      ])
+    ).toBe('tests/foo.spec.ts > outer > inner');
   });
 
-  it('returns empty string when there is no describe', () => {
-    expect(extractNamespace(['chromium', 'tests/foo.spec.ts', 'my test'])).toBe('');
+  it('returns just the filepath when there is no describe', () => {
+    expect(
+      extractNamespace('tests/foo.spec.ts', ['chromium', 'tests/foo.spec.ts', 'my test'])
+    ).toBe('tests/foo.spec.ts');
   });
 
   it('handles a single describe', () => {
-    expect(extractNamespace(['chromium', 'tests/foo.spec.ts', 'outer', 'my test'])).toBe('outer');
+    expect(
+      extractNamespace('tests/foo.spec.ts', ['chromium', 'tests/foo.spec.ts', 'outer', 'my test'])
+    ).toBe('tests/foo.spec.ts > outer');
+  });
+
+  it('drops empty segments so the result has no leading or trailing separator', () => {
+    expect(extractNamespace('', ['', '', 'outer', 'my test'])).toBe('outer');
   });
 });
 

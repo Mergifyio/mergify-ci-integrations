@@ -123,7 +123,7 @@ describe('onTestEnd — passing test', () => {
     const testSpan = spans.find((s) => s.attributes['test.scope'] === 'case');
     expect(testSpan).toBeDefined();
     expect(testSpan!.attributes['code.function']).toBe('adds numbers');
-    expect(testSpan!.attributes['code.namespace']).toBe('math');
+    expect(testSpan!.attributes['code.namespace']).toBe('tests/math.spec.ts > math');
     expect(testSpan!.attributes['code.lineno']).toBe(15);
     expect(testSpan!.attributes['code.filepath']).toBe('tests/math.spec.ts');
     expect(testSpan!.attributes['code.file.path']).toBe('/root/tests/math.spec.ts');

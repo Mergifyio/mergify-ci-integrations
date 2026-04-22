@@ -1,13 +1,16 @@
 import type { TestCase } from '@playwright/test/reporter';
 
 /**
- * Extract the describe chain from a Playwright `titlePath()`.
- * `titlePath()` is `[projectName, filePath, ...describes, testTitle]`.
- * We return the describe segments joined with ` > `.
+ * Build the namespace for a Playwright test as `<filepath> > <describes>`.
+ * `titlePath()` is `[projectName, filePath, ...describes, testTitle]`; we take
+ * the describe segments and prepend the caller-normalized filepath so the
+ * resulting span name is filepath-qualified, matching the vitest convention
+ * (avoiding collisions when two files share a describe+test name).
  */
-export function extractNamespace(titlePath: readonly string[]): string {
-  if (titlePath.length <= 3) return '';
-  return titlePath.slice(2, -1).join(' > ');
+export function extractNamespace(filepath: string, titlePath: readonly string[]): string {
+  const describes = titlePath.slice(2, -1);
+  const parts = [filepath, ...describes].filter((p) => p.length > 0);
+  return parts.join(' > ');
 }
 
 /**
