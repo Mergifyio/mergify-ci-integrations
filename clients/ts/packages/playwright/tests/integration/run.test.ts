@@ -3,12 +3,19 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { stateFilePath } from '../src/state-file.js';
+import { stateFilePath } from '../../src/state-file.js';
 
-const fixtureRoot = resolve(import.meta.dirname, 'fixtures');
+const fixtureRoot = resolve(import.meta.dirname, '..', 'fixtures');
 const fixtureTestsDir = join(fixtureRoot, 'tests');
-const playwrightBin = resolve(import.meta.dirname, '..', 'node_modules', '.bin', 'playwright');
-const packageRoot = resolve(import.meta.dirname, '..');
+const playwrightBin = resolve(
+  import.meta.dirname,
+  '..',
+  '..',
+  'node_modules',
+  '.bin',
+  'playwright'
+);
+const packageRoot = resolve(import.meta.dirname, '..', '..');
 
 let cacheRoot: string;
 let statePath: string;
