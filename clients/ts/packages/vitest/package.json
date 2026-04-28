@@ -61,7 +61,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Mergifyio/mergify-ci-plugins.git",
+    "url": "git+https://github.com/Mergifyio/mergify-ci-plugins-ts.git",
     "directory": "packages/vitest"
   },
   "author": "Mergify <hello@mergify.com>"
