@@ -1,3 +1,7 @@
 node_modules/
 dist/
 *.tsbuildinfo
+
+# Playwright fixture project test artefacts (produced by the integration test).
+packages/playwright/tests/fixtures/test-results/
+packages/playwright/tests/fixtures/playwright-report/

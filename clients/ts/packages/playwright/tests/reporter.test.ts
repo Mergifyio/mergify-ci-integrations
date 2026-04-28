@@ -1,7 +1,11 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { InMemorySpanExporter } from '@opentelemetry/sdk-trace-base';
 import type { FullConfig, Suite, TestCase, TestResult } from '@playwright/test/reporter';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MergifyReporter } from '../src/reporter.js';
+import { stateFilePath } from '../src/state-file.js';
 
 function fakeConfig(): FullConfig {
   return { rootDir: '/root' } as unknown as FullConfig;
@@ -19,6 +23,7 @@ function fakeTest(
     retries?: number;
     parent?: unknown;
     outcome?: () => 'expected' | 'unexpected' | 'flaky' | 'skipped';
+    annotations?: Array<{ type: string; description?: string }>;
   } = {}
 ): TestCase {
   return {
@@ -33,6 +38,7 @@ function fakeTest(
     results: [] as TestResult[],
     parent: overrides.parent ?? ({ project: () => ({ name: 'chromium' }) } as unknown),
     outcome: overrides.outcome ?? (() => 'expected'),
+    annotations: overrides.annotations ?? [],
   } as unknown as TestCase;
 }
 
@@ -446,5 +452,101 @@ describe('resource attributes', () => {
     expect(attrs['test.run.id']).toMatch(/^[0-9a-f]{16}$/);
     expect(attrs['cicd.provider.name']).toBe('github_actions');
     expect(attrs['vcs.repository.name']).toBe('test-owner/test-repo');
+  });
+});
+
+describe('MergifyReporter V2 — quarantine', () => {
+  let cacheRoot: string;
+  let statePath: string;
+
+  beforeEach(() => {
+    vi.stubEnv('GITHUB_ACTIONS', 'true');
+    vi.stubEnv('GITHUB_REPOSITORY', 'test-owner/test-repo');
+    cacheRoot = mkdtempSync(join(tmpdir(), 'mergify-cache-'));
+    statePath = stateFilePath(cacheRoot, 'abc123def456');
+    mkdirSync(dirname(statePath), { recursive: true });
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        version: 1,
+        testRunId: 'abc123def456',
+        createdAt: '2026-04-21T16:07:42Z',
+        rootDir: '/root',
+        quarantinedTests: ['tests/x.spec.ts > my test'],
+      })
+    );
+    process.env.MERGIFY_TEST_RUN_ID = 'abc123def456';
+    process.env.MERGIFY_STATE_FILE = statePath;
+  });
+
+  afterEach(() => {
+    rmSync(cacheRoot, { recursive: true, force: true });
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+    delete process.env.MERGIFY_TEST_RUN_ID;
+    delete process.env.MERGIFY_STATE_FILE;
+  });
+
+  it('uses testRunId from MERGIFY_TEST_RUN_ID when set', async () => {
+    const exporter = new InMemorySpanExporter();
+    const reporter = new MergifyReporter({ exporter });
+    reporter.onBegin(fakeConfig(), fakeSuite());
+    await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
+    expect(reporter.getSession()!.testRunId).toBe('abc123def456');
+  });
+
+  it('marks TestCaseResult.quarantined when the annotation is present', async () => {
+    const exporter = new InMemorySpanExporter();
+    const reporter = new MergifyReporter({ exporter });
+    reporter.onBegin(fakeConfig(), fakeSuite());
+
+    // Attach the annotation the fixture would have pushed.
+    const test = fakeTest({
+      titlePath: ['chromium', '/root/tests/x.spec.ts', 'my test'],
+      location: { file: '/root/tests/x.spec.ts', line: 1, column: 1 },
+      annotations: [{ type: 'mergify:quarantined' }],
+    });
+
+    reporter.onTestEnd(test, fakeResult({ status: 'failed', errors: [{ message: 'x' } as never] }));
+    await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
+
+    const session = reporter.getSession()!;
+    expect(session.testCases[0].quarantined).toBe(true);
+    const testSpan = exporter.getFinishedSpans().find((s) => s.attributes['test.scope'] === 'case');
+    expect(testSpan!.attributes['cicd.test.quarantined']).toBe(true);
+  });
+
+  it('prints "fetched / caught / unused" summary in onEnd when fetched > 0', async () => {
+    const log = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const exporter = new InMemorySpanExporter();
+    const reporter = new MergifyReporter({ exporter });
+    reporter.onBegin(fakeConfig(), fakeSuite());
+
+    const test = fakeTest({
+      titlePath: ['chromium', '/root/tests/x.spec.ts', 'my test'],
+      location: { file: '/root/tests/x.spec.ts', line: 1, column: 1 },
+      annotations: [{ type: 'mergify:quarantined' }],
+    });
+    reporter.onTestEnd(test, fakeResult({ status: 'failed', errors: [{ message: 'x' } as never] }));
+    await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
+
+    const output = log.mock.calls.map((c) => String(c[0])).join('');
+    expect(output).toContain('Quarantine report');
+    expect(output).toContain('fetched: 1');
+    expect(output).toContain('caught:  1');
+    expect(output).toContain('    - tests/x.spec.ts > my test');
+    expect(output).toContain('unused:  0');
+  });
+
+  it('omits the summary when no state file is present (V1 parity)', async () => {
+    delete process.env.MERGIFY_TEST_RUN_ID;
+    delete process.env.MERGIFY_STATE_FILE;
+    const log = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const exporter = new InMemorySpanExporter();
+    const reporter = new MergifyReporter({ exporter });
+    reporter.onBegin(fakeConfig(), fakeSuite());
+    await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
+    const output = log.mock.calls.map((c) => String(c[0])).join('');
+    expect(output).not.toContain('Quarantine report');
   });
 });

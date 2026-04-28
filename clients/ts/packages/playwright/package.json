@@ -30,7 +30,7 @@
     "@opentelemetry/api": "^1.9.0"
   },
   "peerDependencies": {
-    "@playwright/test": ">=1.40.0"
+    "@playwright/test": ">=1.49.0"
   },
   "devDependencies": {
     "@opentelemetry/sdk-trace-base": "^2.6.1",

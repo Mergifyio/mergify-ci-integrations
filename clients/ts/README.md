@@ -10,7 +10,7 @@ More information at https://mergify.com
 | Package | Description |
 |---|---|
 | [`@mergifyio/vitest`](./packages/vitest) | Vitest reporter (with quarantine + flaky detection) |
-| [`@mergifyio/playwright`](./packages/playwright) | Playwright reporter (tracing) |
+| [`@mergifyio/playwright`](./packages/playwright) | Playwright reporter (tracing + quarantine) |
 | [`@mergifyio/ci-core`](./packages/core) | Shared core (tracing, resources, APIs) — internal |
 
 See each package's README for installation and usage.

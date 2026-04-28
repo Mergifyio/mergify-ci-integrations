@@ -1,7 +1,12 @@
 {
   "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
   "files": {
-    "includes": ["**/*", "!**/dist/**/*"]
+    "includes": [
+      "**/*",
+      "!**/dist/**/*",
+      "!packages/playwright/tests/fixtures/test-results/**/*",
+      "!packages/playwright/tests/fixtures/playwright-report/**/*"
+    ]
   },
   "formatter": {
     "enabled": true,

@@ -6,5 +6,6 @@
       "@mergifyio/ci-core": ["./packages/core/src/index.ts"]
     }
   },
-  "include": ["packages/*/src", "packages/*/tests"]
+  "include": ["packages/*/src", "packages/*/tests"],
+  "exclude": ["packages/playwright/tests/fixtures"]
 }
