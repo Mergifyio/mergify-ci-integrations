@@ -17,6 +17,7 @@ import {
   generateTestRunId,
   getRepoName,
   isInCI,
+  resolveBranchFromAttributes,
   startSessionSpan,
 } from '@mergifyio/ci-core';
 import type { Span } from '@opentelemetry/api';
@@ -94,10 +95,7 @@ export class MergifyReporter implements Reporter {
       this.quarantineList = new Set(this.options.quarantineList);
       this._configureRunner(vitest);
     } else if (this.tracing && token && repoName) {
-      const attrs = this.tracing.resource.attributes;
-      const branch = (attrs['vcs.ref.base.name'] ?? attrs['vcs.ref.head.name']) as
-        | string
-        | undefined;
+      const branch = resolveBranchFromAttributes(this.tracing.resource.attributes);
       if (branch) {
         this._initQuarantine(vitest, { apiUrl, token, repoName, branch });
       }

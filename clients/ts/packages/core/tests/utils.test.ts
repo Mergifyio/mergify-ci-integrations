@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { strtobool } from '../src/utils.js';
+import { resolveBranchFromAttributes, strtobool } from '../src/utils.js';
 
 describe('strtobool', () => {
   it.each([
@@ -40,5 +40,42 @@ describe('strtobool', () => {
 
   it.each(['', 'anything', '42', 'yesno'])('throws for unrecognized value "%s"', (value) => {
     expect(() => strtobool(value)).toThrow(`Could not convert '${value}' to boolean`);
+  });
+});
+
+describe('resolveBranchFromAttributes', () => {
+  it('returns vcs.ref.base.name when set', () => {
+    expect(
+      resolveBranchFromAttributes({
+        'vcs.ref.base.name': 'main',
+        'vcs.ref.head.name': 'feature',
+      })
+    ).toBe('main');
+  });
+
+  it('falls through to vcs.ref.head.name when base is empty', () => {
+    expect(
+      resolveBranchFromAttributes({
+        'vcs.ref.base.name': '',
+        'vcs.ref.head.name': 'feature',
+      })
+    ).toBe('feature');
+  });
+
+  it('falls through to vcs.ref.head.name when base is missing', () => {
+    expect(resolveBranchFromAttributes({ 'vcs.ref.head.name': 'feature' })).toBe('feature');
+  });
+
+  it('returns undefined when both are missing', () => {
+    expect(resolveBranchFromAttributes({})).toBeUndefined();
+  });
+
+  it('returns undefined when both are empty strings', () => {
+    expect(
+      resolveBranchFromAttributes({
+        'vcs.ref.base.name': '',
+        'vcs.ref.head.name': '',
+      })
+    ).toBeUndefined();
   });
 });

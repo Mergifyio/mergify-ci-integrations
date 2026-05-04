@@ -35,6 +35,7 @@ export {
   getRepositoryNameFromUrl,
   git,
   isInCI,
+  resolveBranchFromAttributes,
   splitRepoName,
   strtobool,
 } from './utils.js';

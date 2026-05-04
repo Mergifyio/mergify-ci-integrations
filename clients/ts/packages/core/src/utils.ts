@@ -1,5 +1,6 @@
 import { execSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import type { Attributes } from '@opentelemetry/api';
 
 export type CIProvider = 'github_actions' | 'jenkins' | 'circleci' | 'buildkite';
 
@@ -95,4 +96,17 @@ export function getRepositoryNameFromUrl(url: string): string | null {
   }
 
   return null;
+}
+
+/**
+ * Resolve the branch name for quarantine/flaky-detection lookups from OTel
+ * resource attributes: `vcs.ref.base.name` (PR target) preferred, then
+ * `vcs.ref.head.name` (push branch / PR head). Empty strings fall through.
+ */
+export function resolveBranchFromAttributes(attrs: Attributes): string | undefined {
+  const base = attrs['vcs.ref.base.name'];
+  if (typeof base === 'string' && base.length > 0) return base;
+  const head = attrs['vcs.ref.head.name'];
+  if (typeof head === 'string' && head.length > 0) return head;
+  return undefined;
 }

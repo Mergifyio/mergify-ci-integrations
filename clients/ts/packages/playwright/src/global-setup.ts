@@ -6,6 +6,7 @@ import {
   generateTestRunId,
   getRepoName,
   isInCI,
+  resolveBranchFromAttributes,
 } from '@mergifyio/ci-core';
 import type { FullConfig } from '@playwright/test';
 import { type QuarantineState, stateFilePath, writeStateFile } from './state-file.js';
@@ -17,17 +18,8 @@ export interface RunGlobalSetupDeps {
   now: () => Date;
 }
 
-/**
- * Resolve the branch name the same way the reporter would — by building the
- * OTel resource attributes once and looking up `vcs.ref.base.name`
- * (PR base, preferred) then `vcs.ref.head.name` (push branch / PR head).
- *
- * This matches `MergifyReporter.onBegin`'s lookup pattern exactly. The cost
- * is a single git CLI invocation that the reporter would do later anyway.
- */
 function resolveBranch(testRunId: string): string | undefined {
-  const attrs = detectResources({}, testRunId).attributes;
-  return (attrs['vcs.ref.base.name'] ?? attrs['vcs.ref.head.name']) as string | undefined;
+  return resolveBranchFromAttributes(detectResources({}, testRunId).attributes);
 }
 
 export async function runGlobalSetup(config: FullConfig, deps: RunGlobalSetupDeps): Promise<void> {
