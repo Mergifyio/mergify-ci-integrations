@@ -12,7 +12,7 @@ module Mergify
         module_function
 
         BUILDKITE_MAPPING = {
-          'cicd.pipeline.name' => [:to_s, 'BUILDKITE_PIPELINE_NAME'],
+          'cicd.pipeline.name' => [:to_s, 'BUILDKITE_PIPELINE_SLUG'],
           'cicd.pipeline.task.name' => [
             :to_s,
             lambda {
@@ -22,7 +22,10 @@ module Mergify
           ],
           'cicd.pipeline.run.id' => [:to_s, 'BUILDKITE_BUILD_ID'],
           'cicd.pipeline.run.url' => [:to_s, 'BUILDKITE_BUILD_URL'],
-          'cicd.pipeline.run.attempt' => [:to_i, 'BUILDKITE_RETRY_COUNT'],
+          'cicd.pipeline.run.attempt' => [
+            :to_i,
+            -> { ENV.fetch('BUILDKITE_RETRY_COUNT', '0').to_i + 1 }
+          ],
           'cicd.pipeline.runner.name' => [:to_s, 'BUILDKITE_AGENT_NAME'],
           'vcs.ref.head.name' => [:to_s, 'BUILDKITE_BRANCH'],
           'vcs.ref.base.name' => [:to_s, 'BUILDKITE_PULL_REQUEST_BASE_BRANCH'],

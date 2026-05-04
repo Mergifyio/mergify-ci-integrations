@@ -12,7 +12,7 @@ RSpec.describe Mergify::RSpec::Resources::Buildkite do
 
   before do
     %w[GITHUB_ACTIONS CIRCLECI JENKINS_URL BUILDKITE _RSPEC_MERGIFY_TEST
-       BUILDKITE_PIPELINE_NAME BUILDKITE_LABEL BUILDKITE_STEP_KEY
+       BUILDKITE_PIPELINE_SLUG BUILDKITE_LABEL BUILDKITE_STEP_KEY
        BUILDKITE_BUILD_ID BUILDKITE_BUILD_URL BUILDKITE_RETRY_COUNT
        BUILDKITE_AGENT_NAME BUILDKITE_BRANCH BUILDKITE_PULL_REQUEST_BASE_BRANCH
        BUILDKITE_COMMIT BUILDKITE_REPO].each { |v| ENV.delete(v) }
@@ -35,7 +35,7 @@ RSpec.describe Mergify::RSpec::Resources::Buildkite do
     context 'when Buildkite' do
       before do
         ENV['BUILDKITE'] = 'true'
-        ENV['BUILDKITE_PIPELINE_NAME'] = 'My Pipeline'
+        ENV['BUILDKITE_PIPELINE_SLUG'] = 'my-pipeline'
         ENV['BUILDKITE_LABEL'] = 'Run tests'
         ENV['BUILDKITE_BUILD_ID'] = 'abc-123'
         ENV['BUILDKITE_BUILD_URL'] = 'https://buildkite.com/org/pipeline/builds/42'
@@ -52,11 +52,11 @@ RSpec.describe Mergify::RSpec::Resources::Buildkite do
       it 'returns Buildkite attributes' do
         resource = described_class.detect
         attrs = resource.attribute_enumerator.to_h
-        expect(attrs['cicd.pipeline.name']).to eq('My Pipeline')
+        expect(attrs['cicd.pipeline.name']).to eq('my-pipeline')
         expect(attrs['cicd.pipeline.task.name']).to eq('Run tests')
         expect(attrs['cicd.pipeline.run.id']).to eq('abc-123')
         expect(attrs['cicd.pipeline.run.url']).to eq('https://buildkite.com/org/pipeline/builds/42')
-        expect(attrs['cicd.pipeline.run.attempt']).to eq(0)
+        expect(attrs['cicd.pipeline.run.attempt']).to eq(1)
         expect(attrs['cicd.pipeline.runner.name']).to eq('agent-1')
         expect(attrs['vcs.ref.head.name']).to eq('main')
         expect(attrs['vcs.ref.base.name']).to eq('main')
@@ -69,6 +69,13 @@ RSpec.describe Mergify::RSpec::Resources::Buildkite do
         resource = described_class.detect
         attrs = resource.attribute_enumerator.to_h
         expect(attrs['cicd.pipeline.run.attempt']).to be_a(Integer)
+      end
+
+      it 'reports run attempt as 1-based (BUILDKITE_RETRY_COUNT + 1)' do
+        ENV['BUILDKITE_RETRY_COUNT'] = '1'
+        resource = described_class.detect
+        attrs = resource.attribute_enumerator.to_h
+        expect(attrs['cicd.pipeline.run.attempt']).to eq(2)
       end
 
       it 'falls back to BUILDKITE_STEP_KEY when BUILDKITE_LABEL is not set' do
