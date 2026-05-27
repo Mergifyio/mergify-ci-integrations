@@ -249,7 +249,7 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
 
       it 'loads quarantined_tests' do
         stub_request(:get, 'https://api.mergify.com/v1/ci/owner/repositories/repo/quarantines')
-          .with(query: { branch: 'main' })
+          .with(query: { branch: 'main', per_page: '100' })
           .to_return(
             status: 200,
             body: { quarantined_tests: [{ test_name: './spec/foo_spec.rb[1:1]' }] }.to_json,
@@ -264,7 +264,7 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
 
       it 'returns true for mark_test_as_quarantined_if_needed with quarantined test' do
         stub_request(:get, 'https://api.mergify.com/v1/ci/owner/repositories/repo/quarantines')
-          .with(query: { branch: 'main' })
+          .with(query: { branch: 'main', per_page: '100' })
           .to_return(
             status: 200,
             body: { quarantined_tests: [{ test_name: './spec/foo_spec.rb[1:1]' }] }.to_json,

@@ -20,16 +20,16 @@ RSpec.describe Mergify::RSpec::Quarantine do
     }.to_json
   end
 
-  def stub_quarantine_request(status: 200, body: quarantined_tests_response)
+  def stub_quarantine_request(status: 200, body: quarantined_tests_response, headers: {})
     stub_request(:get, quarantine_url)
       .with(
-        query: { branch: branch_name },
+        query: { branch: branch_name, per_page: '100' },
         headers: { 'Authorization' => "Bearer #{token}" }
       )
       .to_return(
         status: status,
         body: body,
-        headers: { 'Content-Type' => 'application/json' }
+        headers: { 'Content-Type' => 'application/json' }.merge(headers)
       )
   end
 
@@ -79,7 +79,7 @@ RSpec.describe Mergify::RSpec::Quarantine do
     context 'with connection timeout' do
       before do
         stub_request(:get, quarantine_url)
-          .with(query: { branch: branch_name })
+          .with(query: { branch: branch_name, per_page: '100' })
           .to_timeout
       end
 
@@ -91,6 +91,159 @@ RSpec.describe Mergify::RSpec::Quarantine do
       it 'leaves quarantined_tests empty' do
         q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
         expect(q.quarantined_tests).to be_empty
+      end
+    end
+
+    context 'with paginated response' do
+      before do
+        page2_url = "#{quarantine_url}?cursor=PAGE2&per_page=100"
+        page3_url = "#{quarantine_url}?cursor=PAGE3&per_page=100"
+
+        stub_request(:get, quarantine_url)
+          .with(query: { branch: branch_name, per_page: '100' })
+          .to_return(
+            status: 200,
+            body: { quarantined_tests: [{ test_name: 'a' }, { test_name: 'b' }] }.to_json,
+            headers: { 'Content-Type' => 'application/json', 'Link' => "<#{page2_url}>; rel=\"next\"" }
+          )
+        stub_request(:get, quarantine_url)
+          .with(query: { cursor: 'PAGE2', per_page: '100' })
+          .to_return(
+            status: 200,
+            body: { quarantined_tests: [{ test_name: 'c' }] }.to_json,
+            headers: { 'Content-Type' => 'application/json', 'Link' => "<#{page3_url}>; rel=\"next\"" }
+          )
+        stub_request(:get, quarantine_url)
+          .with(query: { cursor: 'PAGE3', per_page: '100' })
+          .to_return(
+            status: 200,
+            body: { quarantined_tests: [{ test_name: 'd' }] }.to_json,
+            headers: { 'Content-Type' => 'application/json' }
+          )
+      end
+
+      it 'concatenates tests from every page' do
+        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
+        expect(q.quarantined_tests).to eq(%w[a b c d])
+      end
+
+      it 'records no init_error_msg' do
+        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
+        expect(q.init_error_msg).to be_nil
+      end
+    end
+
+    context 'with a mid-pagination error' do
+      before do
+        page2_url = "#{quarantine_url}?cursor=PAGE2&per_page=100"
+
+        stub_request(:get, quarantine_url)
+          .with(query: { branch: branch_name, per_page: '100' })
+          .to_return(
+            status: 200,
+            body: { quarantined_tests: [{ test_name: 'a' }] }.to_json,
+            headers: { 'Content-Type' => 'application/json', 'Link' => "<#{page2_url}>; rel=\"next\"" }
+          )
+        stub_request(:get, quarantine_url)
+          .with(query: { cursor: 'PAGE2', per_page: '100' })
+          .to_return(status: 500, body: 'Internal Server Error')
+      end
+
+      it 'records init_error_msg' do
+        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
+        expect(q.init_error_msg).to include('500')
+      end
+
+      it 'does not leak partial results' do
+        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
+        expect(q.quarantined_tests).to be_empty
+      end
+    end
+
+    context 'with a cyclic next link' do
+      before do
+        cycling_url = "#{quarantine_url}?cursor=LOOP&per_page=100"
+
+        stub_request(:get, quarantine_url)
+          .with(query: { branch: branch_name, per_page: '100' })
+          .to_return(
+            status: 200,
+            body: { quarantined_tests: [{ test_name: 'a' }] }.to_json,
+            headers: { 'Content-Type' => 'application/json', 'Link' => "<#{cycling_url}>; rel=\"next\"" }
+          )
+        stub_request(:get, quarantine_url)
+          .with(query: { cursor: 'LOOP', per_page: '100' })
+          .to_return(
+            status: 200,
+            body: { quarantined_tests: [{ test_name: 'b' }] }.to_json,
+            # Page 2 advertises itself as the next link, forming a cycle.
+            headers: { 'Content-Type' => 'application/json', 'Link' => "<#{cycling_url}>; rel=\"next\"" }
+          )
+      end
+
+      it 'records init_error_msg about the cycle' do
+        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
+        expect(q.init_error_msg).to include('cyclic')
+      end
+
+      it 'does not leak partial results' do
+        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
+        expect(q.quarantined_tests).to be_empty
+      end
+    end
+
+    context 'with malformed JSON' do
+      before do
+        stub_request(:get, quarantine_url)
+          .with(query: { branch: branch_name, per_page: '100' })
+          .to_return(
+            status: 200,
+            body: '<html>upstream proxy error</html>',
+            headers: { 'Content-Type' => 'application/json' }
+          )
+      end
+
+      it 'records init_error_msg instead of crashing the suite' do
+        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
+        expect(q.init_error_msg).to include('malformed')
+      end
+
+      it 'leaves quarantined_tests empty' do
+        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
+        expect(q.quarantined_tests).to be_empty
+      end
+    end
+
+    context 'with RFC 8288 Link header variants' do
+      let(:page2_url) { "#{quarantine_url}?cursor=PAGE2&per_page=100" }
+
+      def stub_first_page_with_link(link_header)
+        stub_request(:get, quarantine_url)
+          .with(query: { branch: branch_name, per_page: '100' })
+          .to_return(
+            status: 200,
+            body: { quarantined_tests: [{ test_name: 'a' }] }.to_json,
+            headers: { 'Content-Type' => 'application/json', 'Link' => link_header }
+          )
+        stub_request(:get, quarantine_url)
+          .with(query: { cursor: 'PAGE2', per_page: '100' })
+          .to_return(
+            status: 200,
+            body: { quarantined_tests: [{ test_name: 'b' }] }.to_json,
+            headers: { 'Content-Type' => 'application/json' }
+          )
+      end
+
+      it 'follows unquoted token form (rel=next)' do
+        stub_first_page_with_link("<#{page2_url}>; rel=next")
+        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
+        expect(q.quarantined_tests).to eq(%w[a b])
+      end
+
+      it 'follows multi-rel quoted form (rel="next prev")' do
+        stub_first_page_with_link("<#{page2_url}>; rel=\"next prev\"")
+        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
+        expect(q.quarantined_tests).to eq(%w[a b])
       end
     end
 

@@ -130,7 +130,7 @@ RSpec.describe 'Integration: Quarantine' do # rubocop:disable RSpec/DescribeClas
   describe 'quarantine API integration' do
     it 'fetches and matches quarantined tests via HTTP' do
       stub_request(:get, 'https://api.mergify.com/v1/ci/owner/repositories/repo/quarantines')
-        .with(query: { branch: 'main' })
+        .with(query: { branch: 'main', per_page: '100' })
         .to_return(
           status: 200,
           body: {

@@ -54,11 +54,52 @@ module Mergify
 
       private
 
-      # rubocop:disable Metrics/MethodLength,Metrics/AbcSize
       def fetch_quarantined_tests(api_url, token, owner, repo, branch_name)
         uri = URI("#{api_url}/v1/ci/#{owner}/repositories/#{repo}/quarantines")
-        uri.query = URI.encode_www_form(branch: branch_name)
+        uri.query = URI.encode_www_form(branch: branch_name, per_page: 100)
+        collected = walk_paginated_quarantines(uri, token)
+        @quarantined_tests = collected if collected
+      rescue Net::OpenTimeout, Net::ReadTimeout, Errno::ECONNREFUSED, SocketError => e
+        @init_error_msg = "Failed to connect to Mergify API: #{e.message}"
+      rescue JSON::ParserError => e
+        @init_error_msg = "Mergify API returned a malformed quarantine list: #{e.message}"
+      end
 
+      # Follows the RFC 5988 `next` link until exhausted. Returns the full list
+      # on success, or `nil` when the run was aborted (subscription missing or
+      # an error already recorded in @init_error_msg).
+      # rubocop:disable Metrics/MethodLength,Metrics/AbcSize
+      def walk_paginated_quarantines(uri, token)
+        collected = []
+        # Guard against a server returning a `next` link that loops back to a
+        # URL we have already fetched.
+        seen = Set.new
+        while uri
+          if seen.include?(uri.to_s)
+            @init_error_msg = 'Mergify API returned a cyclic `next` link, aborting.'
+            return nil
+          end
+          seen.add(uri.to_s)
+
+          response = perform_request(uri, token)
+          case response.code.to_i
+          when 200
+            data = JSON.parse(response.body)
+            collected.concat(data.fetch('quarantined_tests', []).map { |t| t['test_name'] })
+            next_url = parse_next_link(response['Link'])
+            uri = next_url ? URI(next_url) : nil
+          when 402
+            return nil
+          else
+            @init_error_msg = "Mergify API returned HTTP #{response.code}"
+            return nil
+          end
+        end
+        collected
+      end
+      # rubocop:enable Metrics/MethodLength,Metrics/AbcSize
+
+      def perform_request(uri, token)
         http = Net::HTTP.new(uri.host, uri.port)
         http.use_ssl = uri.scheme == 'https'
         http.open_timeout = 10
@@ -66,23 +107,27 @@ module Mergify
 
         request = Net::HTTP::Get.new(uri)
         request['Authorization'] = "Bearer #{token}"
-
-        response = http.request(request)
-        handle_response(response)
-      rescue Net::OpenTimeout, Net::ReadTimeout, Errno::ECONNREFUSED, SocketError => e
-        @init_error_msg = "Failed to connect to Mergify API: #{e.message}"
+        http.request(request)
       end
-      # rubocop:enable Metrics/MethodLength,Metrics/AbcSize
 
-      def handle_response(response)
-        case response.code.to_i
-        when 200
-          data = JSON.parse(response.body)
-          @quarantined_tests = data.fetch('quarantined_tests', []).map { |t| t['test_name'] }
-        when 402
-          # No subscription — silently skip
-        else
-          @init_error_msg = "Mergify API returned HTTP #{response.code}"
+      # Parses RFC 8288 Link headers tolerantly: accepts both quoted
+      # (`rel="next"`) and token (`rel=next`) forms, and matches when `next`
+      # is one of several space-separated rel-types (`rel="next prev"`).
+      def parse_next_link(link_header)
+        return nil if link_header.nil? || link_header.empty?
+
+        link_header.split(',').each do |part|
+          match = part.strip.match(/\A<([^>]+)>\s*;\s*(.+)\z/)
+          next unless match && next_rel?(match[2])
+
+          return match[1]
+        end
+        nil
+      end
+
+      def next_rel?(params)
+        params.scan(/rel\s*=\s*(?:"([^"]+)"|([^\s;,]+))/i).any? do |quoted, token|
+          (quoted || token).split.include?('next')
         end
       end
     end
