@@ -109,6 +109,35 @@ describe('FlakyDetector', () => {
     });
   });
 
+  describe('computeRepeatBudget', () => {
+    it('returns the global repeat count without side effects', () => {
+      const ctx = { ...baseContext, min_budget_duration_ms: 1000, max_test_execution_count: 10 };
+      const allTests = ['test.ts > existing > test A', 'test.ts > new > test'];
+      const detector = new FlakyDetector(ctx, 'new', allTests);
+      // perTestDeadline = 1000ms, duration 100ms → floor(1000/100) - 1 = 9
+      expect(detector.computeRepeatBudget(100)).toBe(9);
+      // Calling it does not populate testMetrics or tooSlowTests.
+      expect(detector.getSummary().rerunTests).toHaveLength(0);
+      expect(detector.getSummary().tooSlowTests).toEqual([]);
+    });
+
+    it('returns 0 when too slow for min_test_execution_count', () => {
+      const ctx = { ...baseContext, min_budget_duration_ms: 100, min_test_execution_count: 3 };
+      const allTests = ['test.ts > existing > test A', 'test.ts > new > test'];
+      const detector = new FlakyDetector(ctx, 'new', allTests);
+      // perTestDeadline = 100ms, duration 50ms, 50 × 3 = 150 > 100 → 0
+      expect(detector.computeRepeatBudget(50)).toBe(0);
+    });
+
+    it('caps at max_test_execution_count - 1', () => {
+      const ctx = { ...baseContext, min_budget_duration_ms: 10_000, max_test_execution_count: 5 };
+      const allTests = ['test.ts > existing > test A', 'test.ts > new > test'];
+      const detector = new FlakyDetector(ctx, 'new', allTests);
+      // perTestDeadline = 10000ms, duration 1ms → would fit ~9999, capped at 4
+      expect(detector.computeRepeatBudget(1)).toBe(4);
+    });
+  });
+
   describe('flaky detection', () => {
     it('detects flaky when test has both pass and fail outcomes', () => {
       const allTests = ['test.ts > new > test'];
@@ -126,13 +155,22 @@ describe('FlakyDetector', () => {
       expect(detector.isFlaky('test.ts > new > test')).toBe(false);
     });
 
-    it('tracks rerun count', () => {
+    it('tracks rerun count as attempts beyond the initial', () => {
+      // Three recordOutcome calls = 1 initial + 2 reruns. Matches the
+      // pytest/rspec convention for `cicd.test.rerun_count`.
       const allTests = ['test.ts > new > test'];
       const detector = new FlakyDetector(baseContext, 'new', allTests);
       detector.recordOutcome('test.ts > new > test', 'pass');
       detector.recordOutcome('test.ts > new > test', 'fail');
       detector.recordOutcome('test.ts > new > test', 'pass');
-      expect(detector.getRerunCount('test.ts > new > test')).toBe(3);
+      expect(detector.getRerunCount('test.ts > new > test')).toBe(2);
+    });
+
+    it('reports rerun count of 0 after a single attempt', () => {
+      const allTests = ['test.ts > new > test'];
+      const detector = new FlakyDetector(baseContext, 'new', allTests);
+      detector.recordOutcome('test.ts > new > test', 'pass');
+      expect(detector.getRerunCount('test.ts > new > test')).toBe(0);
     });
   });
 

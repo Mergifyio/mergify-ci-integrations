@@ -56,7 +56,13 @@ export async function fetchFlakyDetectionContext(
 
 type TestMetrics = {
   outcomes: Set<string>;
-  rerunCount: number;
+  /**
+   * Total number of attempts recorded for this test, including the initial
+   * run. Used internally for budget checks. The public-facing "rerun count"
+   * (exposed via `getRerunCount` and emitted as `cicd.test.rerun_count`)
+   * excludes the initial — matching pytest-mergify and rspec-mergify.
+   */
+  attemptCount: number;
   initialDurationMs: number;
   tooSlow: boolean;
 };
@@ -109,29 +115,46 @@ export class FlakyDetector {
     return this.candidates.has(testName);
   }
 
-  /** Calculate max repeats for a candidate test. Call after first execution to use actual duration. */
+  /**
+   * Pure repeat-budget calculation. No side effects. Returns how many
+   * additional runs (beyond the initial) fit in `perTestDeadlineMs` for a
+   * test whose initial run took `durationMs`. Returns 0 when the test is too
+   * slow to fit `min_test_execution_count` attempts.
+   *
+   * Suitable for orchestrators that need a global repeat-each value (e.g.
+   * the Playwright subprocess that takes one `--repeat-each` for all
+   * candidates) — pass the average phase-1 duration.
+   */
+  computeRepeatBudget(durationMs: number): number {
+    if (durationMs * this.context.min_test_execution_count > this.perTestDeadlineMs) {
+      return 0;
+    }
+    // -1 accounts for the initial run, which is part of perTestDeadlineMs.
+    const maxByBudget = durationMs > 0 ? Math.floor(this.perTestDeadlineMs / durationMs) - 1 : 0;
+    // -1 caps additional runs at max_test_execution_count - 1 (the initial counts).
+    return Math.max(0, Math.min(maxByBudget, this.context.max_test_execution_count - 1));
+  }
+
+  /**
+   * Calculate max repeats for a candidate test using its actual duration.
+   * Side-effectful wrapper around `computeRepeatBudget` that records the
+   * measured duration and flags the test as too-slow when applicable.
+   */
   getMaxRepeats(testName: string, initialDurationMs: number): number {
     const metrics = this.getOrCreateMetrics(testName);
     metrics.initialDurationMs = initialDurationMs;
-
-    // Check if test is too slow for even min_test_execution_count
-    if (initialDurationMs * this.context.min_test_execution_count > this.perTestDeadlineMs) {
+    const repeats = this.computeRepeatBudget(initialDurationMs);
+    if (repeats === 0 && initialDurationMs > 0) {
       metrics.tooSlow = true;
       this.tooSlowTests.push(testName);
-      return 0;
     }
-
-    // How many reruns fit in the per-test deadline?
-    const maxByBudget =
-      initialDurationMs > 0 ? Math.floor(this.perTestDeadlineMs / initialDurationMs) - 1 : 0;
-    // Cap by max_test_execution_count (subtract 1 for the initial run)
-    return Math.max(0, Math.min(maxByBudget, this.context.max_test_execution_count - 1));
+    return repeats;
   }
 
   recordOutcome(testName: string, outcome: 'pass' | 'fail'): void {
     const metrics = this.getOrCreateMetrics(testName);
     metrics.outcomes.add(outcome);
-    metrics.rerunCount++;
+    metrics.attemptCount++;
   }
 
   isFlaky(testName: string): boolean {
@@ -140,8 +163,14 @@ export class FlakyDetector {
     return metrics.outcomes.has('pass') && metrics.outcomes.has('fail');
   }
 
+  /**
+   * Number of reruns beyond the initial attempt. Matches the
+   * `cicd.test.rerun_count` semantics emitted by pytest-mergify and
+   * rspec-mergify — the initial attempt is not counted.
+   */
   getRerunCount(testName: string): number {
-    return this.testMetrics.get(testName)?.rerunCount ?? 0;
+    const attempts = this.testMetrics.get(testName)?.attemptCount ?? 0;
+    return Math.max(0, attempts - 1);
   }
 
   isTooSlow(testName: string): boolean {
@@ -164,10 +193,10 @@ export class FlakyDetector {
     }> = [];
 
     for (const [name, metrics] of this.testMetrics) {
-      if (metrics.rerunCount > 0) {
+      if (metrics.attemptCount > 0) {
         rerunTests.push({
           name,
-          rerunCount: metrics.rerunCount,
+          rerunCount: this.getRerunCount(name),
           flaky: this.isFlaky(name),
           outcomes: [...metrics.outcomes],
         });
@@ -186,7 +215,7 @@ export class FlakyDetector {
   private getOrCreateMetrics(testName: string): TestMetrics {
     let metrics = this.testMetrics.get(testName);
     if (!metrics) {
-      metrics = { outcomes: new Set(), rerunCount: 0, initialDurationMs: 0, tooSlow: false };
+      metrics = { outcomes: new Set(), attemptCount: 0, initialDurationMs: 0, tooSlow: false };
       this.testMetrics.set(testName, metrics);
     }
     return metrics;
