@@ -4,7 +4,7 @@ import type { TestCase } from '@playwright/test/reporter';
  * Normalize a path to POSIX separators. Quarantine keys and span names must be
  * stable across platforms — the backend stores them as strings and compares
  * byte-for-byte — so every filepath flowing into `extractNamespace`,
- * `stripFileSuite`, or `buildQuarantineKey` MUST pass through this first.
+ * `stripFileSuite`, or `buildTestKey` MUST pass through this first.
  *
  * No-op on POSIX (input already has no backslashes); maps `\` → `/` on Windows.
  */
@@ -42,8 +42,8 @@ export function stripFileSuite(describes: readonly string[], filepath: string): 
 }
 
 /**
- * Build the quarantine-matching key for a Playwright test: the same string the
- * Mergify backend stores as `test_name` (derived from the emitted span name).
+ * Build the matching key for a Playwright test: the same string the Mergify
+ * backend stores as `test_name` (derived from the emitted span name).
  *
  * Must match the span name produced by `emitTestCaseSpan` in @mergifyio/ci-core:
  *   namespace > function  (when namespace is non-empty)
@@ -51,7 +51,7 @@ export function stripFileSuite(describes: readonly string[], filepath: string): 
  * where `namespace` is `extractNamespace(filepath, titlePath)`. The filter step
  * below drops the empty prefix in the second case so the equality holds in both.
  */
-export function buildQuarantineKey(
+export function buildTestKey(
   filepath: string,
   titlePath: readonly string[],
   title: string

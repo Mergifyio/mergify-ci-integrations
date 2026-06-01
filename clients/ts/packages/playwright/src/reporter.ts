@@ -25,7 +25,7 @@ import * as playwrightResource from './resources/playwright.js';
 import { readStateFile } from './state-file.js';
 import type { MergifyReporterOptions } from './types.js';
 import {
-  buildQuarantineKey,
+  buildTestKey,
   extractNamespace,
   mapStatus,
   projectNameFromTest,
@@ -163,7 +163,7 @@ export class MergifyReporter implements Reporter {
     const isQuarantined = test.annotations.some((a) => a.type === 'mergify:quarantined');
     if (isQuarantined) {
       testCaseResult.quarantined = true;
-      this.quarantinedCaught.push(buildQuarantineKey(filepath, titlePath, test.title));
+      this.quarantinedCaught.push(buildTestKey(filepath, titlePath, test.title));
     }
 
     this.session.testCases.push(testCaseResult);

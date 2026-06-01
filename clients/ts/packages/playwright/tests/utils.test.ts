@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  buildQuarantineKey,
+  buildTestKey,
   extractNamespace,
   mapStatus,
   projectNameFromTest,
@@ -92,10 +92,10 @@ describe('projectNameFromTest', () => {
   });
 });
 
-describe('buildQuarantineKey', () => {
+describe('buildTestKey', () => {
   it('joins filepath, describes, and title with " > "', () => {
     expect(
-      buildQuarantineKey(
+      buildTestKey(
         'tests/auth.spec.ts',
         ['chromium', 'tests/auth.spec.ts', 'Login', 'submits form'],
         'submits form'
@@ -105,7 +105,7 @@ describe('buildQuarantineKey', () => {
 
   it('omits the describe chain when empty', () => {
     expect(
-      buildQuarantineKey(
+      buildTestKey(
         'tests/auth.spec.ts',
         ['chromium', 'tests/auth.spec.ts', 'submits form'],
         'submits form'
@@ -114,14 +114,14 @@ describe('buildQuarantineKey', () => {
   });
 
   it('drops empty segments', () => {
-    expect(buildQuarantineKey('', ['', '', 'Outer', 'my test'], 'my test')).toBe('Outer > my test');
+    expect(buildTestKey('', ['', '', 'Outer', 'my test'], 'my test')).toBe('Outer > my test');
   });
 
   it('agrees with extractNamespace + " > " + title (parity guard)', () => {
     const filepath = 'tests/foo.spec.ts';
     const titlePath = ['chromium', 'tests/foo.spec.ts', 'Outer', 'Inner', 'case name'];
     const title = 'case name';
-    expect(buildQuarantineKey(filepath, titlePath, title)).toBe(
+    expect(buildTestKey(filepath, titlePath, title)).toBe(
       `${extractNamespace(filepath, titlePath)} > ${title}`
     );
   });
@@ -132,7 +132,7 @@ describe('buildQuarantineKey', () => {
     const title = 'solo';
     const namespace = extractNamespace(filepath, titlePath);
     const expectedSpanName = namespace.length > 0 ? `${namespace} > ${title}` : title;
-    expect(buildQuarantineKey(filepath, titlePath, title)).toBe(expectedSpanName);
+    expect(buildTestKey(filepath, titlePath, title)).toBe(expectedSpanName);
   });
 
   it('dedupes the file suite from titlePath (Playwright runtime format)', () => {
@@ -141,7 +141,7 @@ describe('buildQuarantineKey', () => {
     // Without the dedup step the key would be
     //   "tests/sample.spec.ts > sample.spec.ts > quarantined-fails"
     expect(
-      buildQuarantineKey(
+      buildTestKey(
         'tests/sample.spec.ts',
         ['', 'node', 'sample.spec.ts', 'quarantined-fails'],
         'quarantined-fails'
@@ -151,7 +151,7 @@ describe('buildQuarantineKey', () => {
 
   it('dedupes when titlePath contains the full filepath rather than the basename', () => {
     expect(
-      buildQuarantineKey(
+      buildTestKey(
         'tests/sample.spec.ts',
         ['', 'node', 'tests/sample.spec.ts', 'describe', 'case'],
         'case'
