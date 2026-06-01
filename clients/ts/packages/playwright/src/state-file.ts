@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
-export interface QuarantineState {
+export interface SharedState {
   version: 1;
   testRunId: string;
   createdAt: string;
@@ -9,18 +9,21 @@ export interface QuarantineState {
   quarantinedTests: string[];
 }
 
+/** @deprecated Use SharedState instead. Kept as an alias for compatibility. */
+export type QuarantineState = SharedState;
+
 const CURRENT_VERSION = 1;
 
 export function stateFilePath(cacheRoot: string, testRunId: string): string {
   return join(cacheRoot, '@mergifyio', 'playwright', `state-${testRunId}.json`);
 }
 
-export function writeStateFile(path: string, state: QuarantineState): void {
+export function writeStateFile(path: string, state: SharedState): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`);
 }
 
-export function readStateFile(path: string): QuarantineState | null {
+export function readStateFile(path: string): SharedState | null {
   let raw: string;
   try {
     raw = readFileSync(path, 'utf8');
@@ -69,7 +72,7 @@ export function readStateFile(path: string): QuarantineState | null {
  * `testRunId` and `createdAt` are informational and deliberately not
  * validated.
  */
-function isWellFormedState(value: object): value is QuarantineState {
+function isWellFormedState(value: object): value is SharedState {
   const v = value as Record<string, unknown>;
   return (
     typeof v.rootDir === 'string' &&

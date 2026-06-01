@@ -9,7 +9,7 @@ import {
   resolveBranchFromAttributes,
 } from '@mergifyio/ci-core';
 import type { FullConfig } from '@playwright/test';
-import { type QuarantineState, stateFilePath, writeStateFile } from './state-file.js';
+import { type SharedState, stateFilePath, writeStateFile } from './state-file.js';
 
 const DEFAULT_API_URL = 'https://api.mergify.com';
 
@@ -45,7 +45,7 @@ export async function runGlobalSetup(config: FullConfig, deps: RunGlobalSetupDep
   // already surfaced the failure to the user.
   const list = await fetchQuarantineList({ apiUrl, token, repoName, branch }, log);
 
-  const state: QuarantineState = {
+  const state: SharedState = {
     version: 1,
     testRunId,
     createdAt: deps.now().toISOString(),
