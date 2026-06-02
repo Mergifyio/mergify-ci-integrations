@@ -46,7 +46,22 @@ function loadWorkerState(): { quarantineSet: Set<string>; rootDir: string } | nu
     }
     return null;
   }
-  workerState = { quarantineSet: new Set(state.quarantinedTests), rootDir: state.rootDir };
+  // In unhealthy mode, treat the API-provided unhealthy_test_names list as
+  // additional quarantine entries — failures get absorbed in phase 1 the
+  // same way regular quarantine works. Phase-2 reruns (orchestrated by the
+  // reporter) then measure flakiness on top.
+  //
+  // Names exceeding `max_test_name_length` are still absorbed here even
+  // though the FlakyDetector filters them out of phase-2 candidates: we
+  // err on the side of not breaking the build for tests the backend
+  // already flagged as unhealthy.
+  const set = new Set<string>(state.quarantinedTests);
+  if (state.flakyMode === 'unhealthy' && state.flakyContext) {
+    for (const name of state.flakyContext.unhealthy_test_names) {
+      set.add(name);
+    }
+  }
+  workerState = { quarantineSet: set, rootDir: state.rootDir };
   return workerState;
 }
 

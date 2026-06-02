@@ -66,6 +66,49 @@ At the end of the run, a summary is printed on stderr:
 the `test` import leaves the quarantine list fetched but never applied —
 every entry shows up under "unused" (the `caught` count stays 0).
 
+### Flaky detection (preview)
+
+Set `_MERGIFY_TEST_NEW_FLAKY_DETECTION=true` to opt into Mergify's flaky-
+detection feature. When enabled, the reporter:
+
+1. Fetches the API context in `globalSetup` and decides a mode based on
+   the run shape:
+   - **`new` mode** on PR-like runs (a base ref is detected): newly-added
+     tests are candidates; phase-1 failures stand (no absorption).
+   - **`unhealthy` mode** on push or scheduled runs: API-listed unhealthy
+     tests are candidates; phase-1 failures of those tests are absorbed
+     via the same fixture path as the regular quarantine list.
+2. Records each candidate's phase-1 outcome and duration during the
+   normal test run.
+3. After the main run, spawns a single Playwright subprocess
+   (`playwright test --test-list '<candidates>' --repeat-each=N`) that
+   re-runs each candidate `N` times with native fresh fixtures. The
+   subprocess writes per-attempt outcomes to a JSONL file.
+4. Aggregates phase-1 + phase-2 outcomes per candidate. Mixed pass/fail →
+   the candidate is flagged flaky and four attributes are emitted on its
+   span: `cicd.test.flaky_detection`, `cicd.test.new`, `cicd.test.flaky`,
+   `cicd.test.rerun_count`.
+5. Prints a "Flaky detection report" summary on stderr.
+
+Each phase-2 rerun is a fresh Playwright test invocation, so all fixtures
+(including user-defined `test.extend(...)` ones) are re-initialised
+between attempts — this matches Playwright's normal test-isolation
+guarantees.
+
+| Variable | Description | Default |
+|---|---|---|
+| `_MERGIFY_TEST_NEW_FLAKY_DETECTION` | Enable flaky detection | `false` |
+
+#### Caveats
+
+- **Cost.** Phase 2 spawns an extra `playwright test` invocation; large
+  candidate sets multiply the wall-clock time.
+- **Runtime `test.skip(condition)` inside a candidate body** can produce
+  ambiguous outcomes — the test is recorded as skipped, but rerun
+  iterations may behave differently from the first.
+- **Aggregation only counts phase-2 attempts as `rerunCount`.** Phase 1's
+  attempt is included in the flakiness decision but not in the count.
+
 ### Environment variables
 
 | Variable | Description | Default |
@@ -76,7 +119,9 @@ every entry shows up under "unused" (the `caught` count stays 0).
 | `MERGIFY_CI_DEBUG` | Print spans to console instead of uploading | `false` |
 | `MERGIFY_TRACEPARENT` | W3C distributed trace context | — |
 | `MERGIFY_TEST_RUN_ID` | Test run identifier (set by `withMergify`'s globalSetup; read by workers) | — |
-| `MERGIFY_STATE_FILE` | Path to the per-run quarantine state file (set by globalSetup; read by workers) | — |
+| `MERGIFY_STATE_FILE` | Path to the per-run state file (set by globalSetup; read by workers) | — |
+| `MERGIFY_RERUN_FILE` | JSONL file the rerun subprocess writes to (set internally; do not set manually) | — |
+| `_MERGIFY_TEST_NEW_FLAKY_DETECTION` | Enable flaky-detection preview | `false` |
 
 For detailed documentation, see the [official guide](https://docs.mergify.com/ci-insights/test-frameworks/).
 

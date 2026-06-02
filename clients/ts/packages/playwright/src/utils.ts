@@ -43,7 +43,9 @@ export function stripFileSuite(describes: readonly string[], filepath: string): 
 
 /**
  * Build the matching key for a Playwright test: the same string the Mergify
- * backend stores as `test_name` (derived from the emitted span name).
+ * backend stores as `test_name` (derived from the emitted span name). Used
+ * both for quarantine list matching and for flaky-detection candidate
+ * matching.
  *
  * Must match the span name produced by `emitTestCaseSpan` in @mergifyio/ci-core:
  *   namespace > function  (when namespace is non-empty)

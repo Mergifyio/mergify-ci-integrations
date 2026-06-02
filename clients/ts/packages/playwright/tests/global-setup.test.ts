@@ -108,4 +108,107 @@ describe('runGlobalSetup', () => {
     await runGlobalSetup(fakeConfig('/repo'), { cacheRoot, now: () => new Date() });
     expect(fetchStub).not.toHaveBeenCalled();
   });
+
+  it('short-circuits without fetching when MERGIFY_RERUN_FILE is set (subprocess)', async () => {
+    vi.stubEnv('MERGIFY_RERUN_FILE', '/tmp/rerun.jsonl');
+    const fetchStub = vi.fn();
+    vi.stubGlobal('fetch', fetchStub);
+
+    await runGlobalSetup(fakeConfig('/repo'), { cacheRoot, now: () => new Date() });
+
+    expect(fetchStub).not.toHaveBeenCalled();
+    // Should NOT mutate env or write a state file — the parent already did.
+    expect(process.env.MERGIFY_TEST_RUN_ID).toBeUndefined();
+    expect(process.env.MERGIFY_STATE_FILE).toBeUndefined();
+  });
+});
+
+describe('runGlobalSetup — flaky detection', () => {
+  function flakyContextPayload() {
+    return {
+      budget_ratio_for_new_tests: 0.5,
+      budget_ratio_for_unhealthy_tests: 0.5,
+      existing_test_names: ['existing-1'],
+      existing_tests_mean_duration_ms: 100,
+      unhealthy_test_names: [],
+      max_test_execution_count: 5,
+      max_test_name_length: 200,
+      min_budget_duration_ms: 1_000,
+      min_test_execution_count: 3,
+    };
+  }
+
+  function fetchRouter(): ReturnType<typeof vi.fn> {
+    return vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes('quarantines')) {
+        return new Response(JSON.stringify({ quarantined_tests: [] }), { status: 200 });
+      }
+      if (url.includes('flaky-detection-context')) {
+        return new Response(JSON.stringify(flakyContextPayload()), { status: 200 });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+  }
+
+  it('writes flakyContext + flakyMode "new" when feature flag is set and base ref is present', async () => {
+    vi.stubEnv('_MERGIFY_TEST_NEW_FLAKY_DETECTION', 'true');
+    vi.stubEnv('GITHUB_BASE_REF', 'main');
+    vi.stubGlobal('fetch', fetchRouter());
+
+    await runGlobalSetup(fakeConfig('/repo'), { cacheRoot, now: () => new Date() });
+
+    const id = process.env.MERGIFY_TEST_RUN_ID!;
+    const state = JSON.parse(readFileSync(stateFilePath(cacheRoot, id), 'utf8'));
+    expect(state.flakyMode).toBe('new');
+    expect(state.flakyContext.existing_test_names).toEqual(['existing-1']);
+  });
+
+  it('writes flakyMode "unhealthy" when feature flag is set and no base ref', async () => {
+    vi.stubEnv('_MERGIFY_TEST_NEW_FLAKY_DETECTION', 'true');
+    vi.stubEnv('GITHUB_BASE_REF', '');
+    vi.stubEnv('GITHUB_REF_NAME', 'main');
+    vi.stubGlobal('fetch', fetchRouter());
+
+    await runGlobalSetup(fakeConfig('/repo'), { cacheRoot, now: () => new Date() });
+
+    const id = process.env.MERGIFY_TEST_RUN_ID!;
+    const state = JSON.parse(readFileSync(stateFilePath(cacheRoot, id), 'utf8'));
+    expect(state.flakyMode).toBe('unhealthy');
+  });
+
+  it('writes no flaky fields when the feature flag is unset', async () => {
+    // No _MERGIFY_TEST_NEW_FLAKY_DETECTION stub; quarantine path still runs.
+    vi.stubGlobal('fetch', fetchRouter());
+
+    await runGlobalSetup(fakeConfig('/repo'), { cacheRoot, now: () => new Date() });
+
+    const id = process.env.MERGIFY_TEST_RUN_ID!;
+    const state = JSON.parse(readFileSync(stateFilePath(cacheRoot, id), 'utf8'));
+    expect(state.flakyMode).toBeUndefined();
+    expect(state.flakyContext).toBeUndefined();
+  });
+
+  it('omits flaky fields when fetchFlakyDetectionContext returns null', async () => {
+    vi.stubEnv('_MERGIFY_TEST_NEW_FLAKY_DETECTION', 'true');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url.includes('quarantines')) {
+          return new Response(JSON.stringify({ quarantined_tests: [] }), { status: 200 });
+        }
+        // Flaky context endpoint returns 5xx — fetcher returns null.
+        return new Response('', { status: 503 });
+      })
+    );
+
+    await runGlobalSetup(fakeConfig('/repo'), { cacheRoot, now: () => new Date() });
+
+    const id = process.env.MERGIFY_TEST_RUN_ID!;
+    const state = JSON.parse(readFileSync(stateFilePath(cacheRoot, id), 'utf8'));
+    expect(state.quarantinedTests).toEqual([]); // quarantine still wrote
+    expect(state.flakyContext).toBeUndefined();
+    expect(state.flakyMode).toBeUndefined();
+  });
 });

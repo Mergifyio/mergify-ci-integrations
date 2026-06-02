@@ -144,3 +144,107 @@ describe('integration: quarantine end-to-end', () => {
     expect(combined).not.toContain('Quarantine report');
   }, 60_000);
 });
+
+// ---------------------------------------------------------------------------
+// Flaky detection integration tests.
+// ---------------------------------------------------------------------------
+
+function seedFlakyState(opts: {
+  mode: 'new' | 'unhealthy';
+  rootDir: string;
+  unhealthyTestNames?: string[];
+  existingTestNames?: string[];
+}): void {
+  mkdirSync(dirname(statePath), { recursive: true });
+  writeFileSync(
+    statePath,
+    `${JSON.stringify(
+      {
+        version: 1,
+        testRunId: 'integration-test-run',
+        createdAt: '2026-04-29T00:00:00Z',
+        rootDir: opts.rootDir,
+        quarantinedTests: [],
+        flakyMode: opts.mode,
+        flakyContext: {
+          budget_ratio_for_new_tests: 0.5,
+          budget_ratio_for_unhealthy_tests: 0.5,
+          existing_test_names: opts.existingTestNames ?? [],
+          existing_tests_mean_duration_ms: 100,
+          unhealthy_test_names: opts.unhealthyTestNames ?? [],
+          max_test_execution_count: 5,
+          max_test_name_length: 200,
+          min_budget_duration_ms: 1_000,
+          min_test_execution_count: 3,
+        },
+      },
+      null,
+      2
+    )}\n`
+  );
+}
+
+function runFlakyFixture(envOverrides: Record<string, string>): ReturnType<typeof spawnSync> {
+  return spawnSync(playwrightBin, ['test', '--config', join(fixtureRoot, 'playwright.config.ts')], {
+    cwd: fixtureRoot,
+    env: {
+      ...process.env,
+      MERGIFY_TOKEN: '',
+      MERGIFY_TEST_RUN_ID: 'integration-test-run',
+      MERGIFY_STATE_FILE: statePath,
+      CI: 'true',
+      GITHUB_ACTIONS: 'true',
+      GITHUB_REPOSITORY: 'acme/repo',
+      ...envOverrides,
+    },
+    encoding: 'utf8',
+  });
+}
+
+describe('integration: flaky detection — unhealthy mode', () => {
+  it('absorbs the deterministic-flaky failure and exits 0', () => {
+    const counterPath = join(cacheRoot, 'flaky-counter');
+    seedFlakyState({
+      mode: 'unhealthy',
+      rootDir: join(fixtureRoot, 'tests-unhealthy'),
+      unhealthyTestNames: ['sample.spec.ts > flaky-test'],
+    });
+
+    const result = runFlakyFixture({
+      PW_FIXTURE_DIR: './tests-unhealthy',
+      FLAKY_COUNTER_PATH: counterPath,
+    });
+
+    const combined = `${result.stdout}\n${result.stderr}`;
+    expect(result.status).toBe(0);
+    expect(combined).toContain('Flaky detection report');
+    expect(combined).toContain('mode: unhealthy');
+    expect(combined).toContain('Tests rerun: 1');
+    expect(combined).toContain('Flaky tests detected: 1');
+    expect(combined).toContain('sample.spec.ts > flaky-test');
+  }, 90_000);
+});
+
+describe('integration: flaky detection — new mode', () => {
+  it('detects the flake via subprocess reruns even though phase 1 failed (exit 1)', () => {
+    const counterPath = join(cacheRoot, 'flaky-counter-new');
+    seedFlakyState({
+      mode: 'new',
+      rootDir: join(fixtureRoot, 'tests-unhealthy'),
+      existingTestNames: ['sample.spec.ts > passes'],
+    });
+
+    const result = runFlakyFixture({
+      PW_FIXTURE_DIR: './tests-unhealthy',
+      FLAKY_COUNTER_PATH: counterPath,
+    });
+
+    const combined = `${result.stdout}\n${result.stderr}`;
+    // mode=new doesn't absorb → phase-1 failure stands → exit 1
+    expect(result.status).toBe(1);
+    expect(combined).toContain('Flaky detection report');
+    expect(combined).toContain('mode: new');
+    expect(combined).toContain('Flaky tests detected: 1');
+    expect(combined).toContain('sample.spec.ts > flaky-test');
+  }, 90_000);
+});

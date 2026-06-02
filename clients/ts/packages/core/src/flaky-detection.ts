@@ -115,6 +115,11 @@ export class FlakyDetector {
     return this.candidates.has(testName);
   }
 
+  /** Returns a snapshot of the candidate set. Useful for diagnostics. */
+  getCandidates(): ReadonlySet<string> {
+    return this.candidates;
+  }
+
   /**
    * Pure repeat-budget calculation. No side effects. Returns how many
    * additional runs (beyond the initial) fit in `perTestDeadlineMs` for a

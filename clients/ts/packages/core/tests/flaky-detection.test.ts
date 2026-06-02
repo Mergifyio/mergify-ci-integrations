@@ -188,6 +188,17 @@ describe('FlakyDetector', () => {
       expect(summary.rerunTests[0].flaky).toBe(true);
     });
   });
+
+  describe('getCandidates', () => {
+    it('returns a snapshot of the candidate set', () => {
+      const allTests = ['test.ts > existing > test A', 'test.ts > new > test D'];
+      const detector = new FlakyDetector(baseContext, 'new', allTests);
+
+      const candidates = detector.getCandidates();
+      expect(candidates.has('test.ts > new > test D')).toBe(true);
+      expect(candidates.has('test.ts > existing > test A')).toBe(false);
+    });
+  });
 });
 
 describe('fetchFlakyDetectionContext', () => {

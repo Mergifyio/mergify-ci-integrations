@@ -2,6 +2,8 @@ import { join } from 'node:path';
 import {
   detectResources,
   envToBool,
+  type FlakyDetectionContext,
+  fetchFlakyDetectionContext,
   fetchQuarantineList,
   generateTestRunId,
   getRepoName,
@@ -18,11 +20,13 @@ export interface RunGlobalSetupDeps {
   now: () => Date;
 }
 
-function resolveBranch(testRunId: string): string | undefined {
-  return resolveBranchFromAttributes(detectResources({}, testRunId).attributes);
-}
-
 export async function runGlobalSetup(config: FullConfig, deps: RunGlobalSetupDeps): Promise<void> {
+  // Flaky-detection rerun subprocess: the parent has already populated the
+  // state file and exported MERGIFY_TEST_RUN_ID / MERGIFY_STATE_FILE. Re-running
+  // globalSetup here would re-fetch the quarantine and flaky-detection
+  // contexts (extra API calls per shard) and overwrite the state file mid-run.
+  if (process.env.MERGIFY_RERUN_FILE) return;
+
   const enabled = isInCI() || envToBool(process.env.PLAYWRIGHT_MERGIFY_ENABLE, false);
   if (!enabled) return;
 
@@ -33,7 +37,15 @@ export async function runGlobalSetup(config: FullConfig, deps: RunGlobalSetupDep
   const testRunId = generateTestRunId();
   process.env.MERGIFY_TEST_RUN_ID = testRunId;
 
-  const branch = resolveBranch(testRunId);
+  // Build OTel resource attributes once. `resolveBranchFromAttributes` picks
+  // `vcs.ref.base.name` (PR base) over `vcs.ref.head.name` (push branch / PR
+  // head); flaky-detection mode is derived from the same split — a non-empty
+  // base ref means PR-like context → "new" mode, otherwise "unhealthy".
+  const attrs = detectResources({}, testRunId).attributes;
+  const branch = resolveBranchFromAttributes(attrs);
+  const baseRefAttr = attrs['vcs.ref.base.name'];
+  const isPullRequest = typeof baseRefAttr === 'string' && baseRefAttr.length > 0;
+
   if (!token || !repoName || !branch) {
     return;
   }
@@ -45,12 +57,26 @@ export async function runGlobalSetup(config: FullConfig, deps: RunGlobalSetupDep
   // already surfaced the failure to the user.
   const list = await fetchQuarantineList({ apiUrl, token, repoName, branch }, log);
 
+  // Flaky detection — gated by the feature-flag env var. Same soft-fail
+  // shape as quarantine: any null return means feature dormant, not error.
+  let flakyContext: FlakyDetectionContext | undefined;
+  let flakyMode: 'new' | 'unhealthy' | undefined;
+  if (envToBool(process.env._MERGIFY_TEST_NEW_FLAKY_DETECTION, false)) {
+    const ctx = await fetchFlakyDetectionContext({ apiUrl, token, repoName }, log);
+    if (ctx) {
+      flakyContext = ctx;
+      flakyMode = isPullRequest ? 'new' : 'unhealthy';
+    }
+  }
+
   const state: SharedState = {
     version: 1,
     testRunId,
     createdAt: deps.now().toISOString(),
     rootDir: config.rootDir,
     quarantinedTests: [...list],
+    ...(flakyContext && { flakyContext }),
+    ...(flakyMode && { flakyMode }),
   };
 
   const path = stateFilePath(deps.cacheRoot, testRunId);

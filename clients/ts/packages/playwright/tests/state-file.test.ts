@@ -95,3 +95,48 @@ describe('stateFilePath', () => {
     );
   });
 });
+
+describe('readStateFile — flaky detection fields', () => {
+  it('round-trips flakyContext and flakyMode', () => {
+    const path = join(dir, 'state-flaky.json');
+    writeStateFile(path, {
+      ...sampleState(),
+      flakyContext: {
+        budget_ratio_for_new_tests: 0.5,
+        budget_ratio_for_unhealthy_tests: 0.5,
+        existing_test_names: ['t1'],
+        existing_tests_mean_duration_ms: 100,
+        unhealthy_test_names: [],
+        max_test_execution_count: 5,
+        max_test_name_length: 200,
+        min_budget_duration_ms: 1_000,
+        min_test_execution_count: 3,
+      },
+      flakyMode: 'new',
+    });
+
+    const read = readStateFile(path);
+    expect(read?.flakyContext?.existing_test_names).toEqual(['t1']);
+    expect(read?.flakyMode).toBe('new');
+  });
+
+  it('keeps flakyMode when flakyContext is absent', () => {
+    const path = join(dir, 'state-mode-only.json');
+    writeStateFile(path, {
+      ...sampleState(),
+      flakyMode: 'unhealthy',
+    });
+
+    const read = readStateFile(path);
+    expect(read?.flakyMode).toBe('unhealthy');
+    expect(read?.flakyContext).toBeUndefined();
+  });
+
+  it('drops flakyMode when value is not "new" or "unhealthy"', () => {
+    const path = join(dir, 'state-bad-mode.json');
+    writeFileSync(path, JSON.stringify({ ...sampleState(), flakyMode: 'wibble' }));
+
+    const read = readStateFile(path);
+    expect(read?.flakyMode).toBeUndefined();
+  });
+});
