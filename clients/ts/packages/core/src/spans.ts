@@ -85,8 +85,9 @@ export function emitTestCaseSpan(tracer: Tracer, sessionSpan: Span, result: Test
     attributes['cicd.test.rerun_count'] = result.flakyDetection.rerunCount;
   }
 
-  const spanName =
+  const base =
     result.namespace.length > 0 ? `${result.namespace} > ${result.function}` : result.function;
+  const spanName = (result.namePrefix ?? '') + base;
 
   const span = tracer.startSpan(spanName, { attributes, startTime: startTimeMs }, parentCtx);
 

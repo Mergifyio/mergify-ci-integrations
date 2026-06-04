@@ -1,23 +1,34 @@
 import { relative } from 'node:path';
 import { test as baseTest, expect, type TestInfo } from '@playwright/test';
 import { readStateFile } from './state-file.js';
-import { buildTestKey, toPosix } from './utils.js';
+import { buildTestKey, projectNamePrefix, resolveIncludeProject, toPosix } from './utils.js';
 
 interface ApplyArgs {
   testInfo: TestInfo;
   quarantineSet: ReadonlySet<string>;
   rootDir: string;
+  includeProject: boolean;
 }
 
 const FAILED_STATUSES = new Set(['failed', 'timedOut', 'interrupted']);
 
-export function applyQuarantine({ testInfo, quarantineSet, rootDir }: ApplyArgs): void {
+export function applyQuarantine({
+  testInfo,
+  quarantineSet,
+  rootDir,
+  includeProject,
+}: ApplyArgs): void {
   if (quarantineSet.size === 0) return;
   const status = testInfo.status;
   if (status === undefined || !FAILED_STATUSES.has(status)) return;
 
   const filepath = toPosix(relative(rootDir, testInfo.file));
-  const key = buildTestKey(filepath, testInfo.titlePath, testInfo.title);
+  // Both sides read the canonical Playwright project name: the fixture uses
+  // `testInfo.project.name`, the reporter uses `test.parent.project().name`
+  // (via `projectNameFromTest`). They return the same value — empty for the
+  // implicit default project — so the keys match and quarantine lookups land.
+  const prefix = includeProject ? projectNamePrefix(testInfo.project.name) : '';
+  const key = buildTestKey(filepath, testInfo.titlePath, testInfo.title, prefix);
   if (!quarantineSet.has(key)) return;
 
   // Mirror the actual status. Playwright reconciles a test as "expected" only
@@ -29,10 +40,15 @@ export function applyQuarantine({ testInfo, quarantineSet, rootDir }: ApplyArgs)
 }
 
 // Worker-level cache, populated lazily on first fixture invocation.
-let workerState: { quarantineSet: Set<string>; rootDir: string } | null = null;
+let workerState: { quarantineSet: Set<string>; rootDir: string; includeProject: boolean } | null =
+  null;
 let workerStateWarned = false;
 
-function loadWorkerState(): { quarantineSet: Set<string>; rootDir: string } | null {
+function loadWorkerState(): {
+  quarantineSet: Set<string>;
+  rootDir: string;
+  includeProject: boolean;
+} | null {
   if (workerState) return workerState;
   const path = process.env.MERGIFY_STATE_FILE;
   if (!path) return null;
@@ -61,7 +77,11 @@ function loadWorkerState(): { quarantineSet: Set<string>; rootDir: string } | nu
       set.add(name);
     }
   }
-  workerState = { quarantineSet: set, rootDir: state.rootDir };
+  workerState = {
+    quarantineSet: set,
+    rootDir: state.rootDir,
+    includeProject: resolveIncludeProject(),
+  };
   return workerState;
 }
 
@@ -76,6 +96,7 @@ export const test = baseTest.extend<{ mergifyQuarantine: void }>({
         testInfo,
         quarantineSet: loaded.quarantineSet,
         rootDir: loaded.rootDir,
+        includeProject: loaded.includeProject,
       });
     },
     { auto: true, scope: 'test' },

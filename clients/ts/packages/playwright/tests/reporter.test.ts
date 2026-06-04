@@ -26,9 +26,10 @@ function fakeTest(
     annotations?: Array<{ type: string; description?: string }>;
   } = {}
 ): TestCase {
+  const titlePath = overrides.titlePath ?? ['chromium', '/root/tests/x.spec.ts', 'my test'];
   return {
     title: overrides.title ?? 'my test',
-    titlePath: () => overrides.titlePath ?? ['chromium', '/root/tests/x.spec.ts', 'my test'],
+    titlePath: () => titlePath,
     location: overrides.location ?? {
       file: '/root/tests/x.spec.ts',
       line: 42,
@@ -36,7 +37,7 @@ function fakeTest(
     },
     retries: overrides.retries ?? 0,
     results: [] as TestResult[],
-    parent: overrides.parent ?? ({ project: () => ({ name: 'chromium' }) } as unknown),
+    parent: overrides.parent ?? ({ project: () => ({ name: titlePath[0] }) } as unknown),
     outcome: overrides.outcome ?? (() => 'expected'),
     annotations: overrides.annotations ?? [],
   } as unknown as TestCase;
@@ -357,6 +358,75 @@ describe('onTestEnd — multi-project', () => {
     const tc = exporter.getFinishedSpans().find((s) => s.attributes['test.scope'] === 'case')!;
     expect(tc.attributes['cicd.test.project']).toBeUndefined();
   });
+
+  it('does not prefix by default — same-named tests collide across projects', async () => {
+    const exporter = new InMemorySpanExporter();
+    const reporter = new MergifyReporter({ exporter });
+    reporter.onBegin(fakeConfig(), fakeSuite());
+
+    const chromium = fakeTest({
+      title: 'same test',
+      titlePath: ['chromium', '/root/tests/x.spec.ts', 'same test'],
+    });
+    const firefox = fakeTest({
+      title: 'same test',
+      titlePath: ['firefox', '/root/tests/x.spec.ts', 'same test'],
+    });
+    reporter.onTestEnd(chromium, fakeResult());
+    reporter.onTestEnd(firefox, fakeResult());
+    await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
+
+    const names = exporter
+      .getFinishedSpans()
+      .filter((s) => s.attributes['test.scope'] === 'case')
+      .map((s) => s.name);
+    expect(names).toEqual(['tests/x.spec.ts > same test', 'tests/x.spec.ts > same test']);
+    expect(reporter.getSession()!.testCases.every((tc) => tc.namePrefix === undefined)).toBe(true);
+  });
+
+  it('prefixes and keeps names distinct per project when enabled', async () => {
+    vi.stubEnv('PLAYWRIGHT_MERGIFY_INCLUDE_PROJECT_IN_TEST_NAME', 'true');
+    const exporter = new InMemorySpanExporter();
+    const reporter = new MergifyReporter({ exporter });
+    reporter.onBegin(fakeConfig(), fakeSuite());
+
+    const chromium = fakeTest({
+      title: 'same test',
+      titlePath: ['chromium', '/root/tests/x.spec.ts', 'same test'],
+    });
+    const firefox = fakeTest({
+      title: 'same test',
+      titlePath: ['firefox', '/root/tests/x.spec.ts', 'same test'],
+    });
+    reporter.onTestEnd(chromium, fakeResult());
+    reporter.onTestEnd(firefox, fakeResult());
+    await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
+
+    const names = exporter
+      .getFinishedSpans()
+      .filter((s) => s.attributes['test.scope'] === 'case')
+      .map((s) => s.name)
+      .sort();
+    expect(names).toEqual([
+      '[chromium] > tests/x.spec.ts > same test',
+      '[firefox] > tests/x.spec.ts > same test',
+    ]);
+  });
+
+  it('omits the prefix for a test with no project name even when enabled', async () => {
+    vi.stubEnv('PLAYWRIGHT_MERGIFY_INCLUDE_PROJECT_IN_TEST_NAME', 'true');
+    const exporter = new InMemorySpanExporter();
+    const reporter = new MergifyReporter({ exporter });
+    reporter.onBegin(fakeConfig(), fakeSuite());
+
+    const test = fakeTest({ titlePath: ['', '/root/tests/x.spec.ts', 'my test'] });
+    reporter.onTestEnd(test, fakeResult());
+    await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
+
+    const cs = exporter.getFinishedSpans().find((s) => s.attributes['test.scope'] === 'case')!;
+    expect(cs.name).toBe('tests/x.spec.ts > my test');
+    expect(reporter.getSession()!.testCases[0].namePrefix).toBeUndefined();
+  });
 });
 
 describe('MERGIFY_TRACEPARENT propagation', () => {
@@ -462,6 +532,7 @@ describe('MergifyReporter V2 — quarantine', () => {
   beforeEach(() => {
     vi.stubEnv('GITHUB_ACTIONS', 'true');
     vi.stubEnv('GITHUB_REPOSITORY', 'test-owner/test-repo');
+    vi.stubEnv('PLAYWRIGHT_MERGIFY_INCLUDE_PROJECT_IN_TEST_NAME', 'true');
     cacheRoot = mkdtempSync(join(tmpdir(), 'mergify-cache-'));
     statePath = stateFilePath(cacheRoot, 'abc123def456');
     mkdirSync(dirname(statePath), { recursive: true });
@@ -472,7 +543,7 @@ describe('MergifyReporter V2 — quarantine', () => {
         testRunId: 'abc123def456',
         createdAt: '2026-04-21T16:07:42Z',
         rootDir: '/root',
-        quarantinedTests: ['tests/x.spec.ts > my test'],
+        quarantinedTests: ['[chromium] > tests/x.spec.ts > my test'],
       })
     );
     process.env.MERGIFY_TEST_RUN_ID = 'abc123def456';
@@ -534,7 +605,7 @@ describe('MergifyReporter V2 — quarantine', () => {
     expect(output).toContain('Quarantine report');
     expect(output).toContain('fetched: 1');
     expect(output).toContain('caught:  1');
-    expect(output).toContain('    - tests/x.spec.ts > my test');
+    expect(output).toContain('    - [chromium] > tests/x.spec.ts > my test');
     expect(output).toContain('unused:  0');
   });
 
@@ -551,6 +622,72 @@ describe('MergifyReporter V2 — quarantine', () => {
   });
 });
 
+describe('MergifyReporter — quarantine caught dedup (multi-project, default off)', () => {
+  let cacheRoot: string;
+  let statePath: string;
+
+  beforeEach(() => {
+    vi.stubEnv('GITHUB_ACTIONS', 'true');
+    vi.stubEnv('GITHUB_REPOSITORY', 'test-owner/test-repo');
+    // includeProject left at its default (off): same-named tests across
+    // projects build the SAME unprefixed key, so they collide.
+    cacheRoot = mkdtempSync(join(tmpdir(), 'mergify-qcaught-'));
+    statePath = stateFilePath(cacheRoot, 'run-dedup');
+    mkdirSync(dirname(statePath), { recursive: true });
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        version: 1,
+        testRunId: 'run-dedup',
+        createdAt: '2026-06-03T00:00:00Z',
+        rootDir: '/root',
+        quarantinedTests: ['tests/x.spec.ts > my test'],
+      })
+    );
+    process.env.MERGIFY_TEST_RUN_ID = 'run-dedup';
+    process.env.MERGIFY_STATE_FILE = statePath;
+  });
+
+  afterEach(() => {
+    rmSync(cacheRoot, { recursive: true, force: true });
+    vi.unstubAllEnvs();
+    delete process.env.MERGIFY_TEST_RUN_ID;
+    delete process.env.MERGIFY_STATE_FILE;
+  });
+
+  it('counts one fetched entry once across projects (caught: 1, unused: 0)', async () => {
+    const log = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const reporter = new MergifyReporter({ exporter: new InMemorySpanExporter() });
+    reporter.onBegin(fakeConfig(), fakeSuite());
+
+    const annotations = [{ type: 'mergify:quarantined' }];
+    const location = { file: '/root/tests/x.spec.ts', line: 1, column: 1 };
+    const chromium = fakeTest({
+      title: 'my test',
+      titlePath: ['chromium', '/root/tests/x.spec.ts', 'my test'],
+      location,
+      annotations,
+    });
+    const firefox = fakeTest({
+      title: 'my test',
+      titlePath: ['firefox', '/root/tests/x.spec.ts', 'my test'],
+      location,
+      annotations,
+    });
+    reporter.onTestEnd(chromium, fakeResult({ status: 'failed' }));
+    reporter.onTestEnd(firefox, fakeResult({ status: 'failed' }));
+    await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
+
+    const output = log.mock.calls.map((c) => String(c[0])).join('');
+    expect(output).toContain('fetched: 1');
+    expect(output).toContain('caught:  1');
+    expect(output).toContain('unused:  0');
+    // The caught entry is listed exactly once, not once per project.
+    const occurrences = output.split('    - tests/x.spec.ts > my test\n').length - 1;
+    expect(occurrences).toBe(1);
+  });
+});
+
 describe('MergifyReporter — flaky-detection onBegin candidate computation', () => {
   let cacheRoot: string;
   let statePath: string;
@@ -558,6 +695,7 @@ describe('MergifyReporter — flaky-detection onBegin candidate computation', ()
   beforeEach(() => {
     vi.stubEnv('GITHUB_ACTIONS', 'true');
     vi.stubEnv('GITHUB_REPOSITORY', 'test-owner/test-repo');
+    vi.stubEnv('PLAYWRIGHT_MERGIFY_INCLUDE_PROJECT_IN_TEST_NAME', 'true');
     cacheRoot = mkdtempSync(join(tmpdir(), 'mergify-flaky-onbegin-'));
     statePath = stateFilePath(cacheRoot, 'run-1');
     process.env.MERGIFY_TEST_RUN_ID = 'run-1';
@@ -595,7 +733,7 @@ describe('MergifyReporter — flaky-detection onBegin candidate computation', ()
       flakyContext: {
         budget_ratio_for_new_tests: 0.5,
         budget_ratio_for_unhealthy_tests: 0.5,
-        existing_test_names: ['tests/sample.spec.ts > existing-test'],
+        existing_test_names: ['[proj] > tests/sample.spec.ts > existing-test'],
         existing_tests_mean_duration_ms: 100,
         unhealthy_test_names: [],
         max_test_execution_count: 5,
@@ -627,7 +765,10 @@ describe('MergifyReporter — flaky-detection onBegin candidate computation', ()
     reporter.onBegin(fakeConfig(), suiteWithTests(tests));
 
     expect(new Set(reporter.getFlakyCandidates())).toEqual(
-      new Set(['tests/sample.spec.ts > new-test-1', 'tests/sample.spec.ts > new-test-2'])
+      new Set([
+        '[proj] > tests/sample.spec.ts > new-test-1',
+        '[proj] > tests/sample.spec.ts > new-test-2',
+      ])
     );
   });
 
@@ -647,6 +788,7 @@ describe('MergifyReporter — flaky-detection summary block', () => {
   beforeEach(() => {
     vi.stubEnv('GITHUB_ACTIONS', 'true');
     vi.stubEnv('GITHUB_REPOSITORY', 'test-owner/test-repo');
+    vi.stubEnv('PLAYWRIGHT_MERGIFY_INCLUDE_PROJECT_IN_TEST_NAME', 'true');
     cacheRoot = mkdtempSync(join(tmpdir(), 'mergify-flaky-summary-'));
     statePath = stateFilePath(cacheRoot, 'run-99');
     mkdirSync(dirname(statePath), { recursive: true });
@@ -723,7 +865,7 @@ describe('MergifyReporter — flaky-detection summary block', () => {
         budget_ratio_for_unhealthy_tests: 0.5,
         existing_test_names: [],
         existing_tests_mean_duration_ms: 100,
-        unhealthy_test_names: ['tests/sample.spec.ts > a'],
+        unhealthy_test_names: ['[proj] > tests/sample.spec.ts > a'],
         max_test_execution_count: 5,
         max_test_name_length: 200,
         min_budget_duration_ms: 1_000,

@@ -109,6 +109,22 @@ guarantees.
 - **Aggregation only counts phase-2 attempts as `rerunCount`.** Phase 1's
   attempt is included in the flakiness decision but not in the count.
 
+### Multi-project test names
+
+When your config defines named [projects](https://playwright.dev/docs/test-projects)
+(e.g. one per browser), each project runs the same tests. To keep their results
+distinct in CI Insights, Mergify prefixes the project to the test name, following
+Playwright's JUnit `includeProjectInTestName` convention:
+
+```
+[chromium] > tests/login.spec.ts > logs in
+[firefox] > tests/login.spec.ts > logs in
+```
+
+This is **opt-in** (off by default, to preserve existing test history). Set
+`PLAYWRIGHT_MERGIFY_INCLUDE_PROJECT_IN_TEST_NAME=true` to enable it. Tests with
+no project name are never prefixed.
+
 ### Environment variables
 
 | Variable | Description | Default |
@@ -116,6 +132,7 @@ guarantees.
 | `MERGIFY_TOKEN` | Mergify API authentication token | (required) |
 | `MERGIFY_API_URL` | Mergify API endpoint | `https://api.mergify.com` |
 | `PLAYWRIGHT_MERGIFY_ENABLE` | Force-enable outside CI | `false` |
+| `PLAYWRIGHT_MERGIFY_INCLUDE_PROJECT_IN_TEST_NAME` | Prefix the project to multi-project test names as `[project] > …` | `false` |
 | `MERGIFY_CI_DEBUG` | Print spans to console instead of uploading | `false` |
 | `MERGIFY_TRACEPARENT` | W3C distributed trace context | — |
 | `MERGIFY_TEST_RUN_ID` | Test run identifier (set by `withMergify`'s globalSetup; read by workers) | — |

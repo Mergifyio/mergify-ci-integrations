@@ -13,6 +13,7 @@ interface MockInfo {
   // so the mock must accept the same range.
   expectedStatus: Status;
   annotations: Array<{ type: string; description?: string }>;
+  project: { name: string };
 }
 
 function mockInfo(overrides: Partial<MockInfo> = {}): MockInfo {
@@ -23,6 +24,7 @@ function mockInfo(overrides: Partial<MockInfo> = {}): MockInfo {
     status: 'passed',
     expectedStatus: 'passed',
     annotations: [],
+    project: { name: 'chromium' },
     ...overrides,
   };
 }
@@ -32,14 +34,24 @@ describe('applyQuarantine', () => {
 
   it('mutates expectedStatus and pushes annotation when quarantined + failed', () => {
     const info = mockInfo({ status: 'failed' });
-    applyQuarantine({ testInfo: info as never, quarantineSet, rootDir: '/repo' });
+    applyQuarantine({
+      testInfo: info as never,
+      quarantineSet,
+      rootDir: '/repo',
+      includeProject: false,
+    });
     expect(info.expectedStatus).toBe('failed');
     expect(info.annotations).toContainEqual({ type: 'mergify:quarantined' });
   });
 
   it('does not mutate when quarantined but passing (non-strict semantics)', () => {
     const info = mockInfo({ status: 'passed' });
-    applyQuarantine({ testInfo: info as never, quarantineSet, rootDir: '/repo' });
+    applyQuarantine({
+      testInfo: info as never,
+      quarantineSet,
+      rootDir: '/repo',
+      includeProject: false,
+    });
     expect(info.expectedStatus).toBe('passed');
     expect(info.annotations).toEqual([]);
   });
@@ -50,20 +62,35 @@ describe('applyQuarantine', () => {
       title: 'other',
       titlePath: ['chromium', '/repo/tests/math.spec.ts', 'math', 'other'],
     });
-    applyQuarantine({ testInfo: info as never, quarantineSet, rootDir: '/repo' });
+    applyQuarantine({
+      testInfo: info as never,
+      quarantineSet,
+      rootDir: '/repo',
+      includeProject: false,
+    });
     expect(info.expectedStatus).toBe('passed');
     expect(info.annotations).toEqual([]);
   });
 
   it('is a no-op when the quarantine set is empty', () => {
     const info = mockInfo({ status: 'failed' });
-    applyQuarantine({ testInfo: info as never, quarantineSet: new Set(), rootDir: '/repo' });
+    applyQuarantine({
+      testInfo: info as never,
+      quarantineSet: new Set(),
+      rootDir: '/repo',
+      includeProject: false,
+    });
     expect(info.expectedStatus).toBe('passed');
   });
 
   it('mirrors expectedStatus to the actual status for timedOut', () => {
     const info = mockInfo({ status: 'timedOut' });
-    applyQuarantine({ testInfo: info as never, quarantineSet, rootDir: '/repo' });
+    applyQuarantine({
+      testInfo: info as never,
+      quarantineSet,
+      rootDir: '/repo',
+      includeProject: false,
+    });
     // Playwright reconciles by equality (status === expectedStatus). Setting
     // 'failed' here would still leave the test reported as a failure because
     // 'timedOut' !== 'failed'. Mirroring is the only correct mutation.
@@ -73,8 +100,66 @@ describe('applyQuarantine', () => {
 
   it('mirrors expectedStatus to the actual status for interrupted', () => {
     const info = mockInfo({ status: 'interrupted' });
-    applyQuarantine({ testInfo: info as never, quarantineSet, rootDir: '/repo' });
+    applyQuarantine({
+      testInfo: info as never,
+      quarantineSet,
+      rootDir: '/repo',
+      includeProject: false,
+    });
     expect(info.expectedStatus).toBe('interrupted');
+    expect(info.annotations).toContainEqual({ type: 'mergify:quarantined' });
+  });
+});
+
+describe('applyQuarantine — project prefix', () => {
+  const prefixedSet = new Set(['[chromium] > tests/math.spec.ts > math > adds numbers']);
+
+  it('matches a prefixed quarantine entry when includeProject is true', () => {
+    const info = mockInfo({ status: 'failed' });
+    applyQuarantine({
+      testInfo: info as never,
+      quarantineSet: prefixedSet,
+      rootDir: '/repo',
+      includeProject: true,
+    });
+    expect(info.expectedStatus).toBe('failed');
+    expect(info.annotations).toContainEqual({ type: 'mergify:quarantined' });
+  });
+
+  it('mirrors expectedStatus for a timedOut test with a prefixed entry', () => {
+    const info = mockInfo({ status: 'timedOut' });
+    applyQuarantine({
+      testInfo: info as never,
+      quarantineSet: prefixedSet,
+      rootDir: '/repo',
+      includeProject: true,
+    });
+    expect(info.expectedStatus).toBe('timedOut');
+    expect(info.annotations).toContainEqual({ type: 'mergify:quarantined' });
+  });
+
+  it('does not match a prefixed entry when includeProject is false', () => {
+    const info = mockInfo({ status: 'failed' });
+    applyQuarantine({
+      testInfo: info as never,
+      quarantineSet: prefixedSet,
+      rootDir: '/repo',
+      includeProject: false,
+    });
+    expect(info.expectedStatus).toBe('passed');
+    expect(info.annotations).toEqual([]);
+  });
+
+  it('does not prefix a test with no project name even when includeProject is true', () => {
+    const info = mockInfo({ status: 'failed', project: { name: '' } });
+    const unprefixed = new Set(['tests/math.spec.ts > math > adds numbers']);
+    applyQuarantine({
+      testInfo: info as never,
+      quarantineSet: unprefixed,
+      rootDir: '/repo',
+      includeProject: true,
+    });
+    expect(info.expectedStatus).toBe('failed');
     expect(info.annotations).toContainEqual({ type: 'mergify:quarantined' });
   });
 });

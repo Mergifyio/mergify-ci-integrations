@@ -36,6 +36,13 @@ export interface TestCaseResult {
   /** Whether the test passed on a retry (native framework flaky) */
   flaky: boolean;
 
+  /**
+   * String prepended to the span NAME only — not to `code.namespace`. The
+   * Playwright plugin uses it to inject the `[project] > ` qualifier so
+   * multi-project runs get distinct test identities. Frameworks that leave it
+   * unset get unchanged names.
+   */
+  namePrefix?: string;
   /** Framework sub-identity (Playwright project name). Optional. */
   project?: string;
   /** Whether the test is quarantined. Set by Vitest runner when the quarantine feature is active. */

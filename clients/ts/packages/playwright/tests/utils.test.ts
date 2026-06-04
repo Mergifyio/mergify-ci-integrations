@@ -1,9 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   buildTestKey,
   extractNamespace,
   mapStatus,
   projectNameFromTest,
+  projectNamePrefix,
+  resolveIncludeProject,
   toPosix,
 } from '../src/utils.js';
 
@@ -77,18 +79,27 @@ describe('mapStatus', () => {
 });
 
 describe('projectNameFromTest', () => {
-  it('returns the first entry of titlePath as the project name', () => {
+  it('returns the project name from the parent suite', () => {
     const fakeTest = {
-      titlePath: () => ['firefox', 'tests/x.spec.ts', 'my test'],
+      parent: { project: () => ({ name: 'firefox' }) },
     } as unknown as Parameters<typeof projectNameFromTest>[0];
     expect(projectNameFromTest(fakeTest)).toBe('firefox');
   });
 
-  it('returns undefined when titlePath first entry is empty', () => {
+  it('returns undefined for the unnamed (empty) project', () => {
     const fakeTest = {
-      titlePath: () => ['', 'tests/x.spec.ts', 'my test'],
+      parent: { project: () => ({ name: '' }) },
     } as unknown as Parameters<typeof projectNameFromTest>[0];
     expect(projectNameFromTest(fakeTest)).toBeUndefined();
+  });
+
+  it('returns undefined when there is no parent or no project', () => {
+    const noParent = {} as unknown as Parameters<typeof projectNameFromTest>[0];
+    expect(projectNameFromTest(noParent)).toBeUndefined();
+    const noProject = {
+      parent: { project: () => undefined },
+    } as unknown as Parameters<typeof projectNameFromTest>[0];
+    expect(projectNameFromTest(noProject)).toBeUndefined();
   });
 });
 
@@ -157,5 +168,65 @@ describe('buildTestKey', () => {
         'case'
       )
     ).toBe('tests/sample.spec.ts > describe > case');
+  });
+});
+
+describe('projectNamePrefix', () => {
+  it('wraps a project name in brackets with a trailing " > " separator', () => {
+    expect(projectNamePrefix('chromium')).toBe('[chromium] > ');
+  });
+
+  it('preserves spaces in the project name', () => {
+    expect(projectNamePrefix('Mobile Chrome')).toBe('[Mobile Chrome] > ');
+  });
+
+  it('returns an empty string for undefined or empty project', () => {
+    expect(projectNamePrefix(undefined)).toBe('');
+    expect(projectNamePrefix('')).toBe('');
+  });
+});
+
+describe('buildTestKey — prefix argument', () => {
+  it('prepends the prefix to the joined key', () => {
+    expect(
+      buildTestKey(
+        'tests/x.spec.ts',
+        ['chromium', 'tests/x.spec.ts', 'outer', 'my test'],
+        'my test',
+        '[chromium] > '
+      )
+    ).toBe('[chromium] > tests/x.spec.ts > outer > my test');
+  });
+
+  it('is unchanged when no prefix is passed (default)', () => {
+    expect(
+      buildTestKey('tests/x.spec.ts', ['chromium', 'tests/x.spec.ts', 'my test'], 'my test')
+    ).toBe('tests/x.spec.ts > my test');
+  });
+});
+
+describe('resolveIncludeProject', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('defaults to false when the env var is unset', () => {
+    vi.stubEnv('PLAYWRIGHT_MERGIFY_INCLUDE_PROJECT_IN_TEST_NAME', undefined);
+    expect(resolveIncludeProject()).toBe(false);
+  });
+
+  it('is false when set to "false"', () => {
+    vi.stubEnv('PLAYWRIGHT_MERGIFY_INCLUDE_PROJECT_IN_TEST_NAME', 'false');
+    expect(resolveIncludeProject()).toBe(false);
+  });
+
+  it('is false when set to "0"', () => {
+    vi.stubEnv('PLAYWRIGHT_MERGIFY_INCLUDE_PROJECT_IN_TEST_NAME', '0');
+    expect(resolveIncludeProject()).toBe(false);
+  });
+
+  it('is true when set to "true"', () => {
+    vi.stubEnv('PLAYWRIGHT_MERGIFY_INCLUDE_PROJECT_IN_TEST_NAME', 'true');
+    expect(resolveIncludeProject()).toBe(true);
   });
 });

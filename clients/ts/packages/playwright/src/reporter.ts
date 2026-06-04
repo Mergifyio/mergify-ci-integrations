@@ -36,6 +36,8 @@ import {
   extractNamespace,
   mapStatus,
   projectNameFromTest,
+  projectNamePrefix,
+  resolveIncludeProject,
   toPosix,
 } from './utils.js';
 
@@ -43,13 +45,22 @@ const DEFAULT_API_URL = 'https://api.mergify.com';
 
 export class MergifyReporter implements Reporter {
   private options: MergifyReporterOptions;
+  /**
+   * Resolved once at construction so every mode (normal, rerun subprocess)
+   * agrees. Env-only: the fixture and global-setup are separate processes that
+   * cannot read reporter options, and `withMergify` does not forward them.
+   */
+  private includeProject: boolean;
   private session: TestRunSession | undefined;
   private tracing: TracingContext | null = null;
   private sessionSpan: Span | undefined;
   private config: FullConfig | undefined;
   private quarantineFetchedCount = 0;
   private quarantineFetchedNames: string[] = [];
-  private quarantinedCaught: string[] = [];
+  // A Set so a fetched quarantine entry caught in multiple projects (same
+  // unprefixed key when project prefixing is off) counts once, not once per
+  // project — otherwise `caught` inflates and `unused` can go negative.
+  private quarantinedCaught: Set<string> = new Set();
   private flakyResults: Array<{
     name: string;
     new: boolean;
@@ -73,6 +84,12 @@ export class MergifyReporter implements Reporter {
 
   constructor(options?: MergifyReporterOptions) {
     this.options = options ?? {};
+    this.includeProject = resolveIncludeProject();
+  }
+
+  /** Project-qualifier prefix for a test's identity, honoring the env flag. */
+  private prefixFor(test: TestCase): string {
+    return this.includeProject ? projectNamePrefix(projectNameFromTest(test)) : '';
   }
 
   printsToStdio(): boolean {
@@ -157,7 +174,8 @@ export class MergifyReporter implements Reporter {
       const allTestNames = suite.allTests().map((tc) => {
         const absolute = tc.location?.file ?? '';
         const filepath = toPosix(config.rootDir ? relative(config.rootDir, absolute) : absolute);
-        return buildTestKey(filepath, tc.titlePath(), tc.title);
+        const prefix = this.prefixFor(tc);
+        return buildTestKey(filepath, tc.titlePath(), tc.title, prefix);
       });
       this.flakyDetector = new FlakyDetector(flakyContext, this.flakyMode, allTestNames);
     }
@@ -175,7 +193,8 @@ export class MergifyReporter implements Reporter {
 
     // Rerun mode: just append a JSONL line and return.
     if (this.rerunFile) {
-      const key = buildTestKey(filepath, test.titlePath(), test.title);
+      const prefix = this.prefixFor(test);
+      const key = buildTestKey(filepath, test.titlePath(), test.title, prefix);
       const line = `${JSON.stringify({
         key,
         status: result.status,
@@ -196,7 +215,8 @@ export class MergifyReporter implements Reporter {
     const titlePath = test.titlePath();
     const namespace = extractNamespace(filepath, titlePath);
     const project = projectNameFromTest(test);
-    const key = buildTestKey(filepath, titlePath, test.title);
+    const prefix = this.prefixFor(test);
+    const key = buildTestKey(filepath, titlePath, test.title, prefix);
 
     const testCaseResult: TestCaseResult = {
       filepath,
@@ -211,6 +231,10 @@ export class MergifyReporter implements Reporter {
       retryCount: result.retry,
       flaky: test.outcome() === 'flaky',
     };
+
+    if (prefix) {
+      testCaseResult.namePrefix = prefix;
+    }
 
     if (project !== undefined) {
       testCaseResult.project = project;
@@ -232,7 +256,7 @@ export class MergifyReporter implements Reporter {
     const isQuarantined = test.annotations.some((a) => a.type === 'mergify:quarantined');
     if (isQuarantined) {
       testCaseResult.quarantined = true;
-      this.quarantinedCaught.push(key);
+      this.quarantinedCaught.add(key);
     }
 
     // Record phase-1 outcome for candidates, used to compute repeat-each
@@ -339,17 +363,18 @@ export class MergifyReporter implements Reporter {
     }
 
     if (this.quarantineFetchedCount > 0) {
-      const unused = this.quarantineFetchedCount - this.quarantinedCaught.length;
+      const unused = this.quarantineFetchedCount - this.quarantinedCaught.size;
       process.stderr.write('[@mergifyio/playwright] Quarantine report:\n');
       process.stderr.write(`  fetched: ${this.quarantineFetchedCount}\n`);
-      process.stderr.write(`  caught:  ${this.quarantinedCaught.length}\n`);
+      process.stderr.write(`  caught:  ${this.quarantinedCaught.size}\n`);
       for (const name of this.quarantinedCaught) {
         process.stderr.write(`    - ${name}\n`);
       }
       process.stderr.write(`  unused:  ${unused}\n`);
       if (unused > 0) {
-        const caughtSet = new Set(this.quarantinedCaught);
-        const unusedNames = this.quarantineFetchedNames.filter((n) => !caughtSet.has(n));
+        const unusedNames = this.quarantineFetchedNames.filter(
+          (n) => !this.quarantinedCaught.has(n)
+        );
         for (const name of unusedNames) {
           process.stderr.write(`    - ${name}\n`);
         }

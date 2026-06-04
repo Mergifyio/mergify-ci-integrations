@@ -77,6 +77,9 @@ function runPlaywrightFixture(): ReturnType<typeof spawnSync> {
       CI: 'true',
       GITHUB_ACTIONS: 'true',
       GITHUB_REPOSITORY: 'acme/repo',
+      // Prefixing is opt-in (default off); enable it so these runs exercise the
+      // [node] > … identities the seeds below assert.
+      PLAYWRIGHT_MERGIFY_INCLUDE_PROJECT_IN_TEST_NAME: 'true',
     },
     encoding: 'utf8',
   });
@@ -84,7 +87,7 @@ function runPlaywrightFixture(): ReturnType<typeof spawnSync> {
 
 describe('integration: quarantine end-to-end', () => {
   it('absorbs the quarantined failure but still fails on the non-quarantined one', () => {
-    seedStateFile(['sample.spec.ts > quarantined-fails']);
+    seedStateFile(['[node] > sample.spec.ts > quarantined-fails']);
     const result = runPlaywrightFixture();
 
     const combined = `${result.stdout}\n${result.stderr}`;
@@ -96,7 +99,7 @@ describe('integration: quarantine end-to-end', () => {
     expect(combined).toContain('Quarantine report');
     expect(combined).toContain('fetched: 1');
     expect(combined).toContain('caught:  1');
-    expect(combined).toContain('sample.spec.ts > quarantined-fails');
+    expect(combined).toContain('[node] > sample.spec.ts > quarantined-fails');
     expect(combined).toContain('unused:  0');
 
     // 2 passed = `passes` + `quarantined-fails` (absorbed), 1 failed = `fails`.
@@ -105,7 +108,7 @@ describe('integration: quarantine end-to-end', () => {
   }, 60_000);
 
   it('reports every list entry as unused when nothing matches', () => {
-    seedStateFile(['sample.spec.ts > does-not-exist']);
+    seedStateFile(['[node] > sample.spec.ts > does-not-exist']);
     const result = runPlaywrightFixture();
 
     const combined = `${result.stdout}\n${result.stderr}`;
@@ -115,7 +118,34 @@ describe('integration: quarantine end-to-end', () => {
     expect(result.status).toBe(1);
     expect(combined).toContain('caught:  0');
     expect(combined).toContain('unused:  1');
-    expect(combined).toContain('sample.spec.ts > does-not-exist');
+    expect(combined).toContain('[node] > sample.spec.ts > does-not-exist');
+  }, 60_000);
+
+  it('matches unprefixed names when PLAYWRIGHT_MERGIFY_INCLUDE_PROJECT_IN_TEST_NAME=false', () => {
+    seedStateFile(['sample.spec.ts > quarantined-fails']);
+    const result = spawnSync(
+      playwrightBin,
+      ['test', '--config', join(fixtureRoot, 'playwright.config.ts')],
+      {
+        cwd: fixtureRoot,
+        env: {
+          ...process.env,
+          MERGIFY_TOKEN: '',
+          MERGIFY_TEST_RUN_ID: 'integration-test-run',
+          MERGIFY_STATE_FILE: statePath,
+          CI: 'true',
+          GITHUB_ACTIONS: 'true',
+          GITHUB_REPOSITORY: 'acme/repo',
+          PLAYWRIGHT_MERGIFY_INCLUDE_PROJECT_IN_TEST_NAME: 'false',
+        },
+        encoding: 'utf8',
+      }
+    );
+
+    const combined = `${result.stdout}\n${result.stderr}`;
+    expect(combined).toContain('caught:  1');
+    expect(combined).toContain('    - sample.spec.ts > quarantined-fails');
+    expect(combined).toContain('unused:  0');
   }, 60_000);
 
   it('emits no summary when the state file is absent (V1 reporter-only parity)', () => {
@@ -195,6 +225,9 @@ function runFlakyFixture(envOverrides: Record<string, string>): ReturnType<typeo
       CI: 'true',
       GITHUB_ACTIONS: 'true',
       GITHUB_REPOSITORY: 'acme/repo',
+      // Prefixing is opt-in (default off); enable it so the [node] > … seeds
+      // below match. A test may still override via envOverrides.
+      PLAYWRIGHT_MERGIFY_INCLUDE_PROJECT_IN_TEST_NAME: 'true',
       ...envOverrides,
     },
     encoding: 'utf8',
@@ -207,7 +240,7 @@ describe('integration: flaky detection — unhealthy mode', () => {
     seedFlakyState({
       mode: 'unhealthy',
       rootDir: join(fixtureRoot, 'tests-unhealthy'),
-      unhealthyTestNames: ['sample.spec.ts > flaky-test'],
+      unhealthyTestNames: ['[node] > sample.spec.ts > flaky-test'],
     });
 
     const result = runFlakyFixture({
@@ -221,7 +254,7 @@ describe('integration: flaky detection — unhealthy mode', () => {
     expect(combined).toContain('mode: unhealthy');
     expect(combined).toContain('Tests rerun: 1');
     expect(combined).toContain('Flaky tests detected: 1');
-    expect(combined).toContain('sample.spec.ts > flaky-test');
+    expect(combined).toContain('[node] > sample.spec.ts > flaky-test');
   }, 90_000);
 });
 
@@ -231,7 +264,7 @@ describe('integration: flaky detection — new mode', () => {
     seedFlakyState({
       mode: 'new',
       rootDir: join(fixtureRoot, 'tests-unhealthy'),
-      existingTestNames: ['sample.spec.ts > passes'],
+      existingTestNames: ['[node] > sample.spec.ts > passes'],
     });
 
     const result = runFlakyFixture({
@@ -245,6 +278,6 @@ describe('integration: flaky detection — new mode', () => {
     expect(combined).toContain('Flaky detection report');
     expect(combined).toContain('mode: new');
     expect(combined).toContain('Flaky tests detected: 1');
-    expect(combined).toContain('sample.spec.ts > flaky-test');
+    expect(combined).toContain('[node] > sample.spec.ts > flaky-test');
   }, 90_000);
 });

@@ -177,6 +177,47 @@ describe('emitTestCaseSpan', () => {
     const session = spans.find((s) => s.name === 's')!;
     expect(tc.parentSpanContext?.spanId).toBe(session.spanContext().spanId);
   });
+
+  it('prepends namePrefix to the span name only, leaving code.namespace unchanged', () => {
+    const spans = run((sessionSpan, h) => {
+      emitTestCaseSpan(
+        h.tracing.tracer,
+        sessionSpan,
+        baseResult({
+          namespace: 'tests/x.spec.ts',
+          function: 'my test',
+          namePrefix: '[chromium] > ',
+        })
+      );
+    });
+    const tc = spans.find((s) => s.attributes['test.scope'] === 'case')!;
+    expect(tc.name).toBe('[chromium] > tests/x.spec.ts > my test');
+    expect(tc.attributes['code.namespace']).toBe('tests/x.spec.ts');
+  });
+
+  it('leaves the span name unchanged when namePrefix is absent', () => {
+    const spans = run((sessionSpan, h) => {
+      emitTestCaseSpan(
+        h.tracing.tracer,
+        sessionSpan,
+        baseResult({ namespace: 'tests/x.spec.ts', function: 'my test' })
+      );
+    });
+    const tc = spans.find((s) => s.attributes['test.scope'] === 'case')!;
+    expect(tc.name).toBe('tests/x.spec.ts > my test');
+  });
+
+  it('treats an empty-string namePrefix like an absent one (guards ?? vs ||)', () => {
+    const spans = run((sessionSpan, h) => {
+      emitTestCaseSpan(
+        h.tracing.tracer,
+        sessionSpan,
+        baseResult({ namespace: 'tests/x.spec.ts', function: 'my test', namePrefix: '' })
+      );
+    });
+    const tc = spans.find((s) => s.attributes['test.scope'] === 'case')!;
+    expect(tc.name).toBe('tests/x.spec.ts > my test');
+  });
 });
 
 describe('endSessionSpan', () => {
