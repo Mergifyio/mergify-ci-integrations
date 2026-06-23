@@ -182,9 +182,21 @@ export class MergifyReporter implements Reporter {
   }
 
   onTestEnd(test: TestCase, result: TestResult): void {
+    // A quarantine-absorbed failing test is reconciled as "expected" (the
+    // fixture flips testInfo.expectedStatus to mirror the raw status), so
+    // Playwright never retries it — it stays at result.retry === 0 with a raw
+    // 'failed' status. With retries > 0 the retry-count check below would never
+    // fire, so onTestEnd would return before counting it as caught or emitting
+    // its span. Treat the absorbed attempt as final. Absorption blocks the
+    // retry, so this annotation is present on exactly one attempt: no
+    // double-counting against a genuine final retry of a normally-failing test.
+    const isQuarantined = test.annotations.some((a) => a.type === 'mergify:quarantined');
     const retries = test.retries ?? 0;
     const isFinal =
-      result.status === 'passed' || result.status === 'skipped' || result.retry >= retries;
+      isQuarantined ||
+      result.status === 'passed' ||
+      result.status === 'skipped' ||
+      result.retry >= retries;
     if (!isFinal) return;
 
     const rootDir = this.config?.rootDir ?? '';
@@ -253,7 +265,6 @@ export class MergifyReporter implements Reporter {
       };
     }
 
-    const isQuarantined = test.annotations.some((a) => a.type === 'mergify:quarantined');
     if (isQuarantined) {
       testCaseResult.quarantined = true;
       this.quarantinedCaught.add(key);

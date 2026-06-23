@@ -609,6 +609,41 @@ describe('MergifyReporter V2 — quarantine', () => {
     expect(output).toContain('unused:  0');
   });
 
+  it('counts an absorbed quarantined test as caught and emits one span when retries > 0 (MRGFY-7767)', async () => {
+    const log = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const exporter = new InMemorySpanExporter();
+    const reporter = new MergifyReporter({ exporter });
+    reporter.onBegin(fakeConfig(), fakeSuite());
+
+    // A quarantine-absorbed failing test: the fixture flipped expectedStatus so
+    // Playwright treats the outcome as expected and never retries it — it stays
+    // at retry 0 even though `retries: 2` is configured. The raw status is still
+    // 'failed' and it carries the quarantine annotation. The retry-count check
+    // (retry >= retries) is therefore never satisfied; without special handling
+    // onTestEnd returns early, dropping the caught count and the span.
+    const test = fakeTest({
+      retries: 2,
+      titlePath: ['chromium', '/root/tests/x.spec.ts', 'my test'],
+      location: { file: '/root/tests/x.spec.ts', line: 1, column: 1 },
+      annotations: [{ type: 'mergify:quarantined' }],
+    });
+    reporter.onTestEnd(
+      test,
+      fakeResult({ status: 'failed', retry: 0, errors: [{ message: 'x' } as never] })
+    );
+    await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
+
+    const testSpans = exporter
+      .getFinishedSpans()
+      .filter((s) => s.attributes['test.scope'] === 'case');
+    expect(testSpans).toHaveLength(1);
+    expect(testSpans[0].attributes['cicd.test.quarantined']).toBe(true);
+
+    const output = log.mock.calls.map((c) => String(c[0])).join('');
+    expect(output).toContain('caught:  1');
+    expect(output).toContain('unused:  0');
+  });
+
   it('omits the summary when no state file is present (V1 parity)', async () => {
     delete process.env.MERGIFY_TEST_RUN_ID;
     delete process.env.MERGIFY_STATE_FILE;

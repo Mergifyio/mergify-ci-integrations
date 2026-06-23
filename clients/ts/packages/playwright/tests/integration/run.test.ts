@@ -59,7 +59,9 @@ function seedStateFile(quarantinedTests: string[]): void {
   );
 }
 
-function runPlaywrightFixture(): ReturnType<typeof spawnSync> {
+function runPlaywrightFixture(
+  envOverrides: Record<string, string> = {}
+): ReturnType<typeof spawnSync> {
   return spawnSync(playwrightBin, ['test', '--config', join(fixtureRoot, 'playwright.config.ts')], {
     cwd: fixtureRoot,
     env: {
@@ -80,6 +82,7 @@ function runPlaywrightFixture(): ReturnType<typeof spawnSync> {
       // Prefixing is opt-in (default off); enable it so these runs exercise the
       // [node] > … identities the seeds below assert.
       PLAYWRIGHT_MERGIFY_INCLUDE_PROJECT_IN_TEST_NAME: 'true',
+      ...envOverrides,
     },
     encoding: 'utf8',
   });
@@ -105,6 +108,26 @@ describe('integration: quarantine end-to-end', () => {
     // 2 passed = `passes` + `quarantined-fails` (absorbed), 1 failed = `fails`.
     expect(combined).toMatch(/1 failed/);
     expect(combined).toMatch(/2 passed/);
+  }, 60_000);
+
+  it('still catches the absorbed quarantined failure when retries > 0 (MRGFY-7767)', () => {
+    seedStateFile(['[node] > sample.spec.ts > quarantined-fails']);
+    // retries: 2 — the absorbed quarantined test is reconciled as expected and
+    // never retried (stays at retry 0), so the reporter must not gate it behind
+    // the retry-count check. Before the fix this reported caught: 0, no span.
+    const result = runPlaywrightFixture({ PW_FIXTURE_RETRIES: '2' });
+
+    const combined = `${result.stdout}\n${result.stderr}`;
+
+    // The non-quarantined `fails` test exhausts its retries and still fails → exit 1.
+    expect(result.status).toBe(1);
+
+    // Quarantine summary still shows the one caught test despite retries > 0.
+    expect(combined).toContain('Quarantine report');
+    expect(combined).toContain('fetched: 1');
+    expect(combined).toContain('caught:  1');
+    expect(combined).toContain('[node] > sample.spec.ts > quarantined-fails');
+    expect(combined).toContain('unused:  0');
   }, 60_000);
 
   it('reports every list entry as unused when nothing matches', () => {
