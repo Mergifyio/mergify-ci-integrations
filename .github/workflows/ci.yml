@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref (e.g. a force-push to a PR branch).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Let abi3 builds proceed against a CPython newer than the one PyO3 knows
+# about (e.g. a runner shipping a brand-new 3.x). Safe for abi3 wheels.
+env:
+  PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
+
+jobs:
+  rust:
+    name: cargo test + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+          components: clippy
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  wheel:
+    name: build + import wheel (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.x"
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+      - name: Build wheel
+        run: pipx run maturin build --release --manifest-path clients/pytest-mergify/Cargo.toml --out dist
+      - name: Install and import
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install --no-index --find-links dist pytest-mergify
+          # This step runs inside GitHub Actions, so real detection must return
+          # github_actions — a genuine end-to-end check across all three OSes.
+          python -c "import pytest_mergify as m; p = m.detect_provider(); print('provider =', p); assert p == 'github_actions', p"

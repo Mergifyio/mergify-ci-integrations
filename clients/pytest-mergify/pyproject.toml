@@ -1,0 +1,18 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "pytest-mergify"
+version = "0.0.0"
+description = "pytest plugin for Mergify CI Insights (walking-skeleton stub; real plugin migrates in MRGFY-7766)."
+requires-python = ">=3.9"
+# Skeleton stub — never publish this placeholder.
+classifiers = ["Private :: Do Not Upload"]
+
+[tool.maturin]
+# Mixed project: Python sources live under python/, the compiled extension is
+# packaged inside the pytest_mergify package as `_mergify_ci`.
+python-source = "python"
+module-name = "pytest_mergify._mergify_ci"
+features = ["pyo3/extension-module"]

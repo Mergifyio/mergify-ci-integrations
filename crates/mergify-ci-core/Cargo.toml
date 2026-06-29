@@ -1,0 +1,26 @@
+[package]
+name = "mergify-ci-core"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "CI provider / job-context detection — the shared source of truth for Mergify test-client integrations."
+# Intentionally publishable: keep deps to crates.io-only so this crate can be
+# published later for mergify-cli to consume. Do NOT add private Mergify crates.
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
