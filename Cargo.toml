@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "clients/pytest-mergify"]
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/Mergifyio/mergify-ci-integrations"
+authors = ["Mergify Team <hello@mergify.com>"]
+
+# NB: unlike mergify-cli we do NOT `unsafe_code = "forbid"` at the workspace
+# level — the FFI binding crates (PyO3, later magnus/napi) need unsafe. The
+# pure `mergify-ci-core` crate forbids it in its own [lints] instead.
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

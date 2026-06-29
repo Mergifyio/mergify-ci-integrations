@@ -1,0 +1,8 @@
+/target
+/dist
+*.whl
+**/*.so
+**/*.pyd
+**/__pycache__/
+.venv/
+node_modules/
