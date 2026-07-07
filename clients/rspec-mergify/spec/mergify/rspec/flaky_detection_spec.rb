@@ -70,10 +70,20 @@ RSpec.describe Mergify::RSpec::FlakyDetector do
         stub_context_request(body: empty_context)
       end
 
-      it 'raises RuntimeError' do
+      it 'raises FlakyDetectionDisabledError so the caller skips silently' do
         expect do
           described_class.new(token: token, url: url, full_repository_name: full_repository_name, mode: 'new')
-        end.to raise_error(RuntimeError)
+        end.to raise_error(Mergify::RSpec::FlakyDetectionDisabledError)
+      end
+    end
+
+    context 'when the repository has not opted into flaky detection (404)' do
+      before { stub_context_request(status: 404, body: '') }
+
+      it 'raises FlakyDetectionDisabledError so the caller skips silently' do
+        expect do
+          described_class.new(token: token, url: url, full_repository_name: full_repository_name, mode: 'new')
+        end.to raise_error(Mergify::RSpec::FlakyDetectionDisabledError)
       end
     end
   end

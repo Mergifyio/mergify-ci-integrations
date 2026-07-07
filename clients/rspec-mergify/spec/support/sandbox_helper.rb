@@ -19,8 +19,11 @@ module SandboxHelper
       in_ci?: true,
       repository_name: 'owner/repo'
     )
-    allow(Mergify::RSpec::Utils).to receive(:env_truthy?).and_call_original
-    allow(Mergify::RSpec::Utils).to receive(:env_truthy?).with('_MERGIFY_TEST_NEW_FLAKY_DETECTION').and_return(false)
+
+    # The gem's own suite has no repository opted into flaky detection; a 404
+    # makes the detector skip silently instead of reaching the network.
+    stub_request(:get, 'https://api.mergify.com/v1/ci/owner/repositories/repo/flaky-detection-context')
+      .to_return(status: 404)
 
     empty_resource = OpenTelemetry::SDK::Resources::Resource.create({})
     [

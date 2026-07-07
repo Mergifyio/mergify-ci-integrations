@@ -133,6 +133,11 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
         allow(Mergify::RSpec::Resources::Jenkins).to receive(:detect).and_return(empty)
         allow(Mergify::RSpec::Resources::Mergify).to receive(:detect).and_return(empty)
         allow(Mergify::RSpec::Resources::RSpec).to receive(:detect).and_return(empty)
+
+        # The repository has not opted into flaky detection, so the server
+        # answers 404 and the detector skips silently.
+        stub_request(:get, 'https://api.mergify.com/v1/ci/owner/repositories/repo/flaky-detection-context')
+          .to_return(status: 404)
       end
 
       it 'creates a tracer' do
@@ -155,9 +160,10 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
         expect(insights.exporter).to be_a(OpenTelemetry::SDK::Trace::Export::InMemorySpanExporter)
       end
 
-      it 'has nil flaky_detector when flag is not set' do
+      it 'has nil flaky_detector when the repository has not opted in' do
         insights = described_class.new
         expect(insights.flaky_detector).to be_nil
+        expect(insights.flaky_detector_error_message).to be_nil
       end
 
       it 'has nil quarantined_tests without branch_name' do
@@ -171,11 +177,10 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
       end
     end
 
-    describe 'when in CI with flaky detection enabled' do
+    describe 'when in CI and the repository opted into flaky detection' do
       before do
         clear_ci_env
         allow(Mergify::RSpec::Utils).to receive_messages(in_ci?: true, repository_name: 'owner/repo')
-        allow(Mergify::RSpec::Utils).to receive(:env_truthy?).with('_MERGIFY_TEST_NEW_FLAKY_DETECTION').and_return(true)
         ENV['MERGIFY_TOKEN'] = 'test-token'
         ENV['_RSPEC_MERGIFY_TEST'] = 'true'
 
@@ -228,6 +233,15 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
         expect(insights.flaky_detector).to be_nil
         expect(insights.flaky_detector_error_message).to include('Could not load flaky detector')
       end
+
+      it 'skips silently when the repository has not opted in (404)' do
+        stub_request(:get, 'https://api.mergify.com/v1/ci/owner/repositories/repo/flaky-detection-context')
+          .to_return(status: 404)
+
+        insights = described_class.new
+        expect(insights.flaky_detector).to be_nil
+        expect(insights.flaky_detector_error_message).to be_nil
+      end
     end
 
     describe 'when in CI with branch_name available' do
@@ -245,6 +259,11 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
         allow(Mergify::RSpec::Resources::Jenkins).to receive(:detect).and_return(empty)
         allow(Mergify::RSpec::Resources::Mergify).to receive(:detect).and_return(empty)
         allow(Mergify::RSpec::Resources::RSpec).to receive(:detect).and_return(empty)
+
+        # This block exercises quarantine; the repository has not opted into
+        # flaky detection, so the server answers 404 and the detector skips.
+        stub_request(:get, 'https://api.mergify.com/v1/ci/owner/repositories/repo/flaky-detection-context')
+          .to_return(status: 404)
       end
 
       it 'loads quarantined_tests' do

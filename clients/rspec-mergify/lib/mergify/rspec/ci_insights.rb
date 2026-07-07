@@ -145,7 +145,6 @@ module Mergify
       # rubocop:disable Metrics/MethodLength
       def load_flaky_detector
         return unless @token && @repo_name
-        return unless Utils.env_truthy?('_MERGIFY_TEST_NEW_FLAKY_DETECTION')
 
         require_relative 'flaky_detection'
         mode = @base_branch_name ? 'new' : 'unhealthy'
@@ -155,6 +154,10 @@ module Mergify
           full_repository_name: @repo_name,
           mode: mode
         )
+      rescue FlakyDetectionDisabledError
+        # The repository has not opted into flaky detection, or has no baseline
+        # yet. Both are expected; skip without surfacing an error.
+        nil
       rescue StandardError => e
         @flaky_detector_error_message = "Could not load flaky detector: #{e.message}"
       end

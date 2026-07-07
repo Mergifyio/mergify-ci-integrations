@@ -8,6 +8,12 @@ require_relative 'utils'
 
 module Mergify
   module RSpec
+    # Signals that flaky detection must not run for this session, and that this
+    # is expected rather than a failure: the repository has not opted in (the
+    # server responds with 404) or there is no baseline of recorded tests yet.
+    # Callers skip silently instead of surfacing an error banner.
+    class FlakyDetectionDisabledError < StandardError; end
+
     # Manages intelligent test rerunning with budget constraints for flaky detection.
     # rubocop:disable Metrics/ClassLength
     class FlakyDetector
@@ -193,7 +199,7 @@ module Mergify
 
       private
 
-      # rubocop:disable Metrics/AbcSize
+      # rubocop:disable Metrics/AbcSize,Metrics/MethodLength
       def fetch_context
         owner, repo = Utils.split_full_repo_name(@full_repository_name)
         uri = URI("#{@url}/v1/ci/#{owner}/repositories/#{repo}/flaky-detection-context")
@@ -207,9 +213,18 @@ module Mergify
         request['Authorization'] = "Bearer #{@token}"
 
         response = http.request(request)
-        parse_context(response.body)
+        case response.code.to_i
+        when 200
+          parse_context(response.body)
+        when 404
+          # A 404 means the repository has not opted into flaky detection; this
+          # is the expected default, not an error.
+          raise FlakyDetectionDisabledError
+        else
+          raise "Mergify API returned HTTP #{response.code}"
+        end
       end
-      # rubocop:enable Metrics/AbcSize
+      # rubocop:enable Metrics/AbcSize,Metrics/MethodLength
 
       # rubocop:disable Metrics/MethodLength,Metrics/AbcSize
       def parse_context(body)
@@ -231,7 +246,9 @@ module Mergify
       def validate!
         return unless @mode == 'new' && @context[:existing_test_names].empty?
 
-        raise 'Cannot use "new" mode without existing test names in the context'
+        # Without a baseline, `new` mode would treat every test as new and rerun
+        # the whole suite. Skip instead of surfacing an error.
+        raise FlakyDetectionDisabledError
       end
 
       def remaining_budget
