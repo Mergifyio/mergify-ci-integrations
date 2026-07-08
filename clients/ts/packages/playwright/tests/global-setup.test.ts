@@ -151,8 +151,7 @@ describe('runGlobalSetup — flaky detection', () => {
     });
   }
 
-  it('writes flakyContext + flakyMode "new" when feature flag is set and base ref is present', async () => {
-    vi.stubEnv('_MERGIFY_TEST_NEW_FLAKY_DETECTION', 'true');
+  it('writes flakyContext + flakyMode "new" when opted in and base ref is present', async () => {
     vi.stubEnv('GITHUB_BASE_REF', 'main');
     vi.stubGlobal('fetch', fetchRouter());
 
@@ -164,8 +163,7 @@ describe('runGlobalSetup — flaky detection', () => {
     expect(state.flakyContext.existing_test_names).toEqual(['existing-1']);
   });
 
-  it('writes flakyMode "unhealthy" when feature flag is set and no base ref', async () => {
-    vi.stubEnv('_MERGIFY_TEST_NEW_FLAKY_DETECTION', 'true');
+  it('writes flakyMode "unhealthy" when opted in and no base ref', async () => {
     vi.stubEnv('GITHUB_BASE_REF', '');
     vi.stubEnv('GITHUB_REF_NAME', 'main');
     vi.stubGlobal('fetch', fetchRouter());
@@ -177,20 +175,33 @@ describe('runGlobalSetup — flaky detection', () => {
     expect(state.flakyMode).toBe('unhealthy');
   });
 
-  it('writes no flaky fields when the feature flag is unset', async () => {
-    // No _MERGIFY_TEST_NEW_FLAKY_DETECTION stub; quarantine path still runs.
-    vi.stubGlobal('fetch', fetchRouter());
+  it('writes no flaky fields and stays silent when the repository has not opted in (404)', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url.includes('quarantines')) {
+          return new Response(JSON.stringify({ quarantined_tests: [] }), { status: 200 });
+        }
+        // Repository has not opted into flaky detection.
+        return new Response('', { status: 404 });
+      })
+    );
 
     await runGlobalSetup(fakeConfig('/repo'), { cacheRoot, now: () => new Date() });
 
     const id = process.env.MERGIFY_TEST_RUN_ID!;
     const state = JSON.parse(readFileSync(stateFilePath(cacheRoot, id), 'utf8'));
+    expect(state.quarantinedTests).toEqual([]); // quarantine still wrote
     expect(state.flakyMode).toBeUndefined();
     expect(state.flakyContext).toBeUndefined();
+    // A 404 is the expected opt-out default, so nothing is logged about flaky.
+    const written = stderr.mock.calls.map((c) => String(c[0])).join('');
+    expect(written).not.toMatch(/flaky detection/i);
   });
 
   it('omits flaky fields when fetchFlakyDetectionContext returns null', async () => {
-    vi.stubEnv('_MERGIFY_TEST_NEW_FLAKY_DETECTION', 'true');
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: string | URL | Request) => {

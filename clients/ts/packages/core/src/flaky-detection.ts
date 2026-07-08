@@ -18,6 +18,9 @@ export type FlakyDetectionConfig = {
   apiUrl: string;
   token: string;
   repoName: string;
+  // The mode is needed here so the empty-baseline guard below can skip when
+  // "new" mode has nothing to compare against.
+  mode: FlakyDetectionMode;
 };
 
 export async function fetchFlakyDetectionContext(
@@ -33,6 +36,12 @@ export async function fetchFlakyDetectionContext(
       signal: AbortSignal.timeout(10_000),
     });
 
+    // A 404 means the repository has not opted into flaky detection. This is
+    // the expected default rather than an error, so skip silently.
+    if (response.status === 404) {
+      return null;
+    }
+
     if (response.status === 402) {
       logger('Flaky detection not available (no subscription)');
       return null;
@@ -43,7 +52,15 @@ export async function fetchFlakyDetectionContext(
       return null;
     }
 
-    return (await response.json()) as FlakyDetectionContext;
+    const context = (await response.json()) as FlakyDetectionContext;
+
+    // Without a baseline, "new" mode would treat every test as new and rerun
+    // the whole suite. Skip silently rather than surfacing an error.
+    if (config.mode === 'new' && context.existing_test_names.length === 0) {
+      return null;
+    }
+
+    return context;
   } catch (err) {
     if (err instanceof DOMException && err.name === 'TimeoutError') {
       logger('Flaky detection API request timed out');

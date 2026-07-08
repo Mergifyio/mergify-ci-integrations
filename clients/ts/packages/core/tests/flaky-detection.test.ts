@@ -223,6 +223,7 @@ describe('fetchFlakyDetectionContext', () => {
         apiUrl: 'https://api.mergify.com',
         token: 'test-token',
         repoName: 'owner/repo',
+        mode: 'new',
       },
       vi.fn()
     );
@@ -230,18 +231,61 @@ describe('fetchFlakyDetectionContext', () => {
     expect(ctx).toEqual(baseContext);
   });
 
-  it('returns null on error', async () => {
+  it('logs and returns null on error', async () => {
     mockFetch.mockResolvedValue({ ok: false, status: 500 });
+    const logger = vi.fn();
 
     const ctx = await fetchFlakyDetectionContext(
       {
         apiUrl: 'https://api.mergify.com',
         token: 'test-token',
         repoName: 'owner/repo',
+        mode: 'new',
       },
-      vi.fn()
+      logger
     );
 
     expect(ctx).toBeNull();
+    // A real error still surfaces via the logger (the "banner").
+    expect(logger).toHaveBeenCalled();
+  });
+
+  it('skips silently on 404 (repository not opted in)', async () => {
+    mockFetch.mockResolvedValue({ ok: false, status: 404 });
+    const logger = vi.fn();
+
+    const ctx = await fetchFlakyDetectionContext(
+      {
+        apiUrl: 'https://api.mergify.com',
+        token: 'test-token',
+        repoName: 'owner/repo',
+        mode: 'new',
+      },
+      logger
+    );
+
+    expect(ctx).toBeNull();
+    expect(logger).not.toHaveBeenCalled();
+  });
+
+  it('skips silently when "new" mode has an empty baseline', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ ...baseContext, existing_test_names: [] }),
+    });
+    const logger = vi.fn();
+
+    const ctx = await fetchFlakyDetectionContext(
+      {
+        apiUrl: 'https://api.mergify.com',
+        token: 'test-token',
+        repoName: 'owner/repo',
+        mode: 'new',
+      },
+      logger
+    );
+
+    expect(ctx).toBeNull();
+    expect(logger).not.toHaveBeenCalled();
   });
 });

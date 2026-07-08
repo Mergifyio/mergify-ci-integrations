@@ -57,16 +57,16 @@ export async function runGlobalSetup(config: FullConfig, deps: RunGlobalSetupDep
   // already surfaced the failure to the user.
   const list = await fetchQuarantineList({ apiUrl, token, repoName, branch }, log);
 
-  // Flaky detection — gated by the feature-flag env var. Same soft-fail
-  // shape as quarantine: any null return means feature dormant, not error.
+  // Flaky detection is server-driven: always request the context and let the
+  // server opt the repository in (200) or out (404). Same soft-fail shape as
+  // quarantine — a null return means the feature is dormant, not an error.
   let flakyContext: FlakyDetectionContext | undefined;
   let flakyMode: 'new' | 'unhealthy' | undefined;
-  if (envToBool(process.env._MERGIFY_TEST_NEW_FLAKY_DETECTION, false)) {
-    const ctx = await fetchFlakyDetectionContext({ apiUrl, token, repoName }, log);
-    if (ctx) {
-      flakyContext = ctx;
-      flakyMode = isPullRequest ? 'new' : 'unhealthy';
-    }
+  const mode = isPullRequest ? 'new' : 'unhealthy';
+  const ctx = await fetchFlakyDetectionContext({ apiUrl, token, repoName, mode }, log);
+  if (ctx) {
+    flakyContext = ctx;
+    flakyMode = mode;
   }
 
   const state: SharedState = {

@@ -106,15 +106,16 @@ export class MergifyReporter implements Reporter {
       this.flakyContext = this.options.flakyContext;
       this.flakyMode = this.options.flakyMode;
       this._configureFlakyDetection(vitest);
-    } else {
-      // Flaky detection
-      const flakyModeEnv = process.env._MERGIFY_TEST_NEW_FLAKY_DETECTION;
-      if (flakyModeEnv === 'new' || flakyModeEnv === 'unhealthy') {
-        this.flakyMode = flakyModeEnv;
-        if (token && repoName) {
-          this._initFlakyDetection(vitest, { apiUrl, token, repoName });
-        }
-      }
+    } else if (this.tracing && token && repoName) {
+      // Flaky detection is server-driven: always request the context and let
+      // the server opt the repository in (200) or out (404). The mode mirrors
+      // the pytest/rspec clients — a PR base ref means "new", otherwise
+      // "unhealthy".
+      const baseRef = this.tracing.resource.attributes['vcs.ref.base.name'];
+      const mode: FlakyDetectionMode =
+        typeof baseRef === 'string' && baseRef.length > 0 ? 'new' : 'unhealthy';
+      this.flakyMode = mode;
+      this._initFlakyDetection(vitest, { apiUrl, token, repoName, mode });
     }
   }
 
@@ -135,7 +136,7 @@ export class MergifyReporter implements Reporter {
 
   private _initFlakyDetection(
     vitest: Vitest,
-    config: { apiUrl: string; token: string; repoName: string }
+    config: { apiUrl: string; token: string; repoName: string; mode: FlakyDetectionMode }
   ): void {
     const log = (msg: string) => vitest.logger.log(`[@mergifyio/vitest] ${msg}`);
     this._flakyPromise = fetchFlakyDetectionContext(config, log).then((ctx) => {

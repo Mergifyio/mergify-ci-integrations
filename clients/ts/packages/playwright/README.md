@@ -68,8 +68,8 @@ every entry shows up under "unused" (the `caught` count stays 0).
 
 ### Flaky detection (preview)
 
-Set `_MERGIFY_TEST_NEW_FLAKY_DETECTION=true` to opt into Mergify's flaky-
-detection feature. When enabled, the reporter:
+Flaky detection is opt-in per repository from the Mergify dashboard. Once a
+repository has opted in, the reporter:
 
 1. Fetches the API context in `globalSetup` and decides a mode based on
    the run shape:
@@ -94,10 +94,6 @@ Each phase-2 rerun is a fresh Playwright test invocation, so all fixtures
 (including user-defined `test.extend(...)` ones) are re-initialised
 between attempts — this matches Playwright's normal test-isolation
 guarantees.
-
-| Variable | Description | Default |
-|---|---|---|
-| `_MERGIFY_TEST_NEW_FLAKY_DETECTION` | Enable flaky detection | `false` |
 
 #### Caveats
 
@@ -138,7 +134,6 @@ no project name are never prefixed.
 | `MERGIFY_TEST_RUN_ID` | Test run identifier (set by `withMergify`'s globalSetup; read by workers) | — |
 | `MERGIFY_STATE_FILE` | Path to the per-run state file (set by globalSetup; read by workers) | — |
 | `MERGIFY_RERUN_FILE` | JSONL file the rerun subprocess writes to (set internally; do not set manually) | — |
-| `_MERGIFY_TEST_NEW_FLAKY_DETECTION` | Enable flaky-detection preview | `false` |
 
 For detailed documentation, see the [official guide](https://docs.mergify.com/ci-insights/test-frameworks/).
 
