@@ -35,7 +35,7 @@
   "devDependencies": {
     "@opentelemetry/sdk-trace-base": "^2.9.0",
     "@playwright/test": "^1.61.1",
-    "vitest": "^4.1.9"
+    "vitest": "^4.1.10"
   },
   "scripts": {
     "build": "tsdown",
