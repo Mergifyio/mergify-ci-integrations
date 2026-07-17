@@ -51,5 +51,5 @@ jobs:
           python -m pip install --upgrade pip
           pip install --no-index --find-links dist pytest-mergify
           # This step runs inside GitHub Actions, so real detection must return
-          # github_actions — a genuine end-to-end check across all three OSes.
-          python -c "import pytest_mergify as m; p = m.detect_provider(); print('provider =', p); assert p == 'github_actions', p"
+          # github_actions and this repo's slug — a genuine end-to-end check.
+          python -c "import pytest_mergify as m; p = m.detect_provider(); r = m.detect_repository_name(); print('provider =', p, 'repo =', r); assert p == 'github_actions', p; assert r == 'Mergifyio/mergify-ci-integrations', r"

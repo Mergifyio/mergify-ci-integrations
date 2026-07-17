@@ -10,18 +10,28 @@ use std::collections::BTreeMap;
 
 use pyo3::prelude::*;
 
-/// Detect the CI provider from the current process environment.
-///
-/// Returns the provider string, or `None` when not running in CI.
-#[pyfunction]
-fn detect_provider() -> Option<String> {
+/// Detect from the current process environment and working directory.
+fn context() -> mergify_ci_core::CiContext {
     let env: BTreeMap<String, String> = std::env::vars().collect();
     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-    mergify_ci_core::detect(&env, &cwd).provider
+    mergify_ci_core::detect(&env, &cwd)
+}
+
+/// The detected CI provider, or `None` when not running in CI.
+#[pyfunction]
+fn detect_provider() -> Option<String> {
+    context().provider
+}
+
+/// The detected `owner/repo`, or `None` when it can't be determined.
+#[pyfunction]
+fn detect_repository_name() -> Option<String> {
+    context().repository_name
 }
 
 #[pymodule]
 fn _mergify_ci(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(detect_provider, m)?)?;
+    m.add_function(wrap_pyfunction!(detect_repository_name, m)?)?;
     Ok(())
 }
