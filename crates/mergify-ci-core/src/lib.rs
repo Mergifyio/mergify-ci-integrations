@@ -3,68 +3,55 @@
 //! [`detect`] takes the environment and working directory as explicit
 //! parameters (never `std::env` globals) so bindings and parity tests can
 //! inject fixtures deterministically. Behaviour mirrors `pytest-mergify`'s
-//! `pytest_mergify/utils.py` so every client stays byte-for-byte in parity.
+//! `pytest_mergify/utils.py` and its OTel resource detectors for parity.
+//!
+//! Two layers: [`detect`] produces a typed, OTel-agnostic [`CiContext`];
+//! [`otel_attributes`] maps that to OpenTelemetry resource attributes.
+
+mod context;
+mod git;
+mod otel;
+mod providers;
+mod repo;
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::sync::LazyLock;
 
-use regex::Regex;
-use serde::{Deserialize, Serialize};
+use providers::CiProvider;
 
-/// CI providers we detect, checked in this order. Mirrors `SUPPORTED_CIs` in
-/// `pytest_mergify/utils.py` — order matters, the first *enabled* one wins.
-const SUPPORTED_CIS: &[(&str, &str)] = &[
-    ("GITHUB_ACTIONS", "github_actions"),
-    ("CIRCLECI", "circleci"),
-    ("JENKINS_URL", "jenkins"),
-    ("BUILDKITE", "buildkite"),
-    ("_PYTEST_MERGIFY_TEST", "pytest_mergify_suite"),
-];
-
-// `re.match` anchors at the start; these patterns anchor the end with `$` too.
-static SSH_URL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^git@[\w.-]+:(?P<full_name>[\w.-]+/[\w.-]+)(?:\.git)?/?$").unwrap()
-});
-static HTTP_URL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(?:https?://[\w.-]+(?::\d+)?/)?(?P<full_name>[\w.-]+/[\w.-]+)/?$").unwrap()
-});
-
-/// Canonical, serde-serializable detection contract.
-///
-/// The single struct every binding maps to native objects, and the one a
-/// future `mergify ci detect --json` sidecar will emit. New fields land here,
-/// once.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CiContext {
-    /// Detected CI provider (e.g. `"github_actions"`), or `None` when not in CI.
-    pub provider: Option<String>,
-    /// `owner/repo` for the build, or `None` when it can't be determined.
-    pub repository_name: Option<String>,
-}
+pub use context::{AttrValue, CiContext, Pipeline, Provider, Refs, Repository};
+pub use otel::attributes as otel_attributes;
 
 /// Detect CI context from an explicit environment map and working directory.
 #[must_use]
 pub fn detect(env: &BTreeMap<String, String>, cwd: &Path) -> CiContext {
-    let provider = ci_provider(env);
-    CiContext {
-        provider: provider.map(str::to_owned),
-        repository_name: repository_name(provider, env, cwd),
+    let active = active_provider(env);
+    let mut ctx = CiContext {
+        provider: active.map(CiProvider::provider),
+        repository_name: match active {
+            Some(p) => p.endpoint_name(env),
+            None => repo::from_git_remote(cwd),
+        },
+        ..CiContext::default()
+    };
+
+    if let Some(p) = active {
+        p.extract(env, cwd, &mut ctx);
+        // Git layer fills whatever the provider didn't supply.
+        git::fill(&mut ctx, cwd);
     }
+
+    ctx
 }
 
-/// Port of `get_ci_provider`: return the first provider whose env var is
-/// present and truthy. A present-but-falsy var is skipped, not a match.
-fn ci_provider(env: &BTreeMap<String, String>) -> Option<&'static str> {
-    for (var, name) in SUPPORTED_CIS {
-        if let Some(value) = env.get(*var)
-            && is_truthy(value)
-        {
-            return Some(name);
-        }
-    }
-    None
+/// Port of `get_ci_provider`: the first provider in [`providers::REGISTRY`]
+/// whose detection var is present and truthy. A present-but-falsy var is
+/// skipped, not a match.
+fn active_provider(env: &BTreeMap<String, String>) -> Option<&'static dyn CiProvider> {
+    providers::REGISTRY
+        .iter()
+        .copied()
+        .find(|p| env.get(p.detect_var()).is_some_and(|v| is_truthy(v)))
 }
 
 /// Port of `strtobool` plus `utils.py`'s fallback: recognised booleans map as
@@ -78,67 +65,10 @@ fn is_truthy(value: &str) -> bool {
     }
 }
 
-/// Port of `get_repository_name`: a per-provider lookup, falling back to the
-/// checkout's `origin` remote when the provider is unknown or absent.
-///
-/// Note the asymmetry, kept for parity: `github_actions` returns
-/// `GITHUB_REPOSITORY` raw (even if empty), whereas the URL-based providers
-/// treat an empty value as "not set".
-fn repository_name(
-    provider: Option<&str>,
-    env: &BTreeMap<String, String>,
-    cwd: &Path,
-) -> Option<String> {
-    match provider {
-        Some("github_actions") => env.get("GITHUB_REPOSITORY").cloned(),
-        Some("circleci") => repo_name_from_env_url(env, "CIRCLE_REPOSITORY_URL"),
-        Some("jenkins") => repo_name_from_env_url(env, "GIT_URL"),
-        Some("buildkite") => repo_name_from_env_url(env, "BUILDKITE_REPO"),
-        Some("pytest_mergify_suite") => Some("Mergifyio/pytest-mergify".to_owned()),
-        _ => repo_name_from_url(&git(cwd, &["config", "--get", "remote.origin.url"])?),
-    }
-}
-
-/// Port of `get_repository_name_from_env_url`: parse the repo out of a URL held
-/// in `key`, treating an empty value as absent (Python's `if repository_url:`).
-fn repo_name_from_env_url(env: &BTreeMap<String, String>, key: &str) -> Option<String> {
-    let url = env.get(key).filter(|u| !u.is_empty())?;
-    repo_name_from_url(url)
-}
-
-/// Port of `get_repository_name_from_url`: try the SSH form first, then
-/// HTTP(S). Only the SSH branch strips a trailing `.git` (a parity quirk —
-/// the HTTP branch intentionally does not).
-fn repo_name_from_url(url: &str) -> Option<String> {
-    if let Some(caps) = SSH_URL.captures(url) {
-        let full = &caps["full_name"];
-        return Some(full.strip_suffix(".git").unwrap_or(full).to_owned());
-    }
-    if let Some(caps) = HTTP_URL.captures(url) {
-        return Some(caps["full_name"].to_owned());
-    }
-    None
-}
-
-/// Port of `git()`: run git in `cwd`, returning trimmed stdout, or `None` if
-/// git is missing, exits non-zero, or prints nothing.
-fn git(cwd: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8(output.stdout).ok()?;
-    let trimmed = text.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_owned())
-}
-
 #[cfg(test)]
 mod tests {
+    use std::process::{Command, Stdio};
+
     use super::*;
 
     fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -148,143 +78,159 @@ mod tests {
             .collect()
     }
 
-    // --- provider detection (get_ci_provider) ---
-
-    #[test]
-    fn no_ci_is_none() {
-        assert_eq!(ci_provider(&env(&[])), None);
+    fn attrs_of(ctx: &CiContext) -> BTreeMap<String, AttrValue> {
+        otel_attributes(ctx)
     }
 
+    // --- provider detection ---
+
     #[test]
-    fn each_provider_when_truthy() {
+    fn detects_each_provider_and_skips_falsy() {
+        let detected =
+            |pairs: &[(&str, &str)]| active_provider(&env(pairs)).map(CiProvider::provider);
+        assert_eq!(detected(&[]), None);
+        assert_eq!(detected(&[("GITHUB_ACTIONS", "true")]), Some(Provider::GithubActions));
+        assert_eq!(detected(&[("CIRCLECI", "1")]), Some(Provider::CircleCi));
+        assert_eq!(detected(&[("_PYTEST_MERGIFY_TEST", "yes")]), Some(Provider::PytestSuite));
+        assert_eq!(detected(&[("GITHUB_ACTIONS", "false")]), None);
+        // First enabled in registry order wins; a falsy earlier one is skipped.
         assert_eq!(
-            ci_provider(&env(&[("GITHUB_ACTIONS", "true")])),
-            Some("github_actions"),
-        );
-        assert_eq!(ci_provider(&env(&[("CIRCLECI", "1")])), Some("circleci"));
-        // JENKINS_URL is a URL, not a boolean: truthy via the non-empty fallback.
-        assert_eq!(
-            ci_provider(&env(&[("JENKINS_URL", "https://ci.example/")])),
-            Some("jenkins"),
-        );
-        assert_eq!(ci_provider(&env(&[("BUILDKITE", "true")])), Some("buildkite"));
-        assert_eq!(
-            ci_provider(&env(&[("_PYTEST_MERGIFY_TEST", "yes")])),
-            Some("pytest_mergify_suite"),
+            detected(&[("GITHUB_ACTIONS", "false"), ("CIRCLECI", "true")]),
+            Some(Provider::CircleCi),
         );
     }
 
-    #[test]
-    fn present_but_falsy_is_skipped() {
-        assert_eq!(ci_provider(&env(&[("GITHUB_ACTIONS", "false")])), None);
-        assert_eq!(ci_provider(&env(&[("GITHUB_ACTIONS", "0")])), None);
-        assert_eq!(ci_provider(&env(&[("GITHUB_ACTIONS", "")])), None);
-        assert_eq!(ci_provider(&env(&[("GITHUB_ACTIONS", "   ")])), None);
-    }
+    // --- endpoint repository name (get_repository_name), via detect ---
 
     #[test]
-    fn first_enabled_in_table_order_wins() {
+    fn endpoint_repository_name_per_provider() {
+        let name = |pairs: &[(&str, &str)]| detect(&env(pairs), Path::new(".")).repository_name;
         assert_eq!(
-            ci_provider(&env(&[("GITHUB_ACTIONS", "true"), ("CIRCLECI", "true")])),
-            Some("github_actions"),
-        );
-        // Falsy github_actions is skipped; circleci then wins.
-        assert_eq!(
-            ci_provider(&env(&[("GITHUB_ACTIONS", "false"), ("CIRCLECI", "true")])),
-            Some("circleci"),
-        );
-    }
-
-    // --- URL parsing (get_repository_name_from_url) ---
-
-    #[test]
-    fn ssh_url_strips_trailing_dot_git() {
-        assert_eq!(
-            repo_name_from_url("git@github.com:Mergifyio/example.git").as_deref(),
-            Some("Mergifyio/example"),
+            name(&[("GITHUB_ACTIONS", "true"), ("GITHUB_REPOSITORY", "Mergifyio/x")]).as_deref(),
+            Some("Mergifyio/x"),
         );
         assert_eq!(
-            repo_name_from_url("git@github.com:Mergifyio/example").as_deref(),
-            Some("Mergifyio/example"),
-        );
-    }
-
-    #[test]
-    fn https_url_shapes() {
-        assert_eq!(
-            repo_name_from_url("https://github.com/Mergifyio/example").as_deref(),
-            Some("Mergifyio/example"),
+            name(&[
+                ("CIRCLECI", "true"),
+                ("CIRCLE_REPOSITORY_URL", "git@github.com:Mergifyio/x.git"),
+            ])
+            .as_deref(),
+            Some("Mergifyio/x"),
         );
         assert_eq!(
-            repo_name_from_url("https://github.com:443/Mergifyio/example/").as_deref(),
-            Some("Mergifyio/example"),
-        );
-        // Scheme-less "owner/repo" is accepted by the HTTP branch.
-        assert_eq!(
-            repo_name_from_url("Mergifyio/example").as_deref(),
-            Some("Mergifyio/example"),
-        );
-        // HTTP does NOT strip .git (parity quirk).
-        assert_eq!(
-            repo_name_from_url("https://github.com/Mergifyio/example.git").as_deref(),
-            Some("Mergifyio/example.git"),
-        );
-    }
-
-    #[test]
-    fn unparseable_url_is_none() {
-        assert_eq!(repo_name_from_url("not a url"), None);
-        assert_eq!(repo_name_from_url("https://github.com/onlyowner"), None);
-        assert_eq!(repo_name_from_url(""), None);
-    }
-
-    // --- repository name per provider (get_repository_name) ---
-
-    #[test]
-    fn repo_name_github_actions_is_raw_env() {
-        let e = env(&[("GITHUB_REPOSITORY", "Mergifyio/example")]);
-        assert_eq!(
-            repository_name(Some("github_actions"), &e, Path::new(".")).as_deref(),
-            Some("Mergifyio/example"),
-        );
-    }
-
-    #[test]
-    fn repo_name_circleci_and_jenkins_parse_urls() {
-        let circle = env(&[("CIRCLE_REPOSITORY_URL", "git@github.com:Mergifyio/example.git")]);
-        assert_eq!(
-            repository_name(Some("circleci"), &circle, Path::new(".")).as_deref(),
-            Some("Mergifyio/example"),
-        );
-        let jenkins = env(&[("GIT_URL", "https://github.com/Mergifyio/example")]);
-        assert_eq!(
-            repository_name(Some("jenkins"), &jenkins, Path::new(".")).as_deref(),
-            Some("Mergifyio/example"),
-        );
-    }
-
-    #[test]
-    fn repo_name_pytest_suite_is_constant() {
-        assert_eq!(
-            repository_name(Some("pytest_mergify_suite"), &env(&[]), Path::new(".")).as_deref(),
+            name(&[("_PYTEST_MERGIFY_TEST", "1")]).as_deref(),
             Some("Mergifyio/pytest-mergify"),
         );
     }
 
-    // --- git fallback (get_repository_name's `git config` path) ---
+    // --- URL parsing quirks ---
 
     #[test]
-    fn repo_name_falls_back_to_git_origin() {
+    fn url_parsing_quirks() {
+        assert_eq!(
+            repo::from_url("git@github.com:Mergifyio/example.git").as_deref(),
+            Some("Mergifyio/example"),
+        );
+        assert_eq!(
+            repo::from_url("https://github.com:443/Mergifyio/example/").as_deref(),
+            Some("Mergifyio/example"),
+        );
+        // HTTP does NOT strip .git (parity quirk); SSH does.
+        assert_eq!(
+            repo::from_url("https://github.com/Mergifyio/example.git").as_deref(),
+            Some("Mergifyio/example.git"),
+        );
+        assert_eq!(repo::from_url("not a url"), None);
+    }
+
+    // --- GitHub Actions attributes ---
+
+    fn github_env() -> BTreeMap<String, String> {
+        env(&[
+            ("GITHUB_ACTIONS", "true"),
+            ("GITHUB_WORKFLOW", "CI"),
+            ("GITHUB_JOB", "build"),
+            ("GITHUB_RUN_ID", "42"),
+            ("GITHUB_RUN_ATTEMPT", "1"),
+            ("RUNNER_NAME", "runner-1"),
+            ("GITHUB_REF_NAME", "main"),
+            ("GITHUB_REF_TYPE", "branch"),
+            ("GITHUB_REPOSITORY", "Mergifyio/example"),
+            ("GITHUB_REPOSITORY_ID", "123"),
+            ("GITHUB_SERVER_URL", "https://github.com"),
+            ("GITHUB_SHA", "cafe1234"),
+        ])
+    }
+
+    #[test]
+    fn github_actions_attributes() {
+        let ctx = detect(&github_env(), Path::new("."));
+        let a = attrs_of(&ctx);
+
+        assert_eq!(a["cicd.provider.name"], "github_actions".into());
+        assert_eq!(a["vcs.repository.name"], "Mergifyio/example".into());
+        assert_eq!(a["vcs.repository.url.full"], "https://github.com/Mergifyio/example".into());
+        assert_eq!(a["vcs.repository.id"], AttrValue::Int(123));
+        assert_eq!(a["vcs.ref.head.name"], "main".into());
+        assert_eq!(a["vcs.ref.head.type"], "branch".into());
+        assert_eq!(a["vcs.ref.head.revision"], "cafe1234".into());
+        assert_eq!(a["cicd.pipeline.name"], "CI".into());
+        assert_eq!(a["cicd.pipeline.task.name"], "build".into());
+        assert_eq!(a["cicd.pipeline.run.id"], AttrValue::Int(42));
+        assert_eq!(a["cicd.pipeline.run.attempt"], AttrValue::Int(1));
+        assert_eq!(a["cicd.pipeline.runner.name"], "runner-1".into());
+        // endpoint name matches too
+        assert_eq!(ctx.repository_name.as_deref(), Some("Mergifyio/example"));
+    }
+
+    #[test]
+    fn head_ref_prefers_head_ref_over_ref_name() {
+        let mut e = github_env();
+        e.insert("GITHUB_HEAD_REF".to_owned(), "feature".to_owned());
+        e.insert("GITHUB_REF_NAME".to_owned(), "7/merge".to_owned());
+        let a = attrs_of(&detect(&e, Path::new(".")));
+        assert_eq!(a["vcs.ref.head.name"], "feature".into());
+    }
+
+    #[test]
+    fn pull_request_head_sha_from_event_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let event = dir.path().join("event.json");
+        std::fs::write(&event, br#"{"pull_request":{"head":{"sha":"prsha99"}}}"#).unwrap();
+
+        let mut e = github_env();
+        e.insert("GITHUB_EVENT_NAME".to_owned(), "pull_request".to_owned());
+        e.insert(
+            "GITHUB_EVENT_PATH".to_owned(),
+            event.to_string_lossy().into_owned(),
+        );
+        let a = attrs_of(&detect(&e, Path::new(".")));
+        // PR head sha from the event payload, not GITHUB_SHA.
+        assert_eq!(a["vcs.ref.head.revision"], "prsha99".into());
+    }
+
+    // --- not in CI: attributes suppressed, endpoint still falls back to git ---
+
+    #[test]
+    fn not_in_ci_suppresses_attributes_but_endpoint_uses_git() {
         let dir = tempfile::tempdir().unwrap();
         run_git(dir.path(), &["init"]);
         run_git(
             dir.path(),
             &["remote", "add", "origin", "git@github.com:Mergifyio/from-git.git"],
         );
-        // Empty env -> provider None -> git fallback in the given cwd.
+
         let ctx = detect(&env(&[]), dir.path());
         assert_eq!(ctx.provider, None);
+        assert!(attrs_of(&ctx).is_empty(), "no attributes when not in CI");
         assert_eq!(ctx.repository_name.as_deref(), Some("Mergifyio/from-git"));
+    }
+
+    #[test]
+    fn context_round_trips_through_json() {
+        let ctx = detect(&github_env(), Path::new("."));
+        let json = serde_json::to_string(&ctx).unwrap();
+        assert_eq!(serde_json::from_str::<CiContext>(&json).unwrap(), ctx);
     }
 
     fn run_git(cwd: &Path, args: &[&str]) {
@@ -296,17 +242,5 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success(), "git {args:?} failed");
-    }
-
-    // --- serialization ---
-
-    #[test]
-    fn context_round_trips_through_json() {
-        let ctx = CiContext {
-            provider: Some("github_actions".to_owned()),
-            repository_name: Some("Mergifyio/example".to_owned()),
-        };
-        let json = serde_json::to_string(&ctx).unwrap();
-        assert_eq!(serde_json::from_str::<CiContext>(&json).unwrap(), ctx);
     }
 }

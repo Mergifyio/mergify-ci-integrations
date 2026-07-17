@@ -1,0 +1,3 @@
+# Proper nouns that read as identifiers to clippy::doc_markdown but shouldn't
+# need backticks in prose. `..` keeps clippy's built-in allowlist.
+doc-valid-idents = ["OTel", "OpenTelemetry", "CircleCI", ".."]
