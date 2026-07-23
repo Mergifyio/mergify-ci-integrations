@@ -6,8 +6,10 @@
 //! Adding a provider is one module plus one entry in `REGISTRY`; the OTel
 //! mapping never changes, since it reads typed fields, not per-provider tables.
 
+mod buildkite;
 mod circleci;
 mod github_actions;
+mod jenkins;
 mod pytest_suite;
 
 use std::collections::BTreeMap;
@@ -38,5 +40,7 @@ pub(crate) trait CiProvider: Sync {
 pub(crate) static REGISTRY: &[&dyn CiProvider] = &[
     &github_actions::GithubActions,
     &circleci::CircleCi,
+    &jenkins::Jenkins,
+    &buildkite::Buildkite,
     &pytest_suite::PytestSuite,
 ];

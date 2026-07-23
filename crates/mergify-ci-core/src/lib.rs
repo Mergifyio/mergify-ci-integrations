@@ -91,6 +91,8 @@ mod tests {
         assert_eq!(detected(&[]), None);
         assert_eq!(detected(&[("GITHUB_ACTIONS", "true")]), Some(Provider::GithubActions));
         assert_eq!(detected(&[("CIRCLECI", "1")]), Some(Provider::CircleCi));
+        assert_eq!(detected(&[("JENKINS_URL", "https://ci/")]), Some(Provider::Jenkins));
+        assert_eq!(detected(&[("BUILDKITE", "true")]), Some(Provider::Buildkite));
         assert_eq!(detected(&[("_PYTEST_MERGIFY_TEST", "yes")]), Some(Provider::PytestSuite));
         assert_eq!(detected(&[("GITHUB_ACTIONS", "false")]), None);
         // First enabled in registry order wins; a falsy earlier one is skipped.
@@ -181,6 +183,72 @@ mod tests {
         assert_eq!(a["cicd.pipeline.runner.name"], "runner-1".into());
         // endpoint name matches too
         assert_eq!(ctx.repository_name.as_deref(), Some("Mergifyio/example"));
+    }
+
+    // --- Jenkins attributes ---
+
+    #[test]
+    fn jenkins_attributes() {
+        let e = env(&[
+            ("JENKINS_URL", "https://ci.example/"),
+            ("JOB_NAME", "my-job"),
+            ("BUILD_ID", "57"),
+            ("BUILD_URL", "https://ci.example/job/57"),
+            ("NODE_NAME", "agent-1"),
+            ("GIT_BRANCH", "origin/main"),
+            ("GIT_COMMIT", "deadbeef"),
+            ("GIT_URL", "git@github.com:Mergifyio/example.git"),
+        ]);
+        let a = attrs_of(&detect(&e, Path::new(".")));
+        assert_eq!(a["cicd.provider.name"], "jenkins".into());
+        assert_eq!(a["cicd.pipeline.name"], "my-job".into());
+        assert_eq!(a["cicd.pipeline.task.name"], "my-job".into());
+        // Jenkins run id is a string, not an int.
+        assert_eq!(a["cicd.pipeline.run.id"], "57".into());
+        assert_eq!(a["cicd.pipeline.run.url"], "https://ci.example/job/57".into());
+        assert_eq!(a["cicd.pipeline.runner.name"], "agent-1".into());
+        // `origin/` prefix stripped from the branch.
+        assert_eq!(a["vcs.ref.head.name"], "main".into());
+        assert_eq!(a["vcs.ref.head.revision"], "deadbeef".into());
+        assert_eq!(a["vcs.repository.name"], "Mergifyio/example".into());
+    }
+
+    // --- Buildkite attributes ---
+
+    #[test]
+    fn buildkite_attributes() {
+        let e = env(&[
+            ("BUILDKITE", "true"),
+            ("BUILDKITE_PIPELINE_SLUG", "my-pipe"),
+            ("BUILDKITE_LABEL", ":hammer:"),
+            ("BUILDKITE_BUILD_ID", "abc-123"),
+            ("BUILDKITE_BUILD_URL", "https://bk/builds/1"),
+            ("BUILDKITE_RETRY_COUNT", "2"),
+            ("BUILDKITE_AGENT_NAME", "agent-x"),
+            ("BUILDKITE_BRANCH", "feature"),
+            ("BUILDKITE_COMMIT", "cafe"),
+            ("BUILDKITE_REPO", "git@github.com:Mergifyio/example.git"),
+        ]);
+        let a = attrs_of(&detect(&e, Path::new(".")));
+        assert_eq!(a["cicd.provider.name"], "buildkite".into());
+        assert_eq!(a["cicd.pipeline.name"], "my-pipe".into());
+        assert_eq!(a["cicd.pipeline.task.name"], ":hammer:".into());
+        assert_eq!(a["cicd.pipeline.run.id"], "abc-123".into());
+        // Attempt = retry count + 1.
+        assert_eq!(a["cicd.pipeline.run.attempt"], AttrValue::Int(3));
+        assert_eq!(a["cicd.pipeline.runner.name"], "agent-x".into());
+        assert_eq!(a["vcs.ref.head.name"], "feature".into());
+        assert_eq!(a["vcs.ref.head.revision"], "cafe".into());
+        assert_eq!(a["vcs.repository.name"], "Mergifyio/example".into());
+    }
+
+    #[test]
+    fn buildkite_task_falls_back_to_step_key() {
+        // Empty cwd (no git repo) so the git layer stays quiet.
+        let dir = tempfile::tempdir().unwrap();
+        let e = env(&[("BUILDKITE", "true"), ("BUILDKITE_STEP_KEY", "unit")]);
+        let a = attrs_of(&detect(&e, dir.path()));
+        assert_eq!(a["cicd.pipeline.task.name"], "unit".into());
     }
 
     #[test]
