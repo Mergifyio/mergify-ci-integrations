@@ -9,12 +9,16 @@ use crate::context::{AttrValue, CiContext};
 
 /// Build the OTel resource attributes for `ctx`.
 ///
-/// Attributes are suppressed entirely when not in CI, mirroring
-/// pytest-mergify's detectors, which return an empty `Resource` when there is
-/// no provider.
+/// The CI/git/provider attributes are suppressed when not in CI (mirroring
+/// pytest-mergify's provider-guarded detectors), but always-on attributes such
+/// as `mergify.test.job.name` are still emitted.
 #[must_use]
 pub fn attributes(ctx: &CiContext) -> BTreeMap<String, AttrValue> {
     let mut attrs = BTreeMap::new();
+
+    // Always-on, no provider guard (pytest-mergify's Mergify detector).
+    put(&mut attrs, "mergify.test.job.name", opt(ctx.test_job_name.as_deref()));
+
     let Some(provider) = ctx.provider else {
         return attrs;
     };

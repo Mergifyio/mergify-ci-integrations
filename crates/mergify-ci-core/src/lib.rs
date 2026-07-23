@@ -32,6 +32,7 @@ pub fn detect(env: &BTreeMap<String, String>, cwd: &Path) -> CiContext {
             Some(p) => p.endpoint_name(env),
             None => repo::from_git_remote(cwd),
         },
+        test_job_name: env.get("MERGIFY_TEST_JOB_NAME").cloned(),
         ..CiContext::default()
     };
 
@@ -249,6 +250,26 @@ mod tests {
         let e = env(&[("BUILDKITE", "true"), ("BUILDKITE_STEP_KEY", "unit")]);
         let a = attrs_of(&detect(&e, dir.path()));
         assert_eq!(a["cicd.pipeline.task.name"], "unit".into());
+    }
+
+    // --- Mergify (always-on) attribute ---
+
+    #[test]
+    fn mergify_test_job_name_alongside_ci() {
+        let mut e = github_env();
+        e.insert("MERGIFY_TEST_JOB_NAME".to_owned(), "e2e".to_owned());
+        let a = attrs_of(&detect(&e, Path::new(".")));
+        assert_eq!(a["cicd.provider.name"], "github_actions".into());
+        assert_eq!(a["mergify.test.job.name"], "e2e".into());
+    }
+
+    #[test]
+    fn mergify_test_job_name_emitted_even_when_not_in_ci() {
+        // No CI provider, empty cwd: only the always-on Mergify attribute.
+        let dir = tempfile::tempdir().unwrap();
+        let a = attrs_of(&detect(&env(&[("MERGIFY_TEST_JOB_NAME", "unit")]), dir.path()));
+        assert_eq!(a.get("cicd.provider.name"), None);
+        assert_eq!(a["mergify.test.job.name"], "unit".into());
     }
 
     #[test]

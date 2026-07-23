@@ -116,6 +116,10 @@ pub struct CiContext {
     pub repository: Repository,
     pub refs: Refs,
     pub pipeline: Pipeline,
+    /// Mergify test job name (`mergify.test.job.name`), from
+    /// `MERGIFY_TEST_JOB_NAME`. Emitted regardless of provider — it has no CI
+    /// guard in pytest-mergify's Mergify detector.
+    pub test_job_name: Option<String>,
     /// Provider-specific attributes with no typed field.
     pub extra: BTreeMap<String, AttrValue>,
 }
