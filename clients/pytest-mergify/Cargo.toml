@@ -1,0 +1,22 @@
+[package]
+name = "pytest-mergify"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Rust (PyO3) binding embedded in the pytest-mergify wheel (walking skeleton)."
+publish = false
+
+[lib]
+# Packaged inside the wheel as `pytest_mergify._mergify_ci`.
+name = "_mergify_ci"
+crate-type = ["cdylib"]
+
+[dependencies]
+mergify-ci-core = { path = "../../crates/mergify-ci-core" }
+# abi3-py39: one wheel works across all CPython 3.9+ on a given platform.
+pyo3 = { version = "0.24", features = ["abi3-py39", "extension-module"] }
+
+[lints]
+workspace = true
