@@ -16,7 +16,7 @@ crate-type = ["cdylib"]
 [dependencies]
 mergify-ci-core = { path = "../../crates/mergify-ci-core" }
 # abi3-py39: one wheel works across all CPython 3.9+ on a given platform.
-pyo3 = { version = "0.24", features = ["abi3-py39", "extension-module"] }
+pyo3 = { version = "0.29", features = ["abi3-py39", "extension-module"] }
 
 [lints]
 workspace = true
