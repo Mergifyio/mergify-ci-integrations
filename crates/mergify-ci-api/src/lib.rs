@@ -15,14 +15,20 @@
 //! - [`Outcome`]: the tri-state every backend fetch resolves to.
 //! - [`Client`]: the async client for the quarantine and flaky-detection
 //!   fetches — fail-open, resolving to an [`Outcome`].
+//! - [`budget`]: the flaky-detection budget engine — the pure arithmetic
+//!   (test selection, budget, per-test time shares) ported for cross-client
+//!   parity.
 //!
-//! The budget engine and trace export land in later slices.
+//! Trace export lands in a later slice.
+
+pub mod budget;
 
 mod client;
 mod config;
 mod models;
 mod outcome;
 
+pub use budget::{BudgetPlan, Mode};
 pub use client::Client;
 pub use config::{ApiConfig, DEFAULT_API_URL, split_full_name};
 pub use models::{FlakyDetectionContext, QuarantinePage, QuarantinedTest};
