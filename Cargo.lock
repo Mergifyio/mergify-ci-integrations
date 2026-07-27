@@ -889,8 +889,10 @@ dependencies = [
 name = "pytest-mergify"
 version = "0.0.0"
 dependencies = [
+ "mergify-ci-api",
  "mergify-ci-core",
  "pyo3",
+ "tokio",
 ]
 
 [[package]]
