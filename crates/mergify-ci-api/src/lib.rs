@@ -13,13 +13,16 @@
 //! - [`models`]: the response wire types ([`QuarantinePage`],
 //!   [`FlakyDetectionContext`]).
 //! - [`Outcome`]: the tri-state every backend fetch resolves to.
-//! - [`Client`]: the async client for the quarantine and flaky-detection
-//!   fetches — fail-open, resolving to an [`Outcome`].
+//! - [`Client`]: the async client — fail-open quarantine/flaky fetches
+//!   (resolving to an [`Outcome`]) plus fail-loud trace upload
+//!   ([`Client::upload_trace`]).
 //! - [`budget`]: the flaky-detection budget engine — the pure arithmetic
 //!   (test selection, budget, per-test time shares) ported for cross-client
 //!   parity.
+//! - [`SpanData`] / [`AttrValue`]: the plain span data handed in for OTLP
+//!   trace export (no live `OpenTelemetry` objects cross the boundary).
 //!
-//! Trace export lands in a later slice.
+//! The language bindings land in a later slice.
 
 pub mod budget;
 
@@ -27,9 +30,11 @@ mod client;
 mod config;
 mod models;
 mod outcome;
+mod trace;
 
 pub use budget::{BudgetPlan, Mode};
 pub use client::Client;
 pub use config::{ApiConfig, DEFAULT_API_URL, split_full_name};
 pub use models::{FlakyDetectionContext, QuarantinePage, QuarantinedTest};
 pub use outcome::Outcome;
+pub use trace::{AttrValue, MAX_GZIPPED_UPLOAD_BYTES, SpanData, SpanStatus, UploadError};
