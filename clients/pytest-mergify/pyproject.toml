@@ -5,8 +5,24 @@ build-backend = "maturin"
 [project]
 name = "pytest-mergify"
 version = "0.0.0"
-description = "pytest plugin for Mergify CI Insights (walking-skeleton stub; real plugin migrates in MRGFY-7766)."
+description = "Pytest plugin for Mergify CI Insights"
+authors = [{ name = "Julien Danjou", email = "jd@mergify.com" }]
+# Relocated from the standalone pytest-mergify repo (MRGFY-7766). Keeps its
+# original GPL license; the Rust workspace around it is Apache-2.0.
+license = "GPL-3.0-only"
+readme = "README.md"
+# The bundled Rust binding is abi3-py39, so 3.9 is the floor (was 3.8 upstream).
 requires-python = ">=3.9"
+dependencies = [
+    "opentelemetry-exporter-otlp-proto-http>=1.29",
+    "opentelemetry-sdk>=1.29",
+    "requests>=2",
+    "pytest>=6.0.0",
+    "pytest-timeout>=2.4.0",
+]
+
+[project.entry-points.pytest11]
+pytest_mergify = "pytest_mergify"
 
 [tool.maturin]
 # Mixed project: Python sources live under python/, the compiled extension is
@@ -14,3 +30,13 @@ requires-python = ">=3.9"
 python-source = "python"
 module-name = "pytest_mergify._mergify_ci"
 features = ["pyo3/extension-module"]
+
+[dependency-groups]
+dev = [
+    "anys>=0.3.1",
+    "responses>=0.25.8",
+    # https://github.com/pytest-dev/pytest-asyncio/issues/706#issuecomment-2082788963
+    "pytest-asyncio>=0.24.0",
+    "freezegun>=1.5.5",
+    "pytest-xdist>=3.0",
+]
