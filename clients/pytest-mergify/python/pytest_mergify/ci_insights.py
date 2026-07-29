@@ -1,0 +1,318 @@
+import dataclasses
+import os
+import random
+import typing
+
+import _pytest.nodes
+import opentelemetry.sdk.resources
+import requests
+from opentelemetry.exporter.otlp.proto.http import Compression
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+    OTLPSpanExporter,
+)
+from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor, TracerProvider, export
+from opentelemetry.semconv._incubating.attributes import cicd_attributes, vcs_attributes
+
+import pytest_mergify.quarantine
+import pytest_mergify.test_selection
+import pytest_mergify.resources.ci as resources_ci
+import pytest_mergify.resources.git as resources_git
+import pytest_mergify.resources.github_actions as resources_gha
+import pytest_mergify.resources.jenkins as resources_jenkins
+import pytest_mergify.resources.buildkite as resources_buildkite
+import pytest_mergify.resources.circleci as resources_circleci
+import pytest_mergify.resources.mergify as resources_mergify
+import pytest_mergify.resources.pytest as resources_pytest
+from pytest_mergify import flaky_detection, utils
+
+
+class SynchronousBatchSpanProcessor(export.SimpleSpanProcessor):
+    def __init__(self, exporter: export.SpanExporter) -> None:
+        super().__init__(exporter)
+        self.queue: typing.List[ReadableSpan] = []
+
+    def force_flush(self, timeout_millis: int = 30_000) -> bool:
+        if not self.queue:
+            return True
+
+        try:
+            exported = self.span_exporter.export(self.queue)
+        finally:
+            # Cleared even when the export raises, so a batch is attempted once.
+            # `shutdown` flushes too, and the SDK keeps its atexit hook armed
+            # until that returns, so a queue left behind is sent twice more and
+            # the last failure surfaces as an ignored exception at exit.
+            self.queue.clear()
+
+        return exported is export.SpanExportResult.SUCCESS
+
+    def on_end(self, span: ReadableSpan) -> None:
+        if not span.context.trace_flags.sampled:
+            return
+
+        self.queue.append(span)
+
+    def shutdown(self) -> None:
+        # The SDK registers this with atexit, so it is what runs for a session
+        # that ends without reaching the terminal summary -- a job timeout, an
+        # OOM kill, another plugin raising early. Inherited unchanged it closes
+        # the exporter and drops everything still queued, which is the whole run.
+        self.force_flush()
+        super().shutdown()
+
+
+class SessionRaisingOnPermanentError(requests.Session):  # type: ignore[misc]
+    """A requests.Session that raises on an error retrying cannot resolve."""
+
+    def request(self, *args: typing.Any, **kwargs: typing.Any) -> requests.Response:
+        response = super().request(*args, **kwargs)
+
+        # A client error reads the same however many times it is sent, so it is
+        # raised here, where the summary can name it. Anything the OTLP exporter
+        # treats as retryable -- 408 and 5xx, as of 1.30 -- is handed back
+        # untouched, because raising ahead of it lost a whole run's spans to a
+        # blip that one retry would have cleared.
+        if 400 <= response.status_code < 500 and response.status_code != 408:
+            response.raise_for_status()
+
+        return response
+
+
+@dataclasses.dataclass
+class MergifyCIInsights:
+    token: typing.Optional[str] = dataclasses.field(
+        default_factory=lambda: os.environ.get("MERGIFY_TOKEN")
+    )
+    repo_name: typing.Optional[str] = dataclasses.field(
+        default_factory=utils.get_repository_name
+    )
+    api_url: str = dataclasses.field(
+        default_factory=lambda: os.environ.get(
+            "MERGIFY_API_URL", "https://api.mergify.com"
+        )
+    )
+    branch_name: typing.Optional[str] = dataclasses.field(
+        init=False,
+        default=None,
+    )
+    exporter: typing.Optional[export.SpanExporter] = dataclasses.field(
+        init=False, default=None
+    )
+    tracer: typing.Optional[opentelemetry.trace.Tracer] = dataclasses.field(
+        init=False, default=None
+    )
+    tracer_provider: typing.Optional[opentelemetry.sdk.trace.TracerProvider] = (
+        dataclasses.field(init=False, default=None)
+    )
+    test_run_id: str = dataclasses.field(
+        init=False,
+        default_factory=lambda: random.getrandbits(64).to_bytes(8, "big").hex(),
+    )
+
+    flaky_detector: typing.Optional[flaky_detection.FlakyDetector] = dataclasses.field(
+        init=False,
+        default=None,
+    )
+    flaky_detector_error_message: typing.Optional[str] = dataclasses.field(
+        init=False,
+        default=None,
+    )
+
+    quarantined_tests: typing.Optional[pytest_mergify.quarantine.Quarantine] = (
+        dataclasses.field(
+            init=False,
+            default=None,
+        )
+    )
+
+    test_selection: typing.Optional[pytest_mergify.test_selection.TestSelection] = (
+        dataclasses.field(
+            init=False,
+            default=None,
+        )
+    )
+
+    def __post_init__(self) -> None:
+        if not utils.is_in_ci():
+            return
+
+        span_processor: SpanProcessor
+
+        if utils.is_env_true("PYTEST_MERGIFY_DEBUG"):
+            self.exporter = export.ConsoleSpanExporter()
+            span_processor = SynchronousBatchSpanProcessor(self.exporter)
+        elif utils.is_env_true("_PYTEST_MERGIFY_TEST"):
+            from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+                InMemorySpanExporter,
+            )
+
+            self.exporter = InMemorySpanExporter()
+            span_processor = export.SimpleSpanProcessor(self.exporter)
+        elif self.token and self.repo_name:
+            try:
+                owner, repo = utils.split_full_repo_name(self.repo_name)
+            except utils.InvalidRepositoryFullNameError:
+                return
+            self.exporter = OTLPSpanExporter(
+                session=SessionRaisingOnPermanentError(),
+                endpoint=f"{self.api_url}/v1/ci/{owner}/repositories/{repo}/traces",
+                headers={"Authorization": f"Bearer {self.token}"},
+                compression=Compression.Gzip,
+            )
+            span_processor = SynchronousBatchSpanProcessor(self.exporter)
+        else:
+            return
+
+        resource = opentelemetry.sdk.resources.get_aggregated_resources(
+            [
+                resources_git.GitResourceDetector(),
+                resources_ci.CIResourceDetector(),
+                resources_gha.GitHubActionsResourceDetector(),
+                resources_jenkins.JenkinsResourceDetector(),
+                resources_buildkite.BuildkiteResourceDetector(),
+                resources_circleci.CircleCIResourceDetector(),
+                resources_pytest.PytestResourceDetector(),
+                resources_mergify.MergifyResourceDetector(),
+            ]
+        )
+
+        resource = resource.merge(
+            opentelemetry.sdk.resources.Resource(
+                {
+                    "test.run.id": self.test_run_id,
+                }
+            )
+        )
+
+        self.tracer_provider = TracerProvider(resource=resource)
+
+        self.tracer_provider.add_span_processor(span_processor)
+        self.tracer = self.tracer_provider.get_tracer("pytest-mergify")
+
+        # Retrieve the branch name, preferring base ref (target branch) over
+        # head ref. `or` ensures an empty base ref (e.g. `GITHUB_BASE_REF=""` on
+        # push runs) falls through to the head ref.
+        branch_name = resource.attributes.get(
+            vcs_attributes.VCS_REF_BASE_NAME
+        ) or resource.attributes.get(vcs_attributes.VCS_REF_HEAD_NAME)
+        if branch_name is not None:
+            # `str` cast just for `mypy`.
+            self.branch_name = str(branch_name)
+
+        self._load_flaky_detector(
+            # A base branch indicates a PR context. Use `new` mode for PRs to
+            # detect newly flaky tests, `unhealthy` for push/scheduled runs to
+            # focus on known problematic tests.
+            mode="new"
+            if resource.attributes.get(vcs_attributes.VCS_REF_BASE_NAME)
+            else "unhealthy",
+        )
+
+        if self.token and self.repo_name and self.branch_name:
+            self.quarantined_tests = pytest_mergify.quarantine.Quarantine(
+                self.api_url,
+                self.token,
+                self.repo_name,
+                self.branch_name,
+            )
+
+        self._load_test_selection(resource)
+
+    def _load_test_selection(
+        self, resource: opentelemetry.sdk.resources.Resource
+    ) -> None:
+        try:
+            disabled = utils.strtobool(
+                os.environ.get("MERGIFY_TEST_SELECTION_DISABLE", "false")
+            )
+        except ValueError:
+            # A kill switch must never crash pytest startup: any value we
+            # cannot parse reads as an attempt to disable.
+            disabled = True
+
+        if (
+            self.token is None
+            or self.repo_name is None
+            or disabled
+            # On xdist workers the controller already filtered the collection.
+            or os.environ.get("PYTEST_XDIST_WORKER") is not None
+        ):
+            return
+
+        # The selection is keyed on the run's OWN identity: the head branch
+        # and head revision (a merge-queue draft branch on reruns) plus the
+        # job coordinates — the exact values this plugin reports with each
+        # uploaded test, so the server can match its records.
+        head_branch = resource.attributes.get(vcs_attributes.VCS_REF_HEAD_NAME)
+        head_sha = resource.attributes.get(vcs_attributes.VCS_REF_HEAD_REVISION)
+        pipeline_name = resource.attributes.get(cicd_attributes.CICD_PIPELINE_NAME)
+        job_name = resource.attributes.get(
+            "mergify.test.job.name"
+        ) or resource.attributes.get(cicd_attributes.CICD_PIPELINE_TASK_NAME)
+        if not (head_branch and head_sha and pipeline_name and job_name):
+            return
+
+        self.test_selection = pytest_mergify.test_selection.TestSelection(
+            api_url=self.api_url,
+            token=self.token,
+            repo_name=self.repo_name,
+            branch_name=str(head_branch),
+            head_sha=str(head_sha),
+            pipeline_name=str(pipeline_name),
+            job_name=str(job_name),
+        )
+
+    def _load_flaky_detector(
+        self,
+        mode: typing.Literal["new", "unhealthy"],
+    ) -> None:
+        if (
+            self.token is None
+            or self.repo_name is None
+            # On xdist workers the detector is loaded from the controller-
+            # provided context, so skip the redundant per-worker API call.
+            or os.environ.get("PYTEST_XDIST_WORKER") is not None
+        ):
+            return
+
+        try:
+            self.flaky_detector = flaky_detection.FlakyDetector(
+                token=self.token,
+                url=self.api_url,
+                full_repository_name=self.repo_name,
+                mode=mode,
+            )
+        except flaky_detection.FlakyDetectionDisabledError:
+            # The repository has not opted into flaky detection, or has no
+            # baseline yet. Both are expected; skip without an error.
+            return
+        except Exception as exception:
+            self.flaky_detector_error_message = (
+                f"Could not load flaky detector: {str(exception)}"
+            )
+
+    def load_flaky_detector_from_context(
+        self,
+        context_dict: typing.Dict[str, typing.Any],
+        mode: typing.Literal["new", "unhealthy"],
+    ) -> None:
+        """Construct FlakyDetector from pre-fetched context (xdist worker path)."""
+        try:
+            self.flaky_detector = flaky_detection.FlakyDetector.from_context(
+                context_dict=context_dict,
+                mode=mode,
+            )
+        except Exception as exception:
+            self.flaky_detector_error_message = (
+                f"Could not load flaky detector: {str(exception)}"
+            )
+
+    def mark_test_as_quarantined_if_needed(self, item: _pytest.nodes.Item) -> bool:
+        """
+        Returns `True` if the test was marked as quarantined, otherwise returns `False`.
+        """
+        if self.quarantined_tests is not None and item in self.quarantined_tests:
+            self.quarantined_tests.mark_test_as_quarantined(item)
+            return True
+
+        return False
