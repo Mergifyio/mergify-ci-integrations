@@ -138,10 +138,12 @@ mod tests {
             repo::from_url("https://github.com:443/Mergifyio/example/").as_deref(),
             Some("Mergifyio/example"),
         );
-        // HTTP does NOT strip .git (parity quirk); SSH does.
+        // A trailing `.git` is stripped for HTTP(S) too, not only SSH: an
+        // HTTPS `git clone` records the suffix, and the API files the run under
+        // the bare `owner/repo`.
         assert_eq!(
             repo::from_url("https://github.com/Mergifyio/example.git").as_deref(),
-            Some("Mergifyio/example.git"),
+            Some("Mergifyio/example"),
         );
         assert_eq!(repo::from_url("not a url"), None);
     }

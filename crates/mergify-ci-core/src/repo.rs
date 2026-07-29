@@ -16,17 +16,14 @@ static HTTP_URL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(?:https?://[\w.-]+(?::\d+)?/)?(?P<full_name>[\w.-]+/[\w.-]+)/?$").unwrap()
 });
 
-/// Port of `get_repository_name_from_url`: SSH first (strips a trailing
-/// `.git`), then HTTP(S) — which intentionally does not strip `.git`.
+/// Port of `get_repository_name_from_url`: try SSH then HTTP(S), then strip a
+/// trailing `.git` for either shape. It is stripped for every URL shape rather
+/// than only SSH: `git clone` over HTTPS records the suffix too, and the name
+/// is what the API files the run under.
 pub(crate) fn from_url(url: &str) -> Option<String> {
-    if let Some(caps) = SSH_URL.captures(url) {
-        let full = &caps["full_name"];
-        return Some(full.strip_suffix(".git").unwrap_or(full).to_owned());
-    }
-    if let Some(caps) = HTTP_URL.captures(url) {
-        return Some(caps["full_name"].to_owned());
-    }
-    None
+    let caps = SSH_URL.captures(url).or_else(|| HTTP_URL.captures(url))?;
+    let full = &caps["full_name"];
+    Some(full.strip_suffix(".git").unwrap_or(full).to_owned())
 }
 
 /// Port of `get_repository_name_from_env_url`: parse the repo from a URL held

@@ -23,7 +23,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 )
 
 import pytest_mergify
-from pytest_mergify import utils
+from pytest_mergify import _mergify_ci, utils
 
 pytest_plugins = ["pytester"]
 
@@ -34,6 +34,15 @@ def set_api_url(
 ) -> None:
     # Always override API
     monkeypatch.setenv("MERGIFY_API_URL", "http://localhost:9999")
+
+
+@pytest.fixture(autouse=True)
+def isolate_ci_provider_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A host CI (e.g. GitHub Actions running this very suite) sets provider vars
+    # the Rust core would otherwise detect, leaking into tests. Clear them so
+    # each test starts clean and opts into a provider explicitly.
+    for var in ("GITHUB_ACTIONS", "CIRCLECI", "JENKINS_URL", "BUILDKITE"):
+        monkeypatch.delenv(var, raising=False)
 
 
 PytesterWithSpanReturnT = typing.Tuple[
@@ -100,7 +109,7 @@ def pytester_with_spans(
             json=qtest_resp,
         )
 
-        full_repository = utils.get_repository_name()
+        full_repository = _mergify_ci.detect_repository_name()
         if full_repository is not None:
             try:
                 owner, repo = utils.split_full_repo_name(full_repository)
