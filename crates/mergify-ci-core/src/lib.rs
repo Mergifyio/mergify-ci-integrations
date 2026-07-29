@@ -214,6 +214,36 @@ mod tests {
         assert_eq!(a["vcs.repository.name"], "Mergifyio/example".into());
     }
 
+    // --- CircleCI attributes ---
+
+    #[test]
+    fn circleci_attributes() {
+        let e = env(&[
+            ("CIRCLECI", "true"),
+            ("CIRCLE_JOB", "unit-tests"),
+            ("CIRCLE_WORKFLOW_ID", "8f2a1c44-0b6e-4c7a-9d3f-1e5b7a9c2d40"),
+            ("CIRCLE_BUILD_URL", "https://circleci.com/gh/Mergifyio/example/42"),
+            ("CIRCLE_BRANCH", "main"),
+            ("CIRCLE_SHA1", "1860cf377dd5610e256ff52e47cf38816cc04549"),
+            ("CIRCLE_REPOSITORY_URL", "https://github.com/Mergifyio/example"),
+        ]);
+        let a = attrs_of(&detect(&e, Path::new(".")));
+        assert_eq!(a["cicd.provider.name"], "circleci".into());
+        // No workflow name, so the job name serves as both pipeline and task.
+        assert_eq!(a["cicd.pipeline.name"], "unit-tests".into());
+        assert_eq!(a["cicd.pipeline.task.name"], "unit-tests".into());
+        assert_eq!(a["cicd.pipeline.run.id"], "8f2a1c44-0b6e-4c7a-9d3f-1e5b7a9c2d40".into());
+        assert_eq!(
+            a["cicd.pipeline.run.url"],
+            "https://circleci.com/gh/Mergifyio/example/42".into(),
+        );
+        // Branch and SHA come from the environment, not the detached-HEAD checkout.
+        assert_eq!(a["vcs.ref.head.name"], "main".into());
+        assert_eq!(a["vcs.ref.head.revision"], "1860cf377dd5610e256ff52e47cf38816cc04549".into());
+        assert_eq!(a["vcs.repository.name"], "Mergifyio/example".into());
+        assert_eq!(a["vcs.repository.url.full"], "https://github.com/Mergifyio/example".into());
+    }
+
     // --- Buildkite attributes ---
 
     #[test]
