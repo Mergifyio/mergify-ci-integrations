@@ -1,0 +1,1195 @@
+import datetime
+import re
+import typing
+
+import _pytest.nodes
+import _pytest.pytester
+import _pytest.reports
+import pytest
+import requests
+import responses
+from opentelemetry.sdk.trace import TracerProvider, export
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+    InMemorySpanExporter,
+)
+
+import pytest_mergify
+from pytest_mergify import ci_insights
+from tests import conftest
+
+
+class _FailingSpanExporter(export.SpanExporter):
+    def export(self, spans: typing.Any) -> export.SpanExportResult:
+        return export.SpanExportResult.FAILURE
+
+
+def _record_one_span(processor: ci_insights.SynchronousBatchSpanProcessor) -> None:
+    provider = TracerProvider()
+    provider.add_span_processor(processor)
+    with provider.get_tracer("tests").start_as_current_span("a-span"):
+        pass
+
+
+def test_queued_spans_are_exported_on_shutdown() -> None:
+    # The SDK registers `shutdown` with atexit, so it is the only thing that
+    # runs when a session dies without reaching the terminal summary.
+    exporter = InMemorySpanExporter()
+    processor = ci_insights.SynchronousBatchSpanProcessor(exporter)
+
+    _record_one_span(processor)
+    assert exporter.get_finished_spans() == ()
+
+    processor.shutdown()
+
+    assert len(exporter.get_finished_spans()) == 1
+
+
+def test_flushing_reports_whether_the_export_worked() -> None:
+    processor = ci_insights.SynchronousBatchSpanProcessor(_FailingSpanExporter())
+    _record_one_span(processor)
+
+    assert processor.force_flush() is False
+
+
+def test_flushing_an_empty_queue_reports_success() -> None:
+    processor = ci_insights.SynchronousBatchSpanProcessor(InMemorySpanExporter())
+
+    assert processor.force_flush() is True
+
+
+def test_a_batch_the_exporter_rejects_is_attempted_once() -> None:
+    # `shutdown` flushes as well, and the SDK leaves its atexit hook armed until
+    # that returns, so a batch left in the queue is sent three times over and
+    # the last failure lands as an ignored exception at interpreter exit.
+    attempts = []
+
+    class _RaisingSpanExporter(export.SpanExporter):
+        def export(self, spans: typing.Any) -> export.SpanExportResult:
+            attempts.append(len(spans))
+            raise RuntimeError("the API rejected the batch")
+
+    processor = ci_insights.SynchronousBatchSpanProcessor(_RaisingSpanExporter())
+    _record_one_span(processor)
+
+    with pytest.raises(RuntimeError):
+        processor.force_flush()
+    processor.shutdown()
+
+    assert attempts == [1]
+
+
+@pytest.mark.parametrize(
+    argnames="status",
+    argvalues=[
+        pytest.param(408, id="request-timeout"),
+        pytest.param(500, id="internal-server-error"),
+        pytest.param(502, id="bad-gateway"),
+        pytest.param(503, id="service-unavailable"),
+    ],
+)
+@responses.activate
+def test_a_transient_error_is_left_to_the_exporter(status: int) -> None:
+    responses.add(responses.POST, "https://example.com/traces", status=status)
+
+    response = ci_insights.SessionRaisingOnPermanentError().post(
+        "https://example.com/traces"
+    )
+
+    assert response.status_code == status
+
+
+@pytest.mark.parametrize(
+    argnames="status",
+    argvalues=[
+        pytest.param(400, id="bad-request"),
+        pytest.param(401, id="unauthorized"),
+        pytest.param(403, id="forbidden"),
+        pytest.param(404, id="not-found"),
+    ],
+)
+@responses.activate
+def test_a_permanent_error_is_surfaced_immediately(status: int) -> None:
+    responses.add(responses.POST, "https://example.com/traces", status=status)
+
+    with pytest.raises(requests.HTTPError):
+        ci_insights.SessionRaisingOnPermanentError().post("https://example.com/traces")
+
+
+def _set_test_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: typing.Literal["new", "unhealthy"] = "new",
+) -> None:
+    monkeypatch.setenv("_PYTEST_MERGIFY_TEST", "true")
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "Mergifyio/pytest-mergify")
+    monkeypatch.setenv("MERGIFY_API_URL", "https://example.com")
+    monkeypatch.setenv("MERGIFY_TOKEN", "my_token")
+
+    if mode == "new":
+        # Simulate a PR context: `GITHUB_BASE_REF` is only set for PRs and is
+        # the signal used to select `new` mode.
+        monkeypatch.setenv("GITHUB_BASE_REF", "main")
+    else:
+        # Simulate a push/scheduled context: no base ref, head ref comes from
+        # `GITHUB_REF_NAME`.
+        monkeypatch.delenv("GITHUB_BASE_REF", raising=False)
+        monkeypatch.delenv("GITHUB_HEAD_REF", raising=False)
+        monkeypatch.setenv("GITHUB_REF_NAME", "main")
+
+
+def _make_quarantine_mock() -> None:
+    responses.add(
+        method=responses.GET,
+        url="https://example.com/v1/ci/Mergifyio/repositories/pytest-mergify/quarantines",
+        json={"quarantined_tests": []},
+        status=200,
+    )
+
+
+def _make_flaky_detection_context_mock(
+    budget_ratio_for_new_tests: float = 0.1,
+    budget_ratio_for_unhealthy_tests: float = 0.05,
+    existing_test_names: typing.List[str] = [],
+    existing_tests_mean_duration_ms: int = 0,
+    unhealthy_test_names: typing.List[str] = [],
+    max_test_execution_count: int = 1000,
+    max_test_name_length: int = 65536,
+    min_budget_duration_ms: int = 4000,
+    min_test_execution_count: int = 5,
+    status: int = 200,
+) -> None:
+    responses.add(
+        method=responses.GET,
+        url="https://example.com/v1/ci/Mergifyio/repositories/pytest-mergify/flaky-detection-context",
+        json={
+            "budget_ratio_for_new_tests": budget_ratio_for_new_tests,
+            "budget_ratio_for_unhealthy_tests": budget_ratio_for_unhealthy_tests,
+            "existing_test_names": existing_test_names,
+            "existing_tests_mean_duration_ms": existing_tests_mean_duration_ms,
+            "unhealthy_test_names": unhealthy_test_names,
+            "max_test_execution_count": max_test_execution_count,
+            "max_test_name_length": max_test_name_length,
+            "min_budget_duration_ms": min_budget_duration_ms,
+            "min_test_execution_count": min_test_execution_count,
+        },
+        status=status,
+    )
+
+
+def _make_test_client() -> ci_insights.MergifyCIInsights:
+    return ci_insights.MergifyCIInsights(
+        token="my_token",
+        repo_name="Mergifyio/pytest-mergify",
+        api_url="https://example.com",
+    )
+
+
+@responses.activate
+def test_load_flaky_detection(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_test_environment(monkeypatch)
+
+    _make_quarantine_mock()
+    _make_flaky_detection_context_mock(existing_test_names=["a::test_a", "b::test_b"])
+
+    client = _make_test_client()
+    assert not client.flaky_detector_error_message
+    assert client.flaky_detector is not None
+    assert client.flaky_detector._context.existing_test_names == [
+        "a::test_a",
+        "b::test_b",
+    ]
+
+
+@responses.activate
+def test_load_flaky_detection_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_test_environment(monkeypatch)
+
+    _make_quarantine_mock()
+    _make_flaky_detection_context_mock(status=500)
+
+    client = _make_test_client()
+    assert client.flaky_detector is None
+    assert client.flaky_detector_error_message is not None
+    assert "500 Server Error" in client.flaky_detector_error_message
+
+
+@responses.activate
+def test_load_flaky_detection_disabled_when_not_opted_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 404 means the repository has not opted into flaky detection; the
+    client skips silently rather than surfacing an error."""
+    _set_test_environment(monkeypatch)
+
+    _make_quarantine_mock()
+    _make_flaky_detection_context_mock(status=404)
+
+    client = _make_test_client()
+    assert client.flaky_detector is None
+    assert client.flaky_detector_error_message is None
+
+
+@responses.activate
+def test_load_flaky_detection_skipped_without_existing_tests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no baseline in `new` mode, every test would look new and the whole
+    suite would be rerun; the client skips silently rather than erroring."""
+    _set_test_environment(monkeypatch)
+
+    _make_quarantine_mock()
+    _make_flaky_detection_context_mock(existing_test_names=[])
+
+    client = _make_test_client()
+    assert client.flaky_detector is None
+    assert client.flaky_detector_error_message is None
+
+
+@responses.activate
+def test_flaky_detection_for_new_tests(
+    monkeypatch: pytest.MonkeyPatch,
+    pytester_with_spans: conftest.PytesterWithSpanT,
+) -> None:
+    max_test_name_length = 100
+
+    _set_test_environment(monkeypatch)
+    _make_quarantine_mock()
+    _make_flaky_detection_context_mock(
+        existing_test_names=[
+            "test_flaky_detection_for_new_tests.py::test_foo",
+            "test_flaky_detection_for_new_tests.py::test_unknown",
+        ],
+        max_test_name_length=max_test_name_length,
+    )
+
+    result, spans = pytester_with_spans(
+        code=f"""
+        import pytest
+
+        def test_foo():
+            assert True
+
+        execution_count = 0
+
+        def test_bar():
+            # Simulate a flaky test.
+            global execution_count
+            execution_count += 1
+
+            if execution_count == 1:
+                pytest.fail("I'm flaky!")
+
+        def test_baz():
+            assert True
+
+        def test_qux():
+            pytest.skip("I'm skipped!")
+
+        def test_quux_{"a" * (max_test_name_length + 10)}():
+            assert True
+
+        def test_corge():
+            assert True
+        """
+    )
+
+    result.assert_outcomes(
+        failed=1,  # Only the first execution of the flaky test.
+        passed=3001,  # 2 tests run once + 2 new tests pass 1000x + flaky test passes 999x (first execution fails).
+        skipped=1,  # The skipped test is tested only once because skipped tests are excluded from the flaky detection.
+    )
+
+    assert re.search(
+        r"""🐛 Flaky detection
+- Skipped 1 test:
+    • 'test_flaky_detection_for_new_tests\.py::test_quux_[a]+' has not been tested multiple times because the name of the test exceeds our limit of \d+ characters
+- Used [0-9.]+ % of the budget \([0-9.]+ s/[0-9.]+ s\)
+- Active for 3 new tests:
+    • 'test_flaky_detection_for_new_tests\.py::test_bar' has been tested \d+ times using approx\. [0-9.]+ % of the budget \([0-9.]+ s/[0-9.]+ s\)
+    • 'test_flaky_detection_for_new_tests\.py::test_baz' has been tested \d+ times using approx\. [0-9.]+ % of the budget \([0-9.]+ s/[0-9.]+ s\)
+    • 'test_flaky_detection_for_new_tests\.py::test_corge' has been tested \d+ times using approx\. [0-9.]+ % of the budget \([0-9.]+ s/[0-9.]+ s\)""",
+        result.stdout.str(),
+        re.MULTILINE,
+    )
+
+    assert spans is not None
+    assert len(spans) == 1 + 6  # 1 for the session and one per test.
+
+    flaky_tests = [
+        "test_flaky_detection_for_new_tests.py::test_bar",
+    ]
+    new_tests = [
+        "test_flaky_detection_for_new_tests.py::test_bar",
+        "test_flaky_detection_for_new_tests.py::test_baz",
+        "test_flaky_detection_for_new_tests.py::test_corge",
+    ]
+    for span in spans.values():
+        assert span is not None
+        assert span.attributes is not None
+
+        if span.name in flaky_tests:
+            assert span.attributes.get("cicd.test.flaky", False) is True
+
+        if span.name in new_tests:
+            assert span.attributes.get("cicd.test.flaky_detection", False) is True
+            assert span.attributes.get("cicd.test.new", False) is True
+            assert span.attributes.get("cicd.test.rerun_count", 0) == 999
+
+
+@responses.activate
+def test_flaky_detection_for_unhealthy_tests(
+    monkeypatch: pytest.MonkeyPatch,
+    pytester_with_spans: conftest.PytesterWithSpanT,
+) -> None:
+    _set_test_environment(monkeypatch, mode="unhealthy")
+    _make_quarantine_mock()
+    _make_flaky_detection_context_mock(
+        unhealthy_test_names=[
+            "test_flaky_detection_for_unhealthy_tests.py::test_bar",
+            "test_flaky_detection_for_unhealthy_tests.py::test_baz",
+            "test_flaky_detection_for_unhealthy_tests.py::test_qux",
+            "test_flaky_detection_for_unhealthy_tests.py::test_quux",
+            "test_flaky_detection_for_unhealthy_tests.py::test_unknown",
+        ],
+    )
+
+    result, spans = pytester_with_spans(
+        code="""
+        import pytest
+
+        def test_foo():
+            assert True
+
+        execution_count = 0
+
+        def test_bar():
+            # Simulate a flaky test.
+            global execution_count
+            execution_count += 1
+
+            if execution_count == 2:
+                pytest.fail("I'm flaky!")
+
+        def test_baz():
+            assert True
+
+        def test_qux():
+            pytest.skip("I'm skipped!")
+
+        def test_quux():
+            assert True
+        """
+    )
+
+    # The goal is to make sure the failed rerun of the flaky test does not
+    # impact the results to avoid failing the CI of our users.
+    assert result.ret == 0
+
+    outcomes = result.parseoutcomes()
+    assert outcomes["passed"] == 4  # Initial run of each test.
+    assert outcomes["skipped"] == 1
+    assert outcomes["rerun"] == 2997  # 999 reruns for each unhealthy test.
+
+    assert re.search(
+        r"""🐛 Flaky detection
+- Used [0-9.]+ % of the budget \([0-9.]+ s/[0-9.]+ s\)
+- Active for 3 unhealthy tests:
+    • 'test_flaky_detection_for_unhealthy_tests\.py::test_bar' has been tested \d+ times using approx\. [0-9.]+ % of the budget \([0-9.]+ s/[0-9.]+ s\)
+    • 'test_flaky_detection_for_unhealthy_tests\.py::test_baz' has been tested \d+ times using approx\. [0-9.]+ % of the budget \([0-9.]+ s/[0-9.]+ s\)
+    • 'test_flaky_detection_for_unhealthy_tests\.py::test_quux' has been tested \d+ times using approx\. [0-9.]+ % of the budget \([0-9.]+ s/[0-9.]+ s\)""",
+        result.stdout.str(),
+        re.MULTILINE,
+    )
+
+    assert spans is not None
+    assert len(spans) == 5 + 1  # 1 for the session and one per test.
+
+    flaky_tests = ["test_flaky_detection_for_unhealthy_tests.py::test_bar"]
+    unhealthy_tests = [
+        "test_flaky_detection_for_unhealthy_tests.py::test_bar",
+        "test_flaky_detection_for_unhealthy_tests.py::test_baz",
+        "test_flaky_detection_for_unhealthy_tests.py::test_quux",
+    ]
+    for span in spans.values():
+        assert span is not None
+        assert span.attributes is not None
+
+        if span.name in flaky_tests:
+            assert span.attributes.get("cicd.test.flaky", False) is True
+
+        if span.name in unhealthy_tests:
+            assert not span.attributes.get("cicd.test.new")
+            assert span.attributes.get("cicd.test.flaky_detection", False) is True
+            assert span.attributes.get("cicd.test.rerun_count", 0) == 999
+            # The status should reflect the initial run outcome, not "rerun"
+            assert span.attributes.get("test.case.result.status") == "passed"
+
+
+@responses.activate
+def test_flaky_detection_with_fixtures(
+    monkeypatch: pytest.MonkeyPatch,
+    pytester_with_spans: conftest.PytesterWithSpanT,
+) -> None:
+    max_test_name_length = 100
+
+    _set_test_environment(monkeypatch)
+    _make_quarantine_mock()
+    _make_flaky_detection_context_mock(
+        existing_test_names=[
+            "test_flaky_detection_with_fixtures.py::test_first",
+            "test_flaky_detection_with_fixtures.py::test_last",
+        ],
+        max_test_name_length=max_test_name_length,
+    )
+
+    suspended_calls, restored_calls = [], []
+
+    from pytest_mergify import flaky_detection
+
+    original_suspend = flaky_detection.FlakyDetector.suspend_item_finalizers
+    original_restore = flaky_detection.FlakyDetector.restore_item_finalizers
+
+    def tracked_suspend_item_finalizers(
+        self: flaky_detection.FlakyDetector, item: _pytest.nodes.Item
+    ) -> None:
+        suspended_calls.append(item.nodeid)
+        return original_suspend(self, item)
+
+    def tracked_restore_item_finalizers(
+        self: flaky_detection.FlakyDetector, item: _pytest.nodes.Item
+    ) -> None:
+        restored_calls.append(item.nodeid)
+        return original_restore(self, item)
+
+    monkeypatch.setattr(
+        flaky_detection.FlakyDetector,
+        "suspend_item_finalizers",
+        tracked_suspend_item_finalizers,
+    )
+    monkeypatch.setattr(
+        flaky_detection.FlakyDetector,
+        "restore_item_finalizers",
+        tracked_restore_item_finalizers,
+    )
+
+    result, spans = pytester_with_spans(
+        code="""
+        import pytest
+
+        SESSION_ALREADY_SET = False
+
+        SETUP_COUNT = 0
+        TEARDOWN_COUNT = 0
+
+        @pytest.fixture(scope="session", autouse=True)
+        def _setup_session() -> None:
+            global SESSION_ALREADY_SET
+            if SESSION_ALREADY_SET:
+                raise RuntimeError("This function should not be called twice")
+            SESSION_ALREADY_SET = True
+
+        @pytest.fixture(autouse=True)
+        def _setup_test():
+            global SETUP_COUNT, TEARDOWN_COUNT
+
+            SETUP_COUNT += 1
+
+            yield
+
+            TEARDOWN_COUNT += 1
+
+        def test_first():
+            assert True
+
+        # This is a new test.
+        def test_second():
+            assert True
+
+        def test_last():
+            # This test validates that fixtures are properly set up and torn down
+            # during test reruns. With 3 tests total (test_first, test_second, test_last)
+            # where test_second is new and runs 1000 times in total:
+            # - SETUP_COUNT should be 1002 (1 initial run per test + 999 reruns of test_second)
+            # - TEARDOWN_COUNT should be 1001 (all tests complete except test_last which is currently running)
+            # This ensures that function-scoped fixtures execute fresh for each rerun,
+            # while session-scoped fixtures run only once (validated by SESSION_ALREADY_SET).
+            global SETUP_COUNT, TEARDOWN_COUNT
+            assert SETUP_COUNT == 1002
+            assert TEARDOWN_COUNT == 1001  # Teardown hasn't run yet for test_last.
+        """
+    )
+
+    result.assert_outcomes(
+        passed=1002,  # 1000 executions for the new test, plus 2 tests run once.
+    )
+
+    # We should only suspend and restore finalized for the tracked test.
+    assert len(suspended_calls) == 999
+    assert all(
+        call == "test_flaky_detection_with_fixtures.py::test_second"
+        for call in suspended_calls
+    )
+    assert len(restored_calls) == 1
+    assert restored_calls[0] == "test_flaky_detection_with_fixtures.py::test_second"
+
+
+@responses.activate
+def test_flaky_detection_with_only_one_new_test_at_the_end(
+    monkeypatch: pytest.MonkeyPatch,
+    pytester_with_spans: conftest.PytesterWithSpanT,
+) -> None:
+    _set_test_environment(monkeypatch)
+    _make_quarantine_mock()
+    _make_flaky_detection_context_mock(
+        existing_test_names=[
+            "test_flaky_detection_with_only_one_new_test_at_the_end.py::test_foo",
+        ]
+    )
+
+    result, spans = pytester_with_spans(
+        code="""
+        import pytest
+
+        SESSION_ALREADY_SET = False
+
+        @pytest.fixture(scope="session", autouse=True)
+        def _setup_session() -> None:
+            global SESSION_ALREADY_SET
+            if SESSION_ALREADY_SET:
+                raise RuntimeError("This function should not be called twice")
+            SESSION_ALREADY_SET = True
+
+        def test_foo():
+            assert True
+
+        def test_bar():
+            assert True
+        """
+    )
+    result.assert_outcomes(passed=1001)
+
+    assert spans is not None
+    assert len(spans) == 1 + 2  # 1 for the session and one per test.
+
+    span = spans.get(
+        "test_flaky_detection_with_only_one_new_test_at_the_end.py::test_bar"
+    )
+    assert span is not None
+    assert span.attributes is not None
+    assert span.attributes.get("cicd.test.flaky_detection", False) is True
+    assert span.attributes.get("cicd.test.new", False) is True
+    assert span.attributes.get("cicd.test.rerun_count", 0) == 999
+
+
+@responses.activate
+def test_flaky_detection_execution_count_matches_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+    pytester_with_spans: conftest.PytesterWithSpanT,
+) -> None:
+    """Test that the executions, the span and the report agree on one cap.
+
+    `max_test_execution_count` counts the initial run, so a cap of N means N
+    executions, N - 1 of which are reruns. The three numbers are pinned
+    together here because they are derived separately and have disagreed."""
+    max_test_execution_count = 5
+
+    _set_test_environment(monkeypatch)
+    _make_quarantine_mock()
+    _make_flaky_detection_context_mock(
+        existing_test_names=[
+            "test_flaky_detection_execution_count_matches_the_cap.py::test_existing",
+        ],
+        max_test_execution_count=max_test_execution_count,
+        min_test_execution_count=1,
+    )
+
+    result, spans = pytester_with_spans(
+        code="""
+        def test_existing():
+            assert True
+
+        def test_new():
+            assert True
+        """
+    )
+
+    # `test_existing` runs once; `test_new` runs exactly up to the cap.
+    result.assert_outcomes(passed=1 + max_test_execution_count)
+
+    assert spans is not None
+    span = spans["test_flaky_detection_execution_count_matches_the_cap.py::test_new"]
+    assert span.attributes is not None
+    assert (
+        span.attributes.get("cicd.test.rerun_count")
+        == max_test_execution_count - 1  # The initial run is not a rerun.
+    )
+
+    assert (
+        f"'test_flaky_detection_execution_count_matches_the_cap.py::test_new' has been "
+        f"tested {max_test_execution_count} times" in result.stdout.str()
+    )
+
+
+@responses.activate
+def test_flaky_detection_keeps_its_state_out_of_report_keywords(
+    monkeypatch: pytest.MonkeyPatch,
+    pytester: _pytest.pytester.Pytester,
+) -> None:
+    "Test that rerun bookkeeping stays out of pytest's keyword namespace."
+    _set_test_environment(monkeypatch)
+    _make_quarantine_mock()
+    _make_flaky_detection_context_mock(
+        existing_test_names=[
+            "test_flaky_detection_keeps_its_state_out_of_report_keywords.py::test_existing",
+        ],
+        max_test_execution_count=3,
+        min_test_execution_count=1,
+    )
+
+    reported_keywords: typing.Set[str] = set()
+
+    class CustomPlugin:
+        def pytest_runtest_logreport(self, report: _pytest.reports.TestReport) -> None:
+            reported_keywords.update(report.keywords)
+
+    pytester.makepyfile(
+        """
+        def test_existing():
+            assert True
+
+        def test_new():
+            assert True
+        """
+    )
+
+    result = pytester.runpytest_inprocess(
+        plugins=[CustomPlugin(), pytest_mergify.PytestMergify()]
+    )
+    assert result.ret == 0
+
+    # `report.keywords` reaches `-k` matching, the xdist worker/controller
+    # payload and JUnit XML, so nothing internal belongs in it.
+    assert "is_last_rerun" not in reported_keywords
+
+
+@responses.activate
+def test_flaky_detection_test_skipping_only_on_a_rerun(
+    monkeypatch: pytest.MonkeyPatch,
+    pytester: _pytest.pytester.Pytester,
+) -> None:
+    "Test that a test skipping part-way through its reruns stays recoverable."
+    _set_test_environment(monkeypatch)
+    _make_quarantine_mock()
+    _make_flaky_detection_context_mock(
+        existing_test_names=[
+            "test_flaky_detection_test_skipping_only_on_a_rerun.py::test_existing",
+        ],
+        max_test_execution_count=5,
+        min_test_execution_count=1,
+    )
+
+    pytester.makepyfile(
+        """
+        import pathlib
+
+        import pytest
+
+        EXECUTIONS = 0
+
+        @pytest.fixture(scope="module", autouse=True)
+        def _module_resource():
+            yield
+            pathlib.Path("module_teardown_ran").touch()
+
+        def test_existing():
+            assert True
+
+        def test_new():
+            global EXECUTIONS
+            EXECUTIONS += 1
+
+            # Passes once, then becomes unavailable — a service that went away,
+            # a container that stopped being ready.
+            if EXECUTIONS > 1:
+                pytest.skip("no longer available")
+        """
+    )
+
+    result = pytester.runpytest_inprocess(plugins=[pytest_mergify.PytestMergify()])
+
+    # The session completes rather than dying on a `KeyError`...
+    assert result.ret != pytest.ExitCode.INTERNAL_ERROR
+    assert "INTERNALERROR" not in result.stdout.str()
+    # ...and the finalizers suspended for the reruns are handed back.
+    assert (pytester.path / "module_teardown_ran").exists()
+    # ...and a skip still counts as an execution, so the test stops at the limit
+    # instead of rerunning a no-op until the budget runs out.
+    assert 0 < result.parseoutcomes()["skipped"] <= 5
+
+
+@responses.activate
+def test_flaky_detection_slow_test_not_reran(
+    monkeypatch: pytest.MonkeyPatch,
+    pytester: _pytest.pytester.Pytester,
+) -> None:
+    "Test that a slow test is not reran when it can't reach 5 within the budget."
+    _set_test_environment(monkeypatch)
+    _make_quarantine_mock()
+    _make_flaky_detection_context_mock(
+        existing_test_names=[
+            "test_flaky_detection_slow_test_not_reran.py::test_existing",
+        ],
+        min_test_execution_count=5,
+    )
+
+    class CustomPlugin:
+        def pytest_runtest_makereport(
+            self,
+            item: _pytest.nodes.Item,
+            call: _pytest.reports.TestReport,
+        ) -> None:
+            if call.when != "call":
+                return
+
+            if "test_slow" in item.nodeid:
+                call.duration = 10.0  # Simulate a slow test.
+            else:
+                call.duration = 0.001
+
+    pytester.makepyfile(
+        """
+        def test_existing():
+            assert True
+
+        def test_fast():
+            assert True
+
+        def test_slow():
+            assert True
+        """
+    )
+
+    result = pytester.runpytest_inprocess(
+        plugins=[CustomPlugin(), pytest_mergify.PytestMergify()]
+    )
+    result.assert_outcomes(passed=1002)
+
+    # `test_fast` should have been tested successfully.
+    assert re.search(
+        r"'test_flaky_detection_slow_test_not_reran\.py::test_fast' has been tested \d+ times",
+        result.stdout.str(),
+    )
+
+    assert (
+        "'test_flaky_detection_slow_test_not_reran.py::test_slow' is too slow to be tested at least 5 times within the budget"
+        in result.stdout.str()
+    )
+
+
+@responses.activate
+def test_flaky_detection_consistent_failure_is_not_flaky(
+    monkeypatch: pytest.MonkeyPatch,
+    pytester_with_spans: conftest.PytesterWithSpanT,
+) -> None:
+    "Test that a test failing every single time is reported as broken, not flaky."
+    _set_test_environment(monkeypatch)
+    _make_quarantine_mock()
+    _make_flaky_detection_context_mock(
+        existing_test_names=[
+            "test_flaky_detection_consistent_failure_is_not_flaky.py::test_existing",
+        ],
+        max_test_execution_count=3,
+        min_test_execution_count=1,
+    )
+
+    _, spans = pytester_with_spans(
+        code="""
+        def test_existing():
+            assert True
+
+        def test_always_fails():
+            assert False
+        """
+    )
+
+    assert spans is not None
+    span = spans[
+        "test_flaky_detection_consistent_failure_is_not_flaky.py::test_always_fails"
+    ]
+    assert span.attributes is not None
+
+    # The test was reran, so flaky detection did consider it...
+    assert span.attributes.get("cicd.test.flaky_detection") is True
+    assert span.attributes.get("test.case.result.status") == "failed"
+    # ...but it never passed once, so it is broken rather than flaky.
+    assert span.attributes.get("cicd.test.flaky") is None
+
+
+@responses.activate
+def test_flaky_detection_slow_test_keeps_higher_scoped_finalizers(
+    monkeypatch: pytest.MonkeyPatch,
+    pytester: _pytest.pytester.Pytester,
+) -> None:
+    "Test that a test skipped for being too slow still tears down its module."
+    _set_test_environment(monkeypatch)
+    _make_quarantine_mock()
+    _make_flaky_detection_context_mock(
+        existing_test_names=[
+            "test_flaky_detection_slow_test_keeps_higher_scoped_finalizers.py::test_existing",
+        ],
+        min_test_execution_count=5,
+    )
+
+    class CustomPlugin:
+        def pytest_runtest_makereport(
+            self,
+            item: _pytest.nodes.Item,
+            call: _pytest.reports.TestReport,
+        ) -> None:
+            if call.when != "call":
+                return
+
+            if "test_slow" in item.nodeid:
+                call.duration = 10.0  # Simulate a slow test.
+            else:
+                call.duration = 0.001
+
+    # `test_slow` is last, so its teardown is the only chance the module-scoped
+    # finalizer gets to run.
+    pytester.makepyfile(
+        """
+        import pathlib
+
+        import pytest
+
+        @pytest.fixture(scope="module", autouse=True)
+        def _module_resource():
+            yield
+            pathlib.Path("module_teardown_ran").touch()
+
+        def test_existing():
+            assert True
+
+        def test_slow():
+            assert True
+        """
+    )
+
+    result = pytester.runpytest_inprocess(
+        plugins=[CustomPlugin(), pytest_mergify.PytestMergify()]
+    )
+    result.assert_outcomes(passed=2)
+
+    assert (
+        "'test_flaky_detection_slow_test_keeps_higher_scoped_finalizers.py::test_slow' is too slow"
+        in result.stdout.str()
+    )
+    assert (pytester.path / "module_teardown_ran").exists()
+
+
+@responses.activate
+def test_flaky_detection_slow_teardown_keeps_higher_scoped_finalizers(
+    monkeypatch: pytest.MonkeyPatch,
+    pytester: _pytest.pytester.Pytester,
+) -> None:
+    "Test that the too-slow verdict cannot flip after finalizers were suspended."
+    _set_test_environment(monkeypatch)
+    _make_quarantine_mock()
+    _make_flaky_detection_context_mock(
+        existing_test_names=[
+            "test_flaky_detection_slow_teardown_keeps_higher_scoped_finalizers.py::test_existing",
+        ],
+        min_test_execution_count=5,
+    )
+
+    # A cheap call with an expensive teardown: cheap enough to be reran when the
+    # verdict is taken, expensive enough to look too slow once the teardown is
+    # measured.
+    class CustomPlugin:
+        def pytest_runtest_makereport(
+            self,
+            item: _pytest.nodes.Item,
+            call: _pytest.reports.TestReport,
+        ) -> None:
+            if "test_slow" not in item.nodeid:
+                call.duration = 0.001
+            elif call.when == "teardown":
+                call.duration = 10.0
+            elif call.when == "call":
+                call.duration = 0.001
+
+    pytester.makepyfile(
+        """
+        import pathlib
+
+        import pytest
+
+        @pytest.fixture(scope="module", autouse=True)
+        def _module_resource():
+            yield
+            pathlib.Path("module_teardown_ran").touch()
+
+        def test_existing():
+            assert True
+
+        def test_slow():
+            assert True
+        """
+    )
+
+    result = pytester.runpytest_inprocess(
+        plugins=[CustomPlugin(), pytest_mergify.PytestMergify()]
+    )
+
+    assert (pytester.path / "module_teardown_ran").exists()
+    assert result.ret == 0
+
+
+@responses.activate
+def test_flaky_detection_budget_deadline_stops_reruns(
+    monkeypatch: pytest.MonkeyPatch,
+    pytester: _pytest.pytester.Pytester,
+) -> None:
+    """
+    Test that reruns are stopped when they would exceed the budget deadline.
+    """
+    _set_test_environment(monkeypatch)
+    _make_quarantine_mock()
+    _make_flaky_detection_context_mock(
+        existing_test_names=[
+            "test_flaky_detection_budget_deadline_stops_reruns.py::test_existing",
+        ]
+    )
+
+    class CustomPlugin:
+        deadline_patched: bool = False
+        execution_count: int = 0
+
+        def pytest_runtest_call(self, item: _pytest.nodes.Item) -> None:
+            plugin = None
+            for existing in item.session.config.pluginmanager.get_plugins():
+                if isinstance(existing, pytest_mergify.PytestMergify):
+                    plugin = existing
+
+            if not plugin or not plugin.mergify_ci.flaky_detector:
+                return
+
+            self.execution_count += 1
+
+            # Simulate a slow execution that reaches the deadline.
+            if not self.deadline_patched and self.execution_count == 10:
+                # Set the deadline in the past to stop after one last rerun.
+                plugin.mergify_ci.flaky_detector._test_metrics[
+                    "test_flaky_detection_budget_deadline_stops_reruns.py::test_new"
+                ].deadline = datetime.datetime.now(
+                    datetime.timezone.utc
+                ) - datetime.timedelta(hours=1)
+
+                self.deadline_patched = True
+
+    pytester.makepyfile(
+        """
+        def test_existing():
+            assert True
+
+        def test_new():
+            assert True
+        """
+    )
+
+    result = pytester.runpytest_inprocess(
+        plugins=[pytest_mergify.PytestMergify(), CustomPlugin()]
+    )
+
+    # We should have:
+    # - 1 execution of `test_existing`,
+    # - 1 initial execution of `test_new`,
+    # - Only 9 reruns of `test_new` before the deadline is reached.
+    result.assert_outcomes(passed=11)
+
+    assert re.search(
+        r"'test_flaky_detection_budget_deadline_stops_reruns\.py::test_new' has been tested 10 times using approx\. [0-9.]+ % of the budget \([0-9.]+ s/[0-9.]+ s\)",
+        result.stdout.str(),
+    )
+
+
+@responses.activate
+def test_flaky_detector_prepare_for_session_in_new_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    pytester: _pytest.pytester.Pytester,
+) -> None:
+    _set_test_environment(monkeypatch, mode="new")
+    _make_quarantine_mock()
+    _make_flaky_detection_context_mock(
+        budget_ratio_for_new_tests=0.5,
+        existing_test_names=[
+            "test_flaky_detector_prepare_for_session_in_new_mode.py::test_foo",
+            "test_flaky_detector_prepare_for_session_in_new_mode.py::test_baz",  # Unknown test, should be filtered.
+        ],
+        existing_tests_mean_duration_ms=10000,
+        max_test_execution_count=10,
+    )
+
+    pytester.makepyfile(
+        """
+        def test_foo():
+            assert True
+
+        def test_bar():
+            assert True
+        """
+    )
+
+    plugin = pytest_mergify.PytestMergify()
+
+    result = pytester.runpytest_inprocess(plugins=[plugin])
+    result.assert_outcomes(passed=11)  # test_foo once, plus 10 executions of test_bar.
+
+    assert plugin.mergify_ci.flaky_detector is not None
+
+    # Only the known new test should be in the tests to process.
+    assert plugin.mergify_ci.flaky_detector._tests_to_process == [
+        "test_flaky_detector_prepare_for_session_in_new_mode.py::test_bar"
+    ]
+    assert (
+        plugin.mergify_ci.flaky_detector._available_budget_duration.total_seconds()
+        == datetime.timedelta(seconds=5).total_seconds()
+    )
+
+
+@responses.activate
+def test_flaky_detector_prepare_for_session_in_unhealthy_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    pytester: _pytest.pytester.Pytester,
+) -> None:
+    _set_test_environment(monkeypatch, mode="unhealthy")
+    _make_quarantine_mock()
+    _make_flaky_detection_context_mock(
+        budget_ratio_for_unhealthy_tests=0.5,
+        existing_tests_mean_duration_ms=10000,
+        existing_test_names=[
+            "test_flaky_detector_prepare_for_session_in_unhealthy_mode.py::test_foo",
+            "test_flaky_detector_prepare_for_session_in_unhealthy_mode.py::test_baz",  # Unknown test, should be filtered.
+        ],
+        unhealthy_test_names=[
+            "test_flaky_detector_prepare_for_session_in_unhealthy_mode.py::test_foo",
+            "test_flaky_detector_prepare_for_session_in_unhealthy_mode.py::test_baz",  # Unknown test, should be filtered.
+        ],
+        max_test_execution_count=10,
+    )
+
+    pytester.makepyfile(
+        """
+        def test_foo():
+            assert True
+
+        def test_bar():
+            assert True
+        """
+    )
+
+    plugin = pytest_mergify.PytestMergify()
+
+    outcomes = pytester.runpytest_inprocess(plugins=[plugin]).parseoutcomes()
+    assert outcomes["passed"] == 2
+    assert outcomes["rerun"] == 9
+
+    assert plugin.mergify_ci.flaky_detector is not None
+
+    # Only the known unhealthy test should be in the tests to process.
+    assert plugin.mergify_ci.flaky_detector._tests_to_process == [
+        "test_flaky_detector_prepare_for_session_in_unhealthy_mode.py::test_foo"
+    ]
+    assert (
+        plugin.mergify_ci.flaky_detector._available_budget_duration.total_seconds()
+        == datetime.timedelta(seconds=5).total_seconds()
+    )
+
+
+@responses.activate
+def test_empty_base_ref_falls_through_to_head_ref(
+    monkeypatch: pytest.MonkeyPatch,
+    pytester: _pytest.pytester.Pytester,
+) -> None:
+    """When `GITHUB_BASE_REF` is empty (push/scheduled runs), `branch_name`
+    should fall through to the HEAD ref so quarantine still works."""
+    _set_test_environment(monkeypatch, mode="unhealthy")
+
+    # Set an empty `GITHUB_BASE_REF` to simulate push runs where the env var
+    # exists but is empty.
+    monkeypatch.setenv("GITHUB_BASE_REF", "")
+
+    _make_quarantine_mock()
+    _make_flaky_detection_context_mock()
+
+    pytester.makepyfile(
+        """
+        def test_foo():
+            assert True
+        """
+    )
+
+    plugin = pytest_mergify.PytestMergify()
+    pytester.runpytest_inprocess(plugins=[plugin])
+
+    # `branch_name` should come from HEAD ref, not the empty base ref.
+    assert plugin.mergify_ci.branch_name == "main"
+    assert plugin.mergify_ci.flaky_detector is not None
+    assert plugin.mergify_ci.flaky_detector.mode == "unhealthy"
+
+
+@responses.activate
+def test_flaky_detection_excludes_opted_out_tests(
+    monkeypatch: pytest.MonkeyPatch,
+    pytester_with_spans: conftest.PytesterWithSpanT,
+) -> None:
+    _set_test_environment(monkeypatch)
+    _make_quarantine_mock()
+    # A non-empty baseline so `new` mode loads; it is absent from the session.
+    _make_flaky_detection_context_mock(
+        existing_test_names=["baseline.py::test_baseline"],
+    )
+
+    result, spans = pytester_with_spans(
+        code="""
+        import pytest
+
+        def test_watched():
+            assert True
+
+        @pytest.mark.mergify(flaky_detection=False)
+        def test_excluded():
+            assert True
+        """
+    )
+
+    result.assert_outcomes(
+        # test_watched: 1000 executions; test_excluded: 1 (not rerun).
+        passed=1001,
+    )
+
+    # Only test_watched is rerun; test_excluded is absent from the report.
+    assert re.search(
+        r"""🐛 Flaky detection
+- Used [0-9.]+ % of the budget \([0-9.]+ s/[0-9.]+ s\)
+- Active for 1 new test:
+    • 'test_flaky_detection_excludes_opted_out_tests\.py::test_watched' has been tested \d+ times using approx\. [0-9.]+ % of the budget \([0-9.]+ s/[0-9.]+ s\)""",
+        result.stdout.str(),
+        re.MULTILINE,
+    )
+
+    assert spans is not None
+    assert len(spans) == 1 + 2  # 1 for the session and one per test.
+
+    watched = spans["test_flaky_detection_excludes_opted_out_tests.py::test_watched"]
+    assert watched.attributes is not None
+    assert watched.attributes.get("cicd.test.new") is True
+    assert watched.attributes.get("cicd.test.flaky_detection") is True
+    assert watched.attributes.get("cicd.test.rerun_count") == 999
+
+    excluded = spans["test_flaky_detection_excludes_opted_out_tests.py::test_excluded"]
+    assert excluded.attributes is not None
+    assert excluded.attributes.get("cicd.test.new") is None
+    assert excluded.attributes.get("cicd.test.flaky_detection") is None
+    assert excluded.attributes.get("cicd.test.rerun_count") is None

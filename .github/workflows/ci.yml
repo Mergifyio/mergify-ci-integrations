@@ -54,9 +54,12 @@ jobs:
         shell: bash
         run: |
           uv venv
-          uv pip install --no-index --find-links dist pytest-mergify
-          # Runs inside GitHub Actions, so detection must return github_actions.
-          uv run python -c "import pytest_mergify as m; p = m.detect_provider(); print('provider =', p); assert p == 'github_actions', p"
+          # Direct file reference pins the freshly-built wheel while still
+          # resolving pytest-mergify's runtime deps from the index.
+          uv pip install "pytest-mergify @ $(ls dist/*.whl)"
+          # The plugin imports and the bundled Rust binding detects the provider
+          # (running inside GitHub Actions → github_actions).
+          uv run python -c "import pytest_mergify; from pytest_mergify._mergify_ci import detect_provider; p = detect_provider(); print('provider =', p); assert p == 'github_actions', p"
 
   ci-gate:
     if: ${{ !cancelled() }}
