@@ -15,15 +15,8 @@ from opentelemetry.semconv._incubating.attributes import cicd_attributes, vcs_at
 
 import pytest_mergify.quarantine
 import pytest_mergify.test_selection
-import pytest_mergify.resources.ci as resources_ci
-import pytest_mergify.resources.git as resources_git
-import pytest_mergify.resources.github_actions as resources_gha
-import pytest_mergify.resources.jenkins as resources_jenkins
-import pytest_mergify.resources.buildkite as resources_buildkite
-import pytest_mergify.resources.circleci as resources_circleci
-import pytest_mergify.resources.mergify as resources_mergify
 import pytest_mergify.resources.pytest as resources_pytest
-from pytest_mergify import flaky_detection, utils
+from pytest_mergify import _mergify_ci, flaky_detection, utils
 
 
 class SynchronousBatchSpanProcessor(export.SimpleSpanProcessor):
@@ -84,7 +77,7 @@ class MergifyCIInsights:
         default_factory=lambda: os.environ.get("MERGIFY_TOKEN")
     )
     repo_name: typing.Optional[str] = dataclasses.field(
-        default_factory=utils.get_repository_name
+        default_factory=_mergify_ci.detect_repository_name
     )
     api_url: str = dataclasses.field(
         default_factory=lambda: os.environ.get(
@@ -163,17 +156,15 @@ class MergifyCIInsights:
         else:
             return
 
+        # The CI/git/mergify attributes come from the bundled Rust core
+        # (`detect_attributes`, itself the merge of every provider + the git
+        # fallback). The one detector that stays in Python is the framework
+        # one, since `test.framework`/version is language-specific.
         resource = opentelemetry.sdk.resources.get_aggregated_resources(
-            [
-                resources_git.GitResourceDetector(),
-                resources_ci.CIResourceDetector(),
-                resources_gha.GitHubActionsResourceDetector(),
-                resources_jenkins.JenkinsResourceDetector(),
-                resources_buildkite.BuildkiteResourceDetector(),
-                resources_circleci.CircleCIResourceDetector(),
-                resources_pytest.PytestResourceDetector(),
-                resources_mergify.MergifyResourceDetector(),
-            ]
+            [resources_pytest.PytestResourceDetector()],
+            initial_resource=opentelemetry.sdk.resources.Resource.create(
+                dict(_mergify_ci.detect_attributes())
+            ),
         )
 
         resource = resource.merge(
