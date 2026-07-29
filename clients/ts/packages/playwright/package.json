@@ -33,7 +33,7 @@
     "@playwright/test": ">=1.56.0"
   },
   "devDependencies": {
-    "@opentelemetry/sdk-trace-base": "^2.9.0",
+    "@opentelemetry/sdk-trace-base": "^2.10.0",
     "@playwright/test": "^1.61.1",
     "vitest": "^4.1.10"
   },
