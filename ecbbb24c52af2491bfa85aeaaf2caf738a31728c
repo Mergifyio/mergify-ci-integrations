@@ -1,0 +1,6 @@
+Revision history for #16:
+
+rev 2 (rebase) 2026-07-30 10:22 UTC
+rev 1 (initial) 2026-07-30 10:22 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":16,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"3c1dc19353610f0f00e585f8d42966bb1c356f10","timestamp_iso":"2026-07-30T10:22:28Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"3c1dc19353610f0f00e585f8d42966bb1c356f10","new_sha":"ecbbb24c52af2491bfa85aeaaf2caf738a31728c","timestamp_iso":"2026-07-30T10:22:28Z","reason":"","replay_sha":null,"compare_url":"https://github.com/Mergifyio/mergify-ci-integrations/compare/3c1dc19353610f0f00e585f8d42966bb1c356f10...ecbbb24c52af2491bfa85aeaaf2caf738a31728c"}]} -->
