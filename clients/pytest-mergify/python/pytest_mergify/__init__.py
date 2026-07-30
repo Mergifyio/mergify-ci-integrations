@@ -256,16 +256,19 @@ class PytestMergify:
             yield
             return
 
-        yield
-
-        self._session_span["status"] = "error" if self.has_error else "ok"
-        self._session_span["end_unix_nano"] = time.time_ns()
-        self._finished_spans.append(self._session_span)
-
-        # Export here rather than in the terminal summary: the summary's token
-        # checks return early on a run with nothing to upload, but the capture
-        # path (tests) and the debug path have spans to hand off regardless.
-        self._export_result = self.mergify_ci.export_spans(self._finished_spans)
+        try:
+            yield
+        finally:
+            # Finalize and export in a `finally` so the run's spans still leave
+            # the process if another plugin's `sessionfinish` raises during
+            # teardown -- the safety net the old SDK's atexit-registered flush
+            # provided. Export here rather than in the terminal summary, whose
+            # token checks return early on a run with nothing to upload while the
+            # capture and debug paths still have spans to hand off.
+            self._session_span["status"] = "error" if self.has_error else "ok"
+            self._session_span["end_unix_nano"] = time.time_ns()
+            self._finished_spans.append(self._session_span)
+            self._export_result = self.mergify_ci.export_spans(self._finished_spans)
 
     def _get_item_attributes(
         self, item: _pytest.nodes.Item

@@ -41,15 +41,17 @@ def parse_traceparent(
 ) -> typing.Optional[typing.Tuple[bytes, bytes]]:
     """Parse a W3C `traceparent` into `(trace_id, parent_span_id)` bytes.
 
-    Format: `<version>-<32 hex trace id>-<16 hex span id>-<flags>`. Anything
-    that does not parse to a 16-byte trace id and an 8-byte span id yields
-    `None`, so a malformed value simply starts a fresh, unparented trace.
+    Format: `<version>-<32 hex trace id>-<16 hex span id>-<flags>`. A future
+    version may append more `-`-separated fields, which are ignored. Anything
+    that does not parse to a non-zero 16-byte trace id and 8-byte span id yields
+    `None`, so a malformed or all-zero value simply starts a fresh, unparented
+    trace (matching the W3C propagator, which rejects all-zero ids as invalid).
     """
     parts = traceparent.split("-")
-    if len(parts) != 4:
+    if len(parts) < 4:
         return None
 
-    _version, trace_id_hex, span_id_hex, _flags = parts
+    trace_id_hex, span_id_hex = parts[1], parts[2]
     try:
         trace_id = bytes.fromhex(trace_id_hex)
         parent_span_id = bytes.fromhex(span_id_hex)
@@ -57,6 +59,9 @@ def parse_traceparent(
         return None
 
     if len(trace_id) != 16 or len(parent_span_id) != 8:
+        return None
+
+    if trace_id == bytes(16) or parent_span_id == bytes(8):
         return None
 
     return trace_id, parent_span_id
