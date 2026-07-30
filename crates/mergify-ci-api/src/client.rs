@@ -7,7 +7,7 @@ use reqwest::StatusCode;
 use reqwest::header::LINK;
 
 use crate::config::ApiConfig;
-use crate::models::{FlakyDetectionContext, QuarantinePage};
+use crate::models::{FlakyDetectionContext, QuarantinePage, TestSelection};
 use crate::outcome::Outcome;
 use crate::trace::{self, AttrValue, MAX_GZIPPED_UPLOAD_BYTES, SpanData, UploadError};
 
@@ -119,6 +119,48 @@ impl Client {
 
         match response.json().await {
             Ok(context) => Outcome::Ready(context),
+            Err(error) => Outcome::Failed(describe_error(&error)),
+        }
+    }
+
+    /// Fetch the test selection for a run, identified by its own `branch`,
+    /// `head_sha`, and job coordinates. `402`/`404` → dormant (run everything);
+    /// any other non-success → failed. The `full`/`subset` normalisation is left
+    /// to the caller, which alone can match a subset against the collection.
+    pub async fn fetch_test_selection(
+        &self,
+        branch: &str,
+        head_sha: &str,
+        pipeline_name: &str,
+        job_name: &str,
+    ) -> Outcome<TestSelection> {
+        let response = match self
+            .http
+            .get(self.endpoint("test-selection"))
+            .query(&[
+                ("branch", branch),
+                ("head_sha", head_sha),
+                ("pipeline_name", pipeline_name),
+                ("job_name", job_name),
+            ])
+            .bearer_auth(&self.config.token)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => return Outcome::Failed(describe_error(&error)),
+        };
+
+        let status = response.status();
+        if status == StatusCode::NOT_FOUND || status == StatusCode::PAYMENT_REQUIRED {
+            return Outcome::Dormant;
+        }
+        if !status.is_success() {
+            return Outcome::Failed(http_status_message(status));
+        }
+
+        match response.json().await {
+            Ok(selection) => Outcome::Ready(selection),
             Err(error) => Outcome::Failed(describe_error(&error)),
         }
     }
@@ -346,6 +388,49 @@ mod tests {
         assert_eq!(
             parse_next_link("<https://api/x>; rel=next").as_deref(),
             Some("https://api/x"),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_selection_subset_ready() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/ci/o/repositories/r/test-selection"))
+            .and(query_param("branch", "queue/main"))
+            .and(query_param("head_sha", "cafe"))
+            .and(query_param("pipeline_name", "CI"))
+            .and(query_param("job_name", "unit"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "selection": "subset",
+                "reason": "queue_rerun",
+                "tests": ["t::a", "t::b"],
+            })))
+            .mount(&server)
+            .await;
+        let client = Client::new(config(&server.uri())).unwrap();
+        let selection = client
+            .fetch_test_selection("queue/main", "cafe", "CI", "unit")
+            .await
+            .into_ready()
+            .expect("ready");
+        assert_eq!(selection.selection, "subset");
+        assert_eq!(selection.tests, ["t::a", "t::b"]);
+    }
+
+    #[tokio::test]
+    async fn test_selection_dormant_on_404() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/ci/o/repositories/r/test-selection"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let client = Client::new(config(&server.uri())).unwrap();
+        assert!(
+            client
+                .fetch_test_selection("main", "cafe", "CI", "unit")
+                .await
+                .is_dormant()
         );
     }
 
