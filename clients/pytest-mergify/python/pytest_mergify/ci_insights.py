@@ -125,6 +125,14 @@ class MergifyCIInsights:
         )
     )
 
+    # One binding-backed API client for the whole session, shared by the flaky,
+    # quarantine, and test-selection fetches. Built once we have a token and a
+    # well-formed repository name.
+    api_client: typing.Optional["_mergify_ci.CiApiClient"] = dataclasses.field(
+        init=False,
+        default=None,
+    )
+
     def __post_init__(self) -> None:
         if not utils.is_in_ci():
             return
@@ -190,6 +198,16 @@ class MergifyCIInsights:
             # `str` cast just for `mypy`.
             self.branch_name = str(branch_name)
 
+        if self.token and self.repo_name:
+            try:
+                owner, repo = utils.split_full_repo_name(self.repo_name)
+            except utils.InvalidRepositoryFullNameError:
+                pass
+            else:
+                self.api_client = _mergify_ci.CiApiClient(
+                    self.api_url, self.token, owner, repo
+                )
+
         self._load_flaky_detector(
             # A base branch indicates a PR context. Use `new` mode for PRs to
             # detect newly flaky tests, `unhealthy` for push/scheduled runs to
@@ -199,15 +217,35 @@ class MergifyCIInsights:
             else "unhealthy",
         )
 
-        if self.token and self.repo_name and self.branch_name:
-            self.quarantined_tests = pytest_mergify.quarantine.Quarantine(
-                self.api_url,
-                self.token,
-                self.repo_name,
-                self.branch_name,
-            )
+        self._load_quarantine()
 
         self._load_test_selection(resource)
+
+    def _load_quarantine(self) -> None:
+        if self.api_client is None or self.branch_name is None:
+            return
+
+        names: typing.List[str] = []
+        init_error_msg: typing.Optional[str] = None
+        try:
+            fetched = self.api_client.fetch_quarantine(self.branch_name)
+        except RuntimeError as exception:
+            init_error_msg = (
+                "Error when querying Mergify's API, tests won't be quarantined. "
+                f"Error: {str(exception)}"
+            )
+        else:
+            # `None` is the dormant state (no subscription): no tests to mark,
+            # but the report still lists the empty, error-free result.
+            if fetched is not None:
+                names = fetched
+
+        self.quarantined_tests = pytest_mergify.quarantine.Quarantine(
+            repo_name=self.repo_name,
+            branch_name=self.branch_name,
+            quarantined_tests=names,
+            init_error_msg=init_error_msg,
+        )
 
     def _load_test_selection(
         self, resource: opentelemetry.sdk.resources.Resource
@@ -222,8 +260,7 @@ class MergifyCIInsights:
             disabled = True
 
         if (
-            self.token is None
-            or self.repo_name is None
+            self.api_client is None
             or disabled
             # On xdist workers the controller already filtered the collection.
             or os.environ.get("PYTEST_XDIST_WORKER") is not None
@@ -243,23 +280,39 @@ class MergifyCIInsights:
         if not (head_branch and head_sha and pipeline_name and job_name):
             return
 
-        self.test_selection = pytest_mergify.test_selection.TestSelection(
-            api_url=self.api_url,
-            token=self.token,
-            repo_name=self.repo_name,
-            branch_name=str(head_branch),
-            head_sha=str(head_sha),
-            pipeline_name=str(pipeline_name),
-            job_name=str(job_name),
-        )
+        init_error_msg: typing.Optional[str] = None
+        try:
+            fetched = self.api_client.fetch_test_selection(
+                str(head_branch),
+                str(head_sha),
+                str(pipeline_name),
+                str(job_name),
+            )
+        except RuntimeError as exception:
+            init_error_msg = (
+                "Error when querying Mergify's API, the full test suite will "
+                f"run. Error: {str(exception)}"
+            )
+            fetched = None
+
+        if fetched is None:
+            # Dormant (no subscription/endpoint) or a failure: run everything.
+            self.test_selection = pytest_mergify.test_selection.TestSelection(
+                init_error_msg=init_error_msg,
+            )
+        else:
+            self.test_selection = pytest_mergify.test_selection.TestSelection(
+                selection=fetched["selection"],
+                reason=fetched["reason"],
+                tests=fetched["tests"],
+            )
 
     def _load_flaky_detector(
         self,
         mode: typing.Literal["new", "unhealthy"],
     ) -> None:
         if (
-            self.token is None
-            or self.repo_name is None
+            self.api_client is None
             # On xdist workers the detector is loaded from the controller-
             # provided context, so skip the redundant per-worker API call.
             or os.environ.get("PYTEST_XDIST_WORKER") is not None
@@ -267,20 +320,26 @@ class MergifyCIInsights:
             return
 
         try:
-            self.flaky_detector = flaky_detection.FlakyDetector(
-                token=self.token,
-                url=self.api_url,
-                full_repository_name=self.repo_name,
-                mode=mode,
-            )
-        except flaky_detection.FlakyDetectionDisabledError:
-            # The repository has not opted into flaky detection, or has no
-            # baseline yet. Both are expected; skip without an error.
-            return
-        except Exception as exception:
+            context_dict = self.api_client.fetch_flaky_context()
+        except RuntimeError as exception:
             self.flaky_detector_error_message = (
                 f"Could not load flaky detector: {str(exception)}"
             )
+            return
+
+        # `None` is dormant: the repository has not opted into flaky detection.
+        # Without a baseline, `new` mode would treat every test as new and rerun
+        # the whole suite. Both are expected; skip without an error.
+        if context_dict is None or (
+            mode == "new" and not context_dict["existing_test_names"]
+        ):
+            return
+
+        self.flaky_detector = flaky_detection.FlakyDetector.from_context_dict(
+            context_dict,
+            mode,
+            is_xdist=False,
+        )
 
     def load_flaky_detector_from_context(
         self,
@@ -289,9 +348,10 @@ class MergifyCIInsights:
     ) -> None:
         """Construct FlakyDetector from pre-fetched context (xdist worker path)."""
         try:
-            self.flaky_detector = flaky_detection.FlakyDetector.from_context(
-                context_dict=context_dict,
-                mode=mode,
+            self.flaky_detector = flaky_detection.FlakyDetector.from_context_dict(
+                context_dict,
+                mode,
+                is_xdist=True,
             )
         except Exception as exception:
             self.flaky_detector_error_message = (

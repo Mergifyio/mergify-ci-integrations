@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use mergify_ci_api::{
     ApiConfig, AttrValue, Client, FlakyDetectionContext, Mode, Outcome, SpanData, SpanStatus,
-    budget,
+    TestSelection, budget,
 };
 use mergify_ci_core::{AttrValue as CoreAttrValue, CiContext};
 use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyTypeError, PyValueError};
@@ -96,6 +96,31 @@ impl CiApiClient {
         }
     }
 
+    /// The test selection as a dict (`selection`, `reason`, `tests`), or `None`
+    /// when test selection is not enabled for the repository.
+    fn fetch_test_selection(
+        &self,
+        py: Python<'_>,
+        branch: &str,
+        head_sha: &str,
+        pipeline_name: &str,
+        job_name: &str,
+    ) -> PyResult<Option<Py<PyDict>>> {
+        let outcome = py.detach(|| {
+            self.runtime.block_on(self.client.fetch_test_selection(
+                branch,
+                head_sha,
+                pipeline_name,
+                job_name,
+            ))
+        });
+        match outcome {
+            Outcome::Ready(selection) => Ok(Some(test_selection_dict(py, &selection)?)),
+            Outcome::Dormant => Ok(None),
+            Outcome::Failed(message) => Err(PyRuntimeError::new_err(message)),
+        }
+    }
+
     /// Upload `spans` (under `resource_attributes`) as gzipped OTLP protobuf.
     ///
     /// `resource_attributes` is a `dict[str, str|int|float|bool]`; each span is
@@ -134,6 +159,17 @@ fn flaky_context_dict(py: Python<'_>, context: &FlakyDetectionContext) -> PyResu
     dict.set_item("max_test_name_length", context.max_test_name_length)?;
     dict.set_item("min_budget_duration_ms", context.min_budget_duration_ms)?;
     dict.set_item("min_test_execution_count", context.min_test_execution_count)?;
+    Ok(dict.into())
+}
+
+/// Marshal a [`TestSelection`] into the dict pytest-mergify's `TestSelection`
+/// lifecycle consumes. The subset-vs-full normalisation stays on the Python
+/// side, so this hands over the server's answer verbatim.
+fn test_selection_dict(py: Python<'_>, selection: &TestSelection) -> PyResult<Py<PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("selection", &selection.selection)?;
+    dict.set_item("reason", &selection.reason)?;
+    dict.set_item("tests", selection.tests.clone())?;
     Ok(dict.into())
 }
 
