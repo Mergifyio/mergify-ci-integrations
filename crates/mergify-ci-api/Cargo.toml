@@ -18,6 +18,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic-messages", "trace"] }
 prost = "0.14"
 flate2 = "1"
+# `time` only: the trace-upload retry backs off between attempts. The driver is
+# provided by the caller's runtime (the binding builds it with `enable_all`).
+tokio = { version = "1", features = ["time"] }
 
 [dev-dependencies]
 serde_json = "1"
