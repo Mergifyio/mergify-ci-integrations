@@ -14,6 +14,11 @@ use crate::trace::{self, AttrValue, MAX_GZIPPED_UPLOAD_BYTES, SpanData, UploadEr
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// One initial upload plus this many retries before failing loud.
+const MAX_UPLOAD_ATTEMPTS: u32 = 4;
+/// First backoff; doubles each retry (100ms, 200ms, 400ms).
+const RETRY_BASE_DELAY: Duration = Duration::from_millis(100);
+
 /// Async client for a single repository's Mergify backend API.
 ///
 /// Fetches are *fail-open*: a `402` (no subscription) or `404` (feature not
@@ -211,28 +216,47 @@ impl Client {
     }
 
     async fn post_trace(&self, url: &str, compressed: Vec<u8>) -> Result<(), UploadError> {
-        let response = self
-            .http
-            .post(url)
-            .timeout(UPLOAD_TIMEOUT)
-            .bearer_auth(&self.config.token)
-            .header("Content-Type", "application/x-protobuf")
-            .header("Content-Encoding", "gzip")
-            .body(compressed)
-            .send()
-            .await
-            .map_err(|error| UploadError { status: None, message: error.to_string() })?;
-
-        if response.status().is_success() {
-            return Ok(());
+        // Retry transient failures (connection blips, request timeout, any 5xx)
+        // with exponential backoff before failing loud, restoring the behavior
+        // of the OTLP exporter this replaced. A permanent status (4xx other than
+        // 408) surfaces immediately.
+        let mut attempt: u32 = 1;
+        loop {
+            let last_attempt = attempt >= MAX_UPLOAD_ATTEMPTS;
+            match self
+                .http
+                .post(url)
+                .timeout(UPLOAD_TIMEOUT)
+                .bearer_auth(&self.config.token)
+                .header("Content-Type", "application/x-protobuf")
+                .header("Content-Encoding", "gzip")
+                .body(compressed.clone())
+                .send()
+                .await
+            {
+                Ok(response) if response.status().is_success() => return Ok(()),
+                Ok(response) if is_retryable_status(response.status()) && !last_attempt => {}
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    let body = response.text().await.unwrap_or_else(|error| {
+                        format!("<could not read response body: {error}>")
+                    });
+                    return Err(UploadError { status: Some(status), message: body });
+                }
+                Err(_error) if !last_attempt => {}
+                Err(error) => return Err(UploadError { status: None, message: error.to_string() }),
+            }
+            tokio::time::sleep(RETRY_BASE_DELAY * 2u32.pow(attempt - 1)).await;
+            attempt += 1;
         }
-        let status = response.status().as_u16();
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|error| format!("<could not read response body: {error}>"));
-        Err(UploadError { status: Some(status), message: body })
     }
+}
+
+/// Whether an HTTP status is worth retrying: request timeout or any 5xx — the
+/// statuses the previous OTLP exporter treated as transient. Other 4xx are
+/// permanent and surface immediately.
+fn is_retryable_status(status: StatusCode) -> bool {
+    status == StatusCode::REQUEST_TIMEOUT || status.is_server_error()
 }
 
 /// Parse an RFC 8288 `Link` header, returning the `rel="next"` URL if present.
@@ -475,16 +499,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upload_surfaces_error_status_and_body() {
+    async fn upload_surfaces_permanent_error_status_and_body() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/ci/o/repositories/r/traces"))
-            .respond_with(ResponseTemplate::new(500).set_body_string("nope"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("nope"))
             .mount(&server)
             .await;
         let client = Client::new(config(&server.uri())).unwrap();
         let error = client.upload_trace(&[], &[span(1)]).await.unwrap_err();
-        assert_eq!(error.status, Some(500));
+        assert_eq!(error.status, Some(400));
         assert!(error.message.contains("nope"));
+        // A permanent status is not retried.
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn upload_retries_transient_failures_then_succeeds() {
+        let server = MockServer::start().await;
+        // The first attempt gets a 503; the retry gets a 200.
+        Mock::given(method("POST"))
+            .and(path("/v1/ci/o/repositories/r/traces"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/ci/o/repositories/r/traces"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let client = Client::new(config(&server.uri())).unwrap();
+        client.upload_trace(&[], &[span(1)]).await.unwrap();
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn upload_fails_loud_after_exhausting_retries_on_5xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/ci/o/repositories/r/traces"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        let client = Client::new(config(&server.uri())).unwrap();
+        let error = client.upload_trace(&[], &[span(1)]).await.unwrap_err();
+        assert_eq!(error.status, Some(503));
+        // One initial attempt plus three retries.
+        assert_eq!(server.received_requests().await.unwrap().len(), 4);
     }
 }
