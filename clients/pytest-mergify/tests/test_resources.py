@@ -11,10 +11,7 @@ def test_span_resources_attributes_ci(
 ) -> None:
     result, spans = pytester_with_spans()
     assert spans is not None
-    assert all(
-        span.resource.attributes["cicd.provider.name"] == "pytest_mergify_suite"
-        for span in spans.values()
-    )
+    assert spans.resource["cicd.provider.name"] == "pytest_mergify_suite"
 
 
 def test_span_resources_attributes_pytest(
@@ -22,12 +19,9 @@ def test_span_resources_attributes_pytest(
 ) -> None:
     result, spans = pytester_with_spans()
     assert spans is not None
-    assert all(
-        re.match(
-            r"\d\.",
-            typing.cast(str, span.resource.attributes["test.framework.version"]),
-        )
-        for span in spans.values()
+    assert re.match(
+        r"\d\.",
+        typing.cast(str, spans.resource["test.framework.version"]),
     )
 
 
@@ -39,10 +33,7 @@ def test_span_resources_attributes_mergify(
 
     result, spans = pytester_with_spans()
     assert spans is not None
-    assert all(
-        span.resource.attributes["mergify.test.job.name"] == "f00b4r"
-        for span in spans.values()
-    )
+    assert spans.resource["mergify.test.job.name"] == "f00b4r"
 
 
 def test_span_github_actions(
@@ -57,23 +48,13 @@ def test_span_github_actions(
     monkeypatch.setenv("RUNNER_NAME", "self-hosted")
     result, spans = pytester_with_spans()
     assert spans is not None
-    assert all(
-        span.resource.attributes["vcs.repository.name"] == "Mergifyio/pytest-mergify"
-        for span in spans.values()
-    )
-    assert all(
-        span.resource.attributes["vcs.repository.url.full"]
+    assert spans.resource["vcs.repository.name"] == "Mergifyio/pytest-mergify"
+    assert (
+        spans.resource["vcs.repository.url.full"]
         == "https://github.com/Mergifyio/pytest-mergify"
-        for span in spans.values()
     )
-    assert all(
-        span.resource.attributes["cicd.pipeline.run.id"] == 3213121312
-        for span in spans.values()
-    )
-    assert all(
-        span.resource.attributes["cicd.pipeline.runner.name"] == "self-hosted"
-        for span in spans.values()
-    )
+    assert spans.resource["cicd.pipeline.run.id"] == 3213121312
+    assert spans.resource["cicd.pipeline.runner.name"] == "self-hosted"
 
 
 def test_span_jenkins(
@@ -93,23 +74,13 @@ def test_span_jenkins(
     monkeypatch.setenv("NODE_NAME", "self-hosted")
     result, spans = pytester_with_spans()
     assert spans is not None
-    assert all(
-        span.resource.attributes["vcs.repository.name"] == "Mergifyio/pytest-mergify"
-        for span in spans.values()
-    )
-    assert all(
-        span.resource.attributes["vcs.repository.url.full"]
+    assert spans.resource["vcs.repository.name"] == "Mergifyio/pytest-mergify"
+    assert (
+        spans.resource["vcs.repository.url.full"]
         == "https://github.com/Mergifyio/pytest-mergify"
-        for span in spans.values()
     )
-    assert all(
-        span.resource.attributes["cicd.pipeline.run.id"] == "jenkins-job-name#5"
-        for span in spans.values()
-    )
-    assert all(
-        span.resource.attributes["cicd.pipeline.runner.name"] == "self-hosted"
-        for span in spans.values()
-    )
+    assert spans.resource["cicd.pipeline.run.id"] == "jenkins-job-name#5"
+    assert spans.resource["cicd.pipeline.runner.name"] == "self-hosted"
 
 
 def test_span_circleci(
@@ -132,18 +103,16 @@ def test_span_circleci(
     result, spans = pytester_with_spans()
 
     assert spans is not None
-    for span in spans.values():
-        assert span.resource.attributes["cicd.provider.name"] == "circleci"
-        assert span.resource.attributes["vcs.repository.name"] == (
-            "Mergifyio/pytest-mergify"
-        )
-        assert span.resource.attributes["vcs.ref.head.name"] == "main"
-        assert span.resource.attributes["vcs.ref.head.revision"] == (
-            "1860cf377dd5610e256ff52e47cf38816cc04549"
-        )
-        assert span.resource.attributes["cicd.pipeline.run.id"] == (
-            "8f2a1c44-0b6e-4c7a-9d3f-1e5b7a9c2d40"
-        )
-        # CircleCI publishes no workflow name, so the job name serves as both.
-        assert span.resource.attributes["cicd.pipeline.name"] == "unit-tests"
-        assert span.resource.attributes["cicd.pipeline.task.name"] == "unit-tests"
+    assert spans.resource["cicd.provider.name"] == "circleci"
+    assert spans.resource["vcs.repository.name"] == "Mergifyio/pytest-mergify"
+    assert spans.resource["vcs.ref.head.name"] == "main"
+    assert (
+        spans.resource["vcs.ref.head.revision"]
+        == "1860cf377dd5610e256ff52e47cf38816cc04549"
+    )
+    assert spans.resource["cicd.pipeline.run.id"] == (
+        "8f2a1c44-0b6e-4c7a-9d3f-1e5b7a9c2d40"
+    )
+    # CircleCI publishes no workflow name, so the job name serves as both.
+    assert spans.resource["cicd.pipeline.name"] == "unit-tests"
+    assert spans.resource["cicd.pipeline.task.name"] == "unit-tests"

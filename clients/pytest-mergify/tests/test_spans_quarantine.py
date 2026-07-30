@@ -1,5 +1,4 @@
 from tests import conftest
-import opentelemetry.trace
 
 
 def test_spans_quarantine(
@@ -35,67 +34,29 @@ def test_my_very_flaky_success_test():
     )
     assert spans is not None
 
-    assert "test_spans_quarantine.py::test_my_not_flaky_success_test" in spans
-    assert (
-        spans[
-            "test_spans_quarantine.py::test_my_not_flaky_success_test"
-        ].status.status_code
-        == opentelemetry.trace.StatusCode.OK
-    )
-    assert (
-        spans["test_spans_quarantine.py::test_my_not_flaky_success_test"].attributes
-        is not None
-    )
-    assert not spans[
+    not_flaky_success = spans[
         "test_spans_quarantine.py::test_my_not_flaky_success_test"
-    ].attributes["cicd.test.quarantined"]
+    ]
+    assert not_flaky_success["status"] == "ok"
+    assert not not_flaky_success["attributes"]["cicd.test.quarantined"]
 
-    assert "test_spans_quarantine.py::test_my_not_flaky_failure_test" in spans
-    assert (
-        spans["test_spans_quarantine.py::test_my_not_flaky_failure_test"].attributes
-        is not None
-    )
-    assert (
-        spans[
-            "test_spans_quarantine.py::test_my_not_flaky_failure_test"
-        ].status.status_code
-        == opentelemetry.trace.StatusCode.ERROR
-    )
-
-    assert not spans[
+    not_flaky_failure = spans[
         "test_spans_quarantine.py::test_my_not_flaky_failure_test"
-    ].attributes["cicd.test.quarantined"]
+    ]
+    assert not_flaky_failure["status"] == "error"
+    assert not not_flaky_failure["attributes"]["cicd.test.quarantined"]
 
-    assert "test_spans_quarantine.py::test_my_very_flaky_failure_test" in spans
-    assert "test_spans_quarantine.py::test_my_very_flaky_success_test" in spans
-    assert (
-        spans["test_spans_quarantine.py::test_my_very_flaky_failure_test"].attributes
-        is not None
-    )
-    assert (
-        spans["test_spans_quarantine.py::test_my_very_flaky_success_test"].attributes
-        is not None
-    )
-    assert (
-        spans[
-            "test_spans_quarantine.py::test_my_very_flaky_failure_test"
-        ].status.status_code
-        == opentelemetry.trace.StatusCode.OK
-    )
-
-    assert spans[
+    very_flaky_failure = spans[
         "test_spans_quarantine.py::test_my_very_flaky_failure_test"
-    ].attributes["cicd.test.quarantined"]
-
-    assert (
-        spans[
-            "test_spans_quarantine.py::test_my_very_flaky_success_test"
-        ].status.status_code
-        == opentelemetry.trace.StatusCode.OK
-    )
-    assert spans[
+    ]
+    very_flaky_success = spans[
         "test_spans_quarantine.py::test_my_very_flaky_success_test"
-    ].attributes["cicd.test.quarantined"]
+    ]
+    # A quarantined test that failed still reports OK, so it does not break CI.
+    assert very_flaky_failure["status"] == "ok"
+    assert very_flaky_failure["attributes"]["cicd.test.quarantined"]
+    assert very_flaky_success["status"] == "ok"
+    assert very_flaky_success["attributes"]["cicd.test.quarantined"]
 
     assert """🛡️ Quarantine
 - Repository: foo/bar

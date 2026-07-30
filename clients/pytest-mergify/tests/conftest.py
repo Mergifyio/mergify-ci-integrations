@@ -11,14 +11,9 @@ from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
 
 import _pytest.pytester
 import pytest
-from opentelemetry.sdk import trace
-from opentelemetry.sdk.trace import ReadableSpan
-from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
-    InMemorySpanExporter,
-)
 
 import pytest_mergify
-from pytest_mergify import _mergify_ci
+from pytest_mergify import _mergify_ci, tracing
 
 pytest_plugins = ["pytester"]
 
@@ -113,8 +108,19 @@ def isolate_ci_provider_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(var, raising=False)
 
 
+class CapturedSpans(typing.Dict[str, tracing.Span]):
+    """The run's spans keyed by name, plus the resource they upload under.
+
+    A `dict` subclass so `spans["name"]`, `spans.values()`, and `len(spans)`
+    work as before, while `spans.resource` exposes the run's resource
+    attributes (one dict per run, previously read off each span's `.resource`).
+    """
+
+    resource: typing.Dict[str, tracing.AttrValue]
+
+
 PytesterWithSpanReturnT = typing.Tuple[
-    _pytest.pytester.RunResult, typing.Optional[typing.Dict[str, trace.ReadableSpan]]
+    _pytest.pytester.RunResult, typing.Optional[CapturedSpans]
 ]
 
 
@@ -167,18 +173,19 @@ def pytester_with_spans(
         pytester.makepyfile(code)
         result = pytester.runpytest_inprocess(plugins=[plugin])
 
-        spans_as_dict: typing.Optional[typing.Dict[str, ReadableSpan]]
+        captured: typing.Optional[CapturedSpans]
         if code is _DEFAULT_PYTESTER_CODE:
             result.assert_outcomes(passed=1)
-        if isinstance(plugin.mergify_ci.exporter, InMemorySpanExporter):
-            spans = plugin.mergify_ci.exporter.get_finished_spans()
-            spans_as_dict = {span.name: span for span in spans}
+        if plugin.mergify_ci.trace_mode is not None:
+            spans = plugin._finished_spans
+            captured = CapturedSpans((span["name"], span) for span in spans)
+            captured.resource = plugin.mergify_ci.resource_attributes or {}
             # Make sure we don't lose spans in the process
-            assert len(spans_as_dict) == len(spans)
+            assert len(captured) == len(spans)
         else:
-            spans_as_dict = None
+            captured = None
 
-        return result, spans_as_dict
+        return result, captured
 
     return _run
 

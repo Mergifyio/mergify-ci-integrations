@@ -194,9 +194,7 @@ def test_errors_logs(
     result = pytester.runpytest_subprocess()
     result.assert_outcomes(passed=1)
     assert any(
-        line.startswith(
-            "Error while exporting traces: HTTPConnectionPool(host='localhost', port=9999): Max retries exceeded with url"
-        )
+        line.startswith("Error while exporting traces: trace upload failed")
         for line in result.stdout.lines
     )
     assert not any(
@@ -229,9 +227,7 @@ def test_errors_logs_403(
     result = pytester.runpytest_subprocess()
     result.assert_outcomes(passed=1)
     assert any(
-        line.startswith(
-            "Error while exporting traces: 403 Client Error: Forbidden for url:"
-        )
+        line.startswith("Error while exporting traces: trace upload failed (HTTP 403)")
         for line in result.stdout.lines
     )
     assert not any(
