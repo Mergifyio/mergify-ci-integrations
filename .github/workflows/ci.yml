@@ -61,11 +61,41 @@ jobs:
           # (running inside GitHub Actions → github_actions).
           uv run python -c "import pytest_mergify; from pytest_mergify._mergify_ci import detect_provider; p = detect_provider(); print('provider =', p); assert p == 'github_actions', p"
 
+  pytest-mergify:
+    name: pytest-mergify test suite
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/pytest-mergify
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - name: Build the binding and install with pinned test deps
+        run: |
+          uv venv --python 3.12
+          export VIRTUAL_ENV="$PWD/.venv"
+          # pytest is pinned to 8.3.5: pytest 9 renders `^^^` caret lines in
+          # tracebacks that break test_spans' exact-match stacktrace assertion.
+          # opentelemetry-proto decodes the OTLP the binding uploads in the
+          # collector-based upload tests.
+          uv pip install maturin "pytest==8.3.5" pytest-timeout \
+            opentelemetry-proto anys freezegun pytest-xdist
+          .venv/bin/maturin develop
+      - name: Run the suite
+        run: .venv/bin/python -m pytest tests
+
   ci-gate:
     if: ${{ !cancelled() }}
     needs:
       - rust
       - wheel
+      - pytest-mergify
     runs-on: ubuntu-latest
     steps:
       - name: Verify all jobs succeeded
