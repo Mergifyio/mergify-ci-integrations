@@ -48,6 +48,25 @@ pub struct FlakyDetectionContext {
     pub min_test_execution_count: i64,
 }
 
+/// The test-selection response (`GET …/test-selection`): whether this run may
+/// execute only a subset of tests, as a merge-queue rerun replaying the tests
+/// that failed on a previous attempt.
+///
+/// Polymorphic on `selection`: `tests` is part of a `subset` answer and absent
+/// from a `full` one, so it defaults to empty here. The `subset`-with-empty and
+/// `subset`-matched-nothing normalisations stay client-side, next to the
+/// collected items they compare against.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct TestSelection {
+    /// `"full"` (run everything) or `"subset"` (run only `tests`).
+    pub selection: String,
+    /// Why the server chose this selection — surfaced in the plugin report.
+    pub reason: String,
+    /// The node ids to run when `selection` is `"subset"`; empty for `"full"`.
+    #[serde(default)]
+    pub tests: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,5 +100,22 @@ mod tests {
         assert_eq!(ctx.max_test_execution_count, 10);
         assert_eq!(ctx.min_budget_duration_ms, 5000);
         assert!((ctx.budget_ratio_for_new_tests - 0.1).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn deserializes_subset_test_selection() {
+        let json = r#"{"selection":"subset","reason":"queue_rerun","tests":["t::a","t::b"]}"#;
+        let selection: TestSelection = serde_json::from_str(json).unwrap();
+        assert_eq!(selection.selection, "subset");
+        assert_eq!(selection.reason, "queue_rerun");
+        assert_eq!(selection.tests, ["t::a", "t::b"]);
+    }
+
+    #[test]
+    fn deserializes_full_test_selection_without_tests_field() {
+        let json = r#"{"selection":"full","reason":"not_requested"}"#;
+        let selection: TestSelection = serde_json::from_str(json).unwrap();
+        assert_eq!(selection.selection, "full");
+        assert!(selection.tests.is_empty());
     }
 }
