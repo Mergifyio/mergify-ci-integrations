@@ -4,71 +4,24 @@ import random
 import typing
 
 import _pytest.nodes
-import opentelemetry.sdk.resources
-import requests
-from opentelemetry.exporter.otlp.proto.http import Compression
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
-    OTLPSpanExporter,
-)
-from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor, TracerProvider, export
-from opentelemetry.semconv._incubating.attributes import cicd_attributes, vcs_attributes
+import pytest
 
 import pytest_mergify.quarantine
 import pytest_mergify.test_selection
-import pytest_mergify.resources.pytest as resources_pytest
-from pytest_mergify import _mergify_ci, flaky_detection, utils
+from pytest_mergify import _mergify_ci, flaky_detection, tracing, utils
 
+# OpenTelemetry resource-attribute keys the plugin reads back, kept as literals
+# now that the semantic-convention package is gone with the SDK. They match the
+# keys the Rust core emits in `otel_attributes`.
+_VCS_REF_BASE_NAME = "vcs.ref.base.name"
+_VCS_REF_HEAD_NAME = "vcs.ref.head.name"
+_VCS_REF_HEAD_REVISION = "vcs.ref.head.revision"
+_CICD_PIPELINE_NAME = "cicd.pipeline.name"
+_CICD_PIPELINE_TASK_NAME = "cicd.pipeline.task.name"
+_MERGIFY_TEST_JOB_NAME = "mergify.test.job.name"
 
-class SynchronousBatchSpanProcessor(export.SimpleSpanProcessor):
-    def __init__(self, exporter: export.SpanExporter) -> None:
-        super().__init__(exporter)
-        self.queue: typing.List[ReadableSpan] = []
-
-    def force_flush(self, timeout_millis: int = 30_000) -> bool:
-        if not self.queue:
-            return True
-
-        try:
-            exported = self.span_exporter.export(self.queue)
-        finally:
-            # Cleared even when the export raises, so a batch is attempted once.
-            # `shutdown` flushes too, and the SDK keeps its atexit hook armed
-            # until that returns, so a queue left behind is sent twice more and
-            # the last failure surfaces as an ignored exception at exit.
-            self.queue.clear()
-
-        return exported is export.SpanExportResult.SUCCESS
-
-    def on_end(self, span: ReadableSpan) -> None:
-        if not span.context.trace_flags.sampled:
-            return
-
-        self.queue.append(span)
-
-    def shutdown(self) -> None:
-        # The SDK registers this with atexit, so it is what runs for a session
-        # that ends without reaching the terminal summary -- a job timeout, an
-        # OOM kill, another plugin raising early. Inherited unchanged it closes
-        # the exporter and drops everything still queued, which is the whole run.
-        self.force_flush()
-        super().shutdown()
-
-
-class SessionRaisingOnPermanentError(requests.Session):  # type: ignore[misc]
-    """A requests.Session that raises on an error retrying cannot resolve."""
-
-    def request(self, *args: typing.Any, **kwargs: typing.Any) -> requests.Response:
-        response = super().request(*args, **kwargs)
-
-        # A client error reads the same however many times it is sent, so it is
-        # raised here, where the summary can name it. Anything the OTLP exporter
-        # treats as retryable -- 408 and 5xx, as of 1.30 -- is handed back
-        # untouched, because raising ahead of it lost a whole run's spans to a
-        # blip that one retry would have cleared.
-        if 400 <= response.status_code < 500 and response.status_code != 408:
-            response.raise_for_status()
-
-        return response
+# How the built spans leave the session.
+TraceMode = typing.Literal["capture", "upload", "debug"]
 
 
 @dataclasses.dataclass
@@ -88,13 +41,12 @@ class MergifyCIInsights:
         init=False,
         default=None,
     )
-    exporter: typing.Optional[export.SpanExporter] = dataclasses.field(
-        init=False, default=None
-    )
-    tracer: typing.Optional[opentelemetry.trace.Tracer] = dataclasses.field(
-        init=False, default=None
-    )
-    tracer_provider: typing.Optional[opentelemetry.sdk.trace.TracerProvider] = (
+    # None when spans are not being produced; otherwise how they leave the
+    # session (retained for tests, uploaded via the binding, or printed).
+    trace_mode: typing.Optional[TraceMode] = dataclasses.field(init=False, default=None)
+    # The OpenTelemetry resource for the run, as a flat dict handed to
+    # `upload_trace` alongside the spans.
+    resource_attributes: typing.Optional[typing.Dict[str, tracing.AttrValue]] = (
         dataclasses.field(init=False, default=None)
     )
     test_run_id: str = dataclasses.field(
@@ -126,8 +78,8 @@ class MergifyCIInsights:
     )
 
     # One binding-backed API client for the whole session, shared by the flaky,
-    # quarantine, and test-selection fetches. Built once we have a token and a
-    # well-formed repository name.
+    # quarantine, and test-selection fetches and the trace upload. Built once we
+    # have a token and a well-formed repository name.
     api_client: typing.Optional["_mergify_ci.CiApiClient"] = dataclasses.field(
         init=False,
         default=None,
@@ -137,63 +89,33 @@ class MergifyCIInsights:
         if not utils.is_in_ci():
             return
 
-        span_processor: SpanProcessor
-
         if utils.is_env_true("PYTEST_MERGIFY_DEBUG"):
-            self.exporter = export.ConsoleSpanExporter()
-            span_processor = SynchronousBatchSpanProcessor(self.exporter)
+            self.trace_mode = "debug"
         elif utils.is_env_true("_PYTEST_MERGIFY_TEST"):
-            from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
-                InMemorySpanExporter,
-            )
-
-            self.exporter = InMemorySpanExporter()
-            span_processor = export.SimpleSpanProcessor(self.exporter)
+            self.trace_mode = "capture"
         elif self.token and self.repo_name:
-            try:
-                owner, repo = utils.split_full_repo_name(self.repo_name)
-            except utils.InvalidRepositoryFullNameError:
-                return
-            self.exporter = OTLPSpanExporter(
-                session=SessionRaisingOnPermanentError(),
-                endpoint=f"{self.api_url}/v1/ci/{owner}/repositories/{repo}/traces",
-                headers={"Authorization": f"Bearer {self.token}"},
-                compression=Compression.Gzip,
-            )
-            span_processor = SynchronousBatchSpanProcessor(self.exporter)
+            self.trace_mode = "upload"
         else:
             return
 
         # The CI/git/mergify attributes come from the bundled Rust core
         # (`detect_attributes`, itself the merge of every provider + the git
-        # fallback). The one detector that stays in Python is the framework
-        # one, since `test.framework`/version is language-specific.
-        resource = opentelemetry.sdk.resources.get_aggregated_resources(
-            [resources_pytest.PytestResourceDetector()],
-            initial_resource=opentelemetry.sdk.resources.Resource.create(
-                dict(_mergify_ci.detect_attributes())
-            ),
+        # fallback). `test.framework`/version is language-specific, so it is
+        # added here rather than in the shared core.
+        resource_attributes: typing.Dict[str, tracing.AttrValue] = dict(
+            _mergify_ci.detect_attributes()
         )
-
-        resource = resource.merge(
-            opentelemetry.sdk.resources.Resource(
-                {
-                    "test.run.id": self.test_run_id,
-                }
-            )
-        )
-
-        self.tracer_provider = TracerProvider(resource=resource)
-
-        self.tracer_provider.add_span_processor(span_processor)
-        self.tracer = self.tracer_provider.get_tracer("pytest-mergify")
+        resource_attributes["test.framework"] = "pytest"
+        resource_attributes["test.framework.version"] = pytest.__version__
+        resource_attributes["test.run.id"] = self.test_run_id
+        self.resource_attributes = resource_attributes
 
         # Retrieve the branch name, preferring base ref (target branch) over
         # head ref. `or` ensures an empty base ref (e.g. `GITHUB_BASE_REF=""` on
         # push runs) falls through to the head ref.
-        branch_name = resource.attributes.get(
-            vcs_attributes.VCS_REF_BASE_NAME
-        ) or resource.attributes.get(vcs_attributes.VCS_REF_HEAD_NAME)
+        branch_name = resource_attributes.get(
+            _VCS_REF_BASE_NAME
+        ) or resource_attributes.get(_VCS_REF_HEAD_NAME)
         if branch_name is not None:
             # `str` cast just for `mypy`.
             self.branch_name = str(branch_name)
@@ -212,14 +134,40 @@ class MergifyCIInsights:
             # A base branch indicates a PR context. Use `new` mode for PRs to
             # detect newly flaky tests, `unhealthy` for push/scheduled runs to
             # focus on known problematic tests.
-            mode="new"
-            if resource.attributes.get(vcs_attributes.VCS_REF_BASE_NAME)
-            else "unhealthy",
+            mode="new" if resource_attributes.get(_VCS_REF_BASE_NAME) else "unhealthy",
         )
 
         self._load_quarantine()
 
-        self._load_test_selection(resource)
+        self._load_test_selection()
+
+    def export_spans(
+        self, spans: typing.List[tracing.Span]
+    ) -> typing.Tuple[bool, typing.Optional[str]]:
+        """Send the session's spans to their destination.
+
+        Returns `(uploaded, error_message)`. In `capture`/`debug` modes nothing
+        leaves the process, so both report success.
+        """
+        if self.trace_mode == "capture":
+            # Spans stay on the plugin (`_finished_spans`) for tests to read;
+            # nothing leaves the process.
+            return True, None
+
+        if self.trace_mode == "debug":
+            for span in spans:
+                print(f"MERGIFY SPAN {span['name']}: {span}")
+            return True, None
+
+        if self.api_client is None or self.resource_attributes is None:
+            return False, None
+
+        try:
+            self.api_client.upload_trace(self.resource_attributes, spans)
+        except RuntimeError as exception:
+            return False, str(exception)
+
+        return True, None
 
     def _load_quarantine(self) -> None:
         if self.api_client is None or self.branch_name is None:
@@ -247,9 +195,7 @@ class MergifyCIInsights:
             init_error_msg=init_error_msg,
         )
 
-    def _load_test_selection(
-        self, resource: opentelemetry.sdk.resources.Resource
-    ) -> None:
+    def _load_test_selection(self) -> None:
         try:
             disabled = utils.strtobool(
                 os.environ.get("MERGIFY_TEST_SELECTION_DISABLE", "false")
@@ -261,6 +207,7 @@ class MergifyCIInsights:
 
         if (
             self.api_client is None
+            or self.resource_attributes is None
             or disabled
             # On xdist workers the controller already filtered the collection.
             or os.environ.get("PYTEST_XDIST_WORKER") is not None
@@ -271,12 +218,12 @@ class MergifyCIInsights:
         # and head revision (a merge-queue draft branch on reruns) plus the
         # job coordinates — the exact values this plugin reports with each
         # uploaded test, so the server can match its records.
-        head_branch = resource.attributes.get(vcs_attributes.VCS_REF_HEAD_NAME)
-        head_sha = resource.attributes.get(vcs_attributes.VCS_REF_HEAD_REVISION)
-        pipeline_name = resource.attributes.get(cicd_attributes.CICD_PIPELINE_NAME)
-        job_name = resource.attributes.get(
-            "mergify.test.job.name"
-        ) or resource.attributes.get(cicd_attributes.CICD_PIPELINE_TASK_NAME)
+        head_branch = self.resource_attributes.get(_VCS_REF_HEAD_NAME)
+        head_sha = self.resource_attributes.get(_VCS_REF_HEAD_REVISION)
+        pipeline_name = self.resource_attributes.get(_CICD_PIPELINE_NAME)
+        job_name = self.resource_attributes.get(
+            _MERGIFY_TEST_JOB_NAME
+        ) or self.resource_attributes.get(_CICD_PIPELINE_TASK_NAME)
         if not (head_branch and head_sha and pipeline_name and job_name):
             return
 
