@@ -23,9 +23,6 @@ _NOW = datetime.datetime(
 
 class InitializedFlakyDetector(flaky_detection.FlakyDetector):
     def __init__(self) -> None:
-        self.token = ""
-        self.url = ""
-        self.full_repository_name = ""
         self.mode = "new"
         self._test_metrics = {}
         self._over_length_tests = set()
@@ -34,9 +31,6 @@ class InitializedFlakyDetector(flaky_detection.FlakyDetector):
         self._suspended_item_finalizers = {}
         self._debug_logs = []
         self._is_xdist = False
-
-    def __post_init__(self) -> None:
-        pass
 
 
 def _make_flaky_detection_context(
@@ -247,9 +241,10 @@ def test_flaky_detector_from_context() -> None:
         "min_test_execution_count": 5,
     }
 
-    detector = flaky_detection.FlakyDetector.from_context(
+    detector = flaky_detection.FlakyDetector.from_context_dict(
         context_dict=context_dict,
         mode="new",
+        is_xdist=True,
     )
 
     assert detector.mode == "new"

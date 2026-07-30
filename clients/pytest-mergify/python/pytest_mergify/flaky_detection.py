@@ -8,18 +8,8 @@ import _pytest
 import _pytest.main
 import _pytest.nodes
 import _pytest.reports
-import requests
 
 from pytest_mergify import utils
-
-
-class FlakyDetectionDisabledError(Exception):
-    """Flaky detection must not run for this session, and that is expected.
-
-    Raised when the repository has not opted into flaky detection (the server
-    responds with 404) or when there is no baseline of existing tests to
-    compare against yet. Callers skip silently instead of surfacing an error.
-    """
 
 
 @dataclasses.dataclass
@@ -133,12 +123,18 @@ class _TestMetrics:
 
 @dataclasses.dataclass
 class FlakyDetector:
-    token: str
-    url: str
-    full_repository_name: str
     mode: typing.Literal["new", "unhealthy"]
 
-    _context: _FlakyDetectionContext = dataclasses.field(init=False)
+    # The baseline/budget context, fetched by the bundled binding
+    # (`CiApiClient.fetch_flaky_context`) and injected -- this type owns only
+    # the rerun lifecycle, not the API call.
+    _context: _FlakyDetectionContext
+
+    # Static budget allocation (equal share per test) on xdist workers, which
+    # cannot coordinate a running budget across processes; dynamic allocation
+    # otherwise.
+    _is_xdist: bool = False
+
     _test_metrics: typing.Dict[str, _TestMetrics] = dataclasses.field(
         init=False, default_factory=dict
     )
@@ -185,59 +181,24 @@ class FlakyDetector:
         init=False, default_factory=list
     )
 
-    _is_xdist: bool = dataclasses.field(init=False, default=False)
-
-    def __post_init__(self) -> None:
-        self._context = self._fetch_context()
-
     @classmethod
-    def from_context(
+    def from_context_dict(
         cls,
         context_dict: typing.Dict[str, typing.Any],
         mode: typing.Literal["new", "unhealthy"],
+        is_xdist: bool,
     ) -> "FlakyDetector":
-        """Construct from serialized context dict, skipping the API call."""
-        instance = cls.__new__(cls)
-        instance.token = ""
-        instance.url = ""
-        instance.full_repository_name = ""
-        instance.mode = mode
-        instance._context = _FlakyDetectionContext(**context_dict)
-        instance._test_metrics = {}
-        instance._over_length_tests = set()
-        instance._available_budget_duration = datetime.timedelta()
-        instance._tests_to_process = []
-        instance._suspended_item_finalizers = {}
-        instance._debug_logs = []
-        instance._is_xdist = True
-        return instance
+        """Construct from the serialized context dict fetched by the binding.
 
-    def _fetch_context(self) -> _FlakyDetectionContext:
-        owner, repository_name = utils.split_full_repo_name(
-            self.full_repository_name,
+        Used both on the controller (the freshly fetched context, dynamic
+        budget) and on an xdist worker (the context forwarded through
+        `workerinput`, static budget).
+        """
+        return cls(
+            mode=mode,
+            _context=_FlakyDetectionContext(**context_dict),
+            _is_xdist=is_xdist,
         )
-
-        response = requests.get(
-            url=f"{self.url}/v1/ci/{owner}/repositories/{repository_name}/flaky-detection-context",
-            headers={"Authorization": f"Bearer {self.token}"},
-            timeout=10,
-        )
-
-        # A 404 means the repository has not opted into flaky detection. This
-        # is the expected default, not an error.
-        if response.status_code == 404:
-            raise FlakyDetectionDisabledError
-
-        response.raise_for_status()
-
-        result = _FlakyDetectionContext(**response.json())
-
-        # Without a baseline, `new` mode would treat every test as new and
-        # rerun the whole suite. Skip instead of surfacing an error.
-        if self.mode == "new" and len(result.existing_test_names) == 0:
-            raise FlakyDetectionDisabledError
-
-        return result
 
     def try_fill_metrics_from_report(self, report: _pytest.reports.TestReport) -> None:
         test = report.nodeid
