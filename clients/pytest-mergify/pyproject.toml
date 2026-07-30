@@ -13,10 +13,10 @@ license = "GPL-3.0-only"
 readme = "README.md"
 # The bundled Rust binding is abi3-py39, so 3.9 is the floor (was 3.8 upstream).
 requires-python = ">=3.9"
+# The OpenTelemetry SDK, its OTLP exporter, and `requests` are gone: CI
+# detection and the API/trace-upload calls all run through the bundled Rust
+# binding now, and spans are built and encoded there too.
 dependencies = [
-    "opentelemetry-exporter-otlp-proto-http>=1.29",
-    "opentelemetry-sdk>=1.29",
-    "requests>=2",
     "pytest>=6.0.0",
     "pytest-timeout>=2.4.0",
 ]
@@ -31,12 +31,18 @@ python-source = "python"
 module-name = "pytest_mergify._mergify_ci"
 features = ["pyo3/extension-module"]
 
+# Relocated from the standalone pytest-mergify repo. The code stays py38-style
+# (typing.Dict/List, no `from __future__ import annotations`), so the lint
+# target matches even though the wheel floor is 3.9.
+[tool.ruff]
+target-version = "py38"
+
 [dependency-groups]
 dev = [
     "anys>=0.3.1",
-    "responses>=0.25.8",
-    # https://github.com/pytest-dev/pytest-asyncio/issues/706#issuecomment-2082788963
-    "pytest-asyncio>=0.24.0",
+    # Decodes the OTLP protobuf the binding uploads, for the collector-based
+    # upload tests.
+    "opentelemetry-proto>=1.29",
     "freezegun>=1.5.5",
     "pytest-xdist>=3.0",
 ]
