@@ -4,32 +4,29 @@ import typing
 
 import _pytest.pytester
 import pytest
-import responses
 
 import pytest_mergify
-from pytest_mergify import ci_insights, flaky_detection, utils
-from tests.test_ci_insights import (
-    _make_flaky_detection_context_mock,
-    _make_quarantine_mock,
-    _set_test_environment,
-)
+from pytest_mergify import ci_insights, flaky_detection
+from tests import conftest
+from tests.test_ci_insights import _set_test_environment
 
 
 pytest_plugins = ["pytester"]
 
 
-@responses.activate
 def test_flaky_detection_new_tests_end_to_end(
     monkeypatch: pytest.MonkeyPatch,
     pytester: _pytest.pytester.Pytester,
 ) -> None:
     """Flaky detection detects new tests end-to-end (non-xdist, validates shared report path)."""
     _set_test_environment(monkeypatch)
-    _make_quarantine_mock()
-    _make_flaky_detection_context_mock(
-        existing_test_names=[
-            "test_flaky_detection_new_tests_end_to_end.py::test_existing",
-        ],
+    conftest.install_fake_api_client(
+        monkeypatch,
+        flaky_context=conftest.make_flaky_context(
+            existing_test_names=[
+                "test_flaky_detection_new_tests_end_to_end.py::test_existing",
+            ],
+        ),
     )
 
     pytester.makepyfile(
@@ -70,9 +67,10 @@ def test_xdist_worker_flow_from_context_to_metrics() -> None:
         "min_test_execution_count": 5,
     }
 
-    detector = flaky_detection.FlakyDetector.from_context(
+    detector = flaky_detection.FlakyDetector.from_context_dict(
         context_dict=context_dict,
         mode="new",
+        is_xdist=True,
     )
 
     assert detector._is_xdist is True
@@ -142,16 +140,17 @@ def test_xdist_aggregated_report() -> None:
     assert "Active for 2 new test" in report
 
 
-@responses.activate
 def test_no_crash_without_xdist(
     monkeypatch: pytest.MonkeyPatch,
     pytester: _pytest.pytester.Pytester,
 ) -> None:
     """Plugin works normally without xdist."""
     _set_test_environment(monkeypatch)
-    _make_quarantine_mock()
-    _make_flaky_detection_context_mock(
-        existing_test_names=["test_no_crash_without_xdist.py::test_pass"],
+    conftest.install_fake_api_client(
+        monkeypatch,
+        flaky_context=conftest.make_flaky_context(
+            existing_test_names=["test_no_crash_without_xdist.py::test_pass"],
+        ),
     )
 
     pytester.makepyfile(
@@ -246,7 +245,7 @@ def test_serialized_metrics_stay_serializable_after_timeout_prevention() -> None
     The timeout-prevention path records a deadline in the debug log; keeping it
     as a raw datetime crashes execnet when a worker ships its metrics home.
     """
-    detector = flaky_detection.FlakyDetector.from_context(
+    detector = flaky_detection.FlakyDetector.from_context_dict(
         context_dict={
             "budget_ratio_for_new_tests": 0.1,
             "budget_ratio_for_unhealthy_tests": 0.05,
@@ -259,6 +258,7 @@ def test_serialized_metrics_stay_serializable_after_timeout_prevention() -> None
             "min_test_execution_count": 5,
         },
         mode="new",
+        is_xdist=True,
     )
 
     test = "test_slow"
@@ -275,7 +275,6 @@ def test_serialized_metrics_stay_serializable_after_timeout_prevention() -> None
     json.dumps(detector.to_serializable_metrics())
 
 
-@responses.activate
 def test_worker_does_not_fetch_flaky_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -284,8 +283,15 @@ def test_worker_does_not_fetch_flaky_context(
     A per-worker fetch would be redundant and multiply API load by the worker
     count, so the fetch must be skipped when running as a worker.
     """
-    monkeypatch.setattr(utils, "is_in_ci", lambda: False)
+    _set_test_environment(monkeypatch)
     monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw0")
+    # The client is built, but the worker guard must skip the flaky fetch: a
+    # fetch that ran would raise and surface as the error message asserted below.
+    conftest.install_fake_api_client(
+        monkeypatch,
+        quarantine=[],
+        flaky_error="a worker must not fetch the flaky context",
+    )
 
     insights = ci_insights.MergifyCIInsights(
         token="my_token",
@@ -294,8 +300,5 @@ def test_worker_does_not_fetch_flaky_context(
     )
     insights._load_flaky_detector(mode="new")
 
-    # No HTTP call must be attempted at all; the fetch failing and being
-    # swallowed would still count as the redundant load we want to avoid.
-    assert len(responses.calls) == 0
     assert insights.flaky_detector is None
     assert insights.flaky_detector_error_message is None
