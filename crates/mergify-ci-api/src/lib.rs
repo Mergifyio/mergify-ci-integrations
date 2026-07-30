@@ -2,9 +2,10 @@
 //!
 //! One implementation of the small, parity-critical surface every test client
 //! (pytest / rspec / vitest / playwright) currently reimplements: the
-//! quarantine and flaky-detection calls, the flaky budget engine, and trace
-//! upload. Per-framework span *construction* stays in each client; everything
-//! else lives here and is exposed through the language bindings.
+//! quarantine, flaky-detection, and test-selection calls, the flaky budget
+//! engine, and trace upload. Per-framework span *construction* stays in each
+//! client; everything else lives here and is exposed through the language
+//! bindings.
 //!
 //! So far:
 //!
@@ -35,6 +36,6 @@ mod trace;
 pub use budget::{BudgetPlan, Mode};
 pub use client::Client;
 pub use config::{ApiConfig, DEFAULT_API_URL, split_full_name};
-pub use models::{FlakyDetectionContext, QuarantinePage, QuarantinedTest};
+pub use models::{FlakyDetectionContext, QuarantinePage, QuarantinedTest, TestSelection};
 pub use outcome::Outcome;
 pub use trace::{AttrValue, MAX_GZIPPED_UPLOAD_BYTES, SpanData, SpanStatus, UploadError};
