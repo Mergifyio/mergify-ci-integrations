@@ -6,113 +6,10 @@ import _pytest.nodes
 import _pytest.pytester
 import _pytest.reports
 import pytest
-import requests
-import responses
-from opentelemetry.sdk.trace import TracerProvider, export
-from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
-    InMemorySpanExporter,
-)
 
 import pytest_mergify
 from pytest_mergify import ci_insights
 from tests import conftest
-
-
-class _FailingSpanExporter(export.SpanExporter):
-    def export(self, spans: typing.Any) -> export.SpanExportResult:
-        return export.SpanExportResult.FAILURE
-
-
-def _record_one_span(processor: ci_insights.SynchronousBatchSpanProcessor) -> None:
-    provider = TracerProvider()
-    provider.add_span_processor(processor)
-    with provider.get_tracer("tests").start_as_current_span("a-span"):
-        pass
-
-
-def test_queued_spans_are_exported_on_shutdown() -> None:
-    # The SDK registers `shutdown` with atexit, so it is the only thing that
-    # runs when a session dies without reaching the terminal summary.
-    exporter = InMemorySpanExporter()
-    processor = ci_insights.SynchronousBatchSpanProcessor(exporter)
-
-    _record_one_span(processor)
-    assert exporter.get_finished_spans() == ()
-
-    processor.shutdown()
-
-    assert len(exporter.get_finished_spans()) == 1
-
-
-def test_flushing_reports_whether_the_export_worked() -> None:
-    processor = ci_insights.SynchronousBatchSpanProcessor(_FailingSpanExporter())
-    _record_one_span(processor)
-
-    assert processor.force_flush() is False
-
-
-def test_flushing_an_empty_queue_reports_success() -> None:
-    processor = ci_insights.SynchronousBatchSpanProcessor(InMemorySpanExporter())
-
-    assert processor.force_flush() is True
-
-
-def test_a_batch_the_exporter_rejects_is_attempted_once() -> None:
-    # `shutdown` flushes as well, and the SDK leaves its atexit hook armed until
-    # that returns, so a batch left in the queue is sent three times over and
-    # the last failure lands as an ignored exception at interpreter exit.
-    attempts = []
-
-    class _RaisingSpanExporter(export.SpanExporter):
-        def export(self, spans: typing.Any) -> export.SpanExportResult:
-            attempts.append(len(spans))
-            raise RuntimeError("the API rejected the batch")
-
-    processor = ci_insights.SynchronousBatchSpanProcessor(_RaisingSpanExporter())
-    _record_one_span(processor)
-
-    with pytest.raises(RuntimeError):
-        processor.force_flush()
-    processor.shutdown()
-
-    assert attempts == [1]
-
-
-@pytest.mark.parametrize(
-    argnames="status",
-    argvalues=[
-        pytest.param(408, id="request-timeout"),
-        pytest.param(500, id="internal-server-error"),
-        pytest.param(502, id="bad-gateway"),
-        pytest.param(503, id="service-unavailable"),
-    ],
-)
-@responses.activate
-def test_a_transient_error_is_left_to_the_exporter(status: int) -> None:
-    responses.add(responses.POST, "https://example.com/traces", status=status)
-
-    response = ci_insights.SessionRaisingOnPermanentError().post(
-        "https://example.com/traces"
-    )
-
-    assert response.status_code == status
-
-
-@pytest.mark.parametrize(
-    argnames="status",
-    argvalues=[
-        pytest.param(400, id="bad-request"),
-        pytest.param(401, id="unauthorized"),
-        pytest.param(403, id="forbidden"),
-        pytest.param(404, id="not-found"),
-    ],
-)
-@responses.activate
-def test_a_permanent_error_is_surfaced_immediately(status: int) -> None:
-    responses.add(responses.POST, "https://example.com/traces", status=status)
-
-    with pytest.raises(requests.HTTPError):
-        ci_insights.SessionRaisingOnPermanentError().post("https://example.com/traces")
 
 
 def _set_test_environment(
@@ -287,15 +184,15 @@ def test_flaky_detection_for_new_tests(
     ]
     for span in spans.values():
         assert span is not None
-        assert span.attributes is not None
+        assert span["attributes"] is not None
 
-        if span.name in flaky_tests:
-            assert span.attributes.get("cicd.test.flaky", False) is True
+        if span["name"] in flaky_tests:
+            assert span["attributes"].get("cicd.test.flaky", False) is True
 
-        if span.name in new_tests:
-            assert span.attributes.get("cicd.test.flaky_detection", False) is True
-            assert span.attributes.get("cicd.test.new", False) is True
-            assert span.attributes.get("cicd.test.rerun_count", 0) == 999
+        if span["name"] in new_tests:
+            assert span["attributes"].get("cicd.test.flaky_detection", False) is True
+            assert span["attributes"].get("cicd.test.new", False) is True
+            assert span["attributes"].get("cicd.test.rerun_count", 0) == 999
 
 
 def test_flaky_detection_for_unhealthy_tests(
@@ -372,17 +269,17 @@ def test_flaky_detection_for_unhealthy_tests(
     ]
     for span in spans.values():
         assert span is not None
-        assert span.attributes is not None
+        assert span["attributes"] is not None
 
-        if span.name in flaky_tests:
-            assert span.attributes.get("cicd.test.flaky", False) is True
+        if span["name"] in flaky_tests:
+            assert span["attributes"].get("cicd.test.flaky", False) is True
 
-        if span.name in unhealthy_tests:
-            assert not span.attributes.get("cicd.test.new")
-            assert span.attributes.get("cicd.test.flaky_detection", False) is True
-            assert span.attributes.get("cicd.test.rerun_count", 0) == 999
+        if span["name"] in unhealthy_tests:
+            assert not span["attributes"].get("cicd.test.new")
+            assert span["attributes"].get("cicd.test.flaky_detection", False) is True
+            assert span["attributes"].get("cicd.test.rerun_count", 0) == 999
             # The status should reflect the initial run outcome, not "rerun"
-            assert span.attributes.get("test.case.result.status") == "passed"
+            assert span["attributes"].get("test.case.result.status") == "passed"
 
 
 def test_flaky_detection_with_fixtures(
@@ -531,10 +428,10 @@ def test_flaky_detection_with_only_one_new_test_at_the_end(
         "test_flaky_detection_with_only_one_new_test_at_the_end.py::test_bar"
     )
     assert span is not None
-    assert span.attributes is not None
-    assert span.attributes.get("cicd.test.flaky_detection", False) is True
-    assert span.attributes.get("cicd.test.new", False) is True
-    assert span.attributes.get("cicd.test.rerun_count", 0) == 999
+    assert span["attributes"] is not None
+    assert span["attributes"].get("cicd.test.flaky_detection", False) is True
+    assert span["attributes"].get("cicd.test.new", False) is True
+    assert span["attributes"].get("cicd.test.rerun_count", 0) == 999
 
 
 def test_flaky_detection_execution_count_matches_the_cap(
@@ -572,9 +469,9 @@ def test_flaky_detection_execution_count_matches_the_cap(
 
     assert spans is not None
     span = spans["test_flaky_detection_execution_count_matches_the_cap.py::test_new"]
-    assert span.attributes is not None
+    assert span["attributes"] is not None
     assert (
-        span.attributes.get("cicd.test.rerun_count")
+        span["attributes"].get("cicd.test.rerun_count")
         == max_test_execution_count - 1  # The initial run is not a rerun.
     )
 
@@ -771,13 +668,13 @@ def test_flaky_detection_consistent_failure_is_not_flaky(
     span = spans[
         "test_flaky_detection_consistent_failure_is_not_flaky.py::test_always_fails"
     ]
-    assert span.attributes is not None
+    assert span["attributes"] is not None
 
     # The test was reran, so flaky detection did consider it...
-    assert span.attributes.get("cicd.test.flaky_detection") is True
-    assert span.attributes.get("test.case.result.status") == "failed"
+    assert span["attributes"].get("cicd.test.flaky_detection") is True
+    assert span["attributes"].get("test.case.result.status") == "failed"
     # ...but it never passed once, so it is broken rather than flaky.
-    assert span.attributes.get("cicd.test.flaky") is None
+    assert span["attributes"].get("cicd.test.flaky") is None
 
 
 def test_flaky_detection_slow_test_keeps_higher_scoped_finalizers(
@@ -1140,13 +1037,13 @@ def test_flaky_detection_excludes_opted_out_tests(
     assert len(spans) == 1 + 2  # 1 for the session and one per test.
 
     watched = spans["test_flaky_detection_excludes_opted_out_tests.py::test_watched"]
-    assert watched.attributes is not None
-    assert watched.attributes.get("cicd.test.new") is True
-    assert watched.attributes.get("cicd.test.flaky_detection") is True
-    assert watched.attributes.get("cicd.test.rerun_count") == 999
+    assert watched["attributes"] is not None
+    assert watched["attributes"].get("cicd.test.new") is True
+    assert watched["attributes"].get("cicd.test.flaky_detection") is True
+    assert watched["attributes"].get("cicd.test.rerun_count") == 999
 
     excluded = spans["test_flaky_detection_excludes_opted_out_tests.py::test_excluded"]
-    assert excluded.attributes is not None
-    assert excluded.attributes.get("cicd.test.new") is None
-    assert excluded.attributes.get("cicd.test.flaky_detection") is None
-    assert excluded.attributes.get("cicd.test.rerun_count") is None
+    assert excluded["attributes"] is not None
+    assert excluded["attributes"].get("cicd.test.new") is None
+    assert excluded["attributes"].get("cicd.test.flaky_detection") is None
+    assert excluded["attributes"].get("cicd.test.rerun_count") is None
