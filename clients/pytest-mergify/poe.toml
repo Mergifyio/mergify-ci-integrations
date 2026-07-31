@@ -1,0 +1,21 @@
+[tool.poe.executor]
+type = "uv"
+
+[tool.poe.tasks.test]
+cmd = "pytest -v --pyargs tests"
+
+[tool.poe.tasks.linters]
+help = "Run linters"
+default_item_type = "cmd"
+sequence = [
+  "ruff check .",
+  "ruff format --check .",
+  "mypy",
+  "yamllint .",
+]
+
+[tool.poe.tasks.codespell]
+help = "Run codespell (requires Python 3.14+)"
+cmd = "codespell"
+[tool.poe.tasks.codespell.env]
+UV_PYTHON = "3.14"
