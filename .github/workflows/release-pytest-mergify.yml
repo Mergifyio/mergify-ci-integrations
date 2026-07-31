@@ -1,0 +1,37 @@
+name: Release pytest-mergify
+
+# Releases are driven by client-scoped tags so each client in the monorepo
+# ships independently. Pushing `pytest-mergify-v1.4.0` builds that version
+# (hatch-vcs reads it straight from the tag) and publishes the wheel + sdist
+# to PyPI via Trusted Publishing -- no API token.
+on:
+  push:
+    tags:
+      - "pytest-mergify-v*"
+
+permissions: {}
+
+jobs:
+  release:
+    name: build + publish to PyPI
+    runs-on: ubuntu-latest
+    # The `release` environment carries the PyPI Trusted Publishing identity
+    # (and any required approvals). PyPI must be configured to trust this repo,
+    # this workflow file, and this environment.
+    environment: release
+    permissions:
+      id-token: write # PyPI Trusted Publishing (OIDC)
+      contents: read # checkout (private repo)
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # hatch-vcs derives the version from the tag via `git describe`, so
+          # the full history and tags must be present.
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - name: Build wheel + sdist
+        run: uv build --out-dir dist clients/pytest-mergify
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        with:
+          packages-dir: dist
