@@ -1,11 +1,12 @@
 name: Release pytest-mergify
 
 # Releases are cut as GitHub Releases so each client in the monorepo ships
-# independently -- with its own notes and, once immutable releases is enabled
-# on the repo, a frozen and attested tag. Publishing a release tagged
-# `pytest-mergify-v2026.7.31.1` builds that version (hatch-vcs reads it straight
-# from the tag) and publishes the wheel + sdist to PyPI via Trusted Publishing
-# -- no API token.
+# independently. Publishing a release tagged `pytest-mergify-v2026.7.31.1`
+# builds the per-platform abi3 wheels (maturin -- the wheel bundles the Rust
+# binding) and publishes them to PyPI via Trusted Publishing -- no API token.
+# The version is stamped from the tag before maturin runs (hatch-vcs no longer
+# applies under the maturin backend), the same way mergify-cli does. No sdist:
+# the binding path-depends on ../../crates, which a standalone sdist can't build.
 on:
   release:
     types: [published]
@@ -13,30 +14,65 @@ on:
 permissions: {}
 
 jobs:
-  release:
-    name: build + publish to PyPI
+  build:
+    name: build ${{ matrix.platform }}
     # A GitHub Release in this monorepo isn't client-scoped, so only act on
     # pytest-mergify's tags; other clients get their own release workflows.
     if: startsWith(github.event.release.tag_name, 'pytest-mergify-v')
-    runs-on: ubuntu-latest
-    # The `release` environment carries the PyPI Trusted Publishing identity
-    # (and any required approvals). PyPI must be configured to trust this repo,
-    # this workflow file, and this environment.
-    environment: release
+    runs-on: ${{ matrix.runner }}
     permissions:
-      id-token: write # PyPI Trusted Publishing (OIDC)
-      contents: read # checkout (private repo)
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux-x86_64, runner: ubuntu-latest, target: x86_64 }
+          - { platform: linux-aarch64, runner: ubuntu-latest, target: aarch64 }
+          - { platform: macos-x86_64, runner: macos-latest, target: x86_64 }
+          - { platform: macos-aarch64, runner: macos-latest, target: aarch64 }
+          - { platform: windows-x64, runner: windows-latest, target: x64 }
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          # Build exactly the released tag; hatch-vcs derives the version from
-          # it via `git describe`, so full history and tags must be present.
           ref: ${{ github.event.release.tag_name }}
-          fetch-depth: 0
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-      - name: Build wheel + sdist
-        run: uv build --out-dir dist clients/pytest-mergify
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+      # hatch-vcs is gone under maturin, so the version comes from a build-time
+      # stamp: rewrite the `0.0.0` placeholder to the tag's CalVer before build.
+      - name: Stamp the version from the tag
+        shell: bash
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version="${TAG#pytest-mergify-v}"
+          sed -i.bak -E "s/^version = \"0.0.0\".*/version = \"${version}\"/" clients/pytest-mergify/pyproject.toml
+          rm -f clients/pytest-mergify/pyproject.toml.bak
+          grep '^version = ' clients/pytest-mergify/pyproject.toml
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
+        with:
+          target: ${{ matrix.target }}
+          # `auto` is honoured on Linux (manylinux container / cross for
+          # aarch64) and ignored on macOS and Windows.
+          manylinux: auto
+          args: --release --out dist --manifest-path clients/pytest-mergify/Cargo.toml
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: wheels-${{ matrix.platform }}
+          path: dist/*.whl
+
+  publish:
+    name: publish to PyPI
+    needs: build
+    if: startsWith(github.event.release.tag_name, 'pytest-mergify-v')
+    runs-on: ubuntu-latest
+    # The `release` environment carries the PyPI Trusted Publishing identity.
+    environment: release
+    permissions:
+      id-token: write # PyPI Trusted Publishing (OIDC)
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: dist
+          pattern: wheels-*
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
         with:
           packages-dir: dist
