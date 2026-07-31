@@ -59,11 +59,45 @@ jobs:
           uv pip install "pytest-mergify @ $(ls dist/*.whl)"
           uv run python -c "import pytest_mergify; print('pytest-mergify imported')"
 
+  tests:
+    name: pytest-mergify tests (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+    defaults:
+      run:
+        working-directory: clients/pytest-mergify
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      # The committed uv.lock pins the plugin's known-good dev/runtime deps
+      # (older otel/ruff/mypy); --frozen installs exactly that set per Python.
+      - name: Run the test suite
+        env:
+          UV_PYTHON: ${{ matrix.python }}
+        run: uv run --frozen poe test
+
+  linters:
+    name: pytest-mergify linters
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/pytest-mergify
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - name: Run ruff, mypy, yamllint
+        run: uv run --frozen poe linters
+
   ci-gate:
     if: ${{ !cancelled() }}
     needs:
       - rust
       - wheel
+      - tests
+      - linters
     runs-on: ubuntu-latest
     steps:
       - name: Verify all jobs succeeded
