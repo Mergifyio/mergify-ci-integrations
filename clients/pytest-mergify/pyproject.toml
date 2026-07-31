@@ -39,10 +39,11 @@ dev = [
 requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
-# Version is read from git tags -- continuing the plugin's own SemVer line the
-# way upstream did -- but scoped to this client so no sibling client's tags leak
-# in: `--match` limits `git describe` to pytest-mergify tags and `tag_regex`
-# strips the prefix (pytest-mergify-v1.4.0 -> 1.4.0). `search_parent_directories`
+# Version is read from git tags -- continuing the plugin's own CalVer line
+# (YYYY.M.D.N, e.g. 2026.7.31.1) the way upstream did -- but scoped to this
+# client so no sibling client's tags leak in: `--match` limits `git describe`
+# to pytest-mergify tags and `tag_regex` strips the prefix
+# (pytest-mergify-v2026.7.31.1 -> 2026.7.31.1). `search_parent_directories`
 # lets setuptools-scm find the repo's .git two levels up (the package isn't at
 # the git root). A tagged commit builds a clean release version; other commits
 # build a `.devN` version from commit distance. `fallback_version` is the last
