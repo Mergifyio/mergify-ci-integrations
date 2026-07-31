@@ -59,11 +59,75 @@ jobs:
           uv pip install "pytest-mergify @ $(ls dist/*.whl)"
           uv run python -c "import pytest_mergify; print('pytest-mergify imported')"
 
+  tests:
+    name: pytest-mergify tests (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+    defaults:
+      run:
+        working-directory: clients/pytest-mergify
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      # The committed uv.lock pins the plugin's known-good dev/runtime deps
+      # (older otel/ruff/mypy); --frozen installs exactly that set per Python.
+      - name: Run the test suite
+        env:
+          UV_PYTHON: ${{ matrix.python }}
+        run: uv run --frozen poe test
+
+  linters:
+    name: pytest-mergify linters
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/pytest-mergify
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - name: Run ruff, mypy, yamllint
+        run: uv run --frozen poe linters
+
+  codespell:
+    name: pytest-mergify codespell
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/pytest-mergify
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      # codespell runs on 3.14 (its poe task pins UV_PYTHON); --frozen uses the
+      # locked codespell.
+      - name: Run codespell
+        env:
+          UV_PYTHON: "3.14"
+        run: uv run --frozen poe codespell
+
+  semgrep:
+    name: pytest-mergify semgrep
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep:1.100.0
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # Scoped to the client -- upstream scanned its whole repo, which was just
+      # the plugin. A repo-wide scan would be a separate monorepo-level job.
+      - name: Run Semgrep
+        run: semgrep --config=auto --error --timeout=15 clients/pytest-mergify
+
   ci-gate:
     if: ${{ !cancelled() }}
     needs:
       - rust
       - wheel
+      - tests
+      - linters
+      - codespell
+      - semgrep
     runs-on: ubuntu-latest
     steps:
       - name: Verify all jobs succeeded
