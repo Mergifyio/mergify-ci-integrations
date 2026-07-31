@@ -1,16 +1,81 @@
-[build-system]
-requires = ["maturin>=1.7,<2"]
-build-backend = "maturin"
-
 [project]
 name = "pytest-mergify"
-version = "0.0.0"
-description = "pytest plugin for Mergify CI Insights (walking-skeleton stub; real plugin migrates in MRGFY-7766)."
-requires-python = ">=3.9"
+dynamic = ["version"]
+description = "Pytest plugin for Mergify"
+authors = [{ name = "Julien Danjou", email = "jd@mergify.com" }]
+license = "GPL-3.0-only"
+readme = "README.md"
 
-[tool.maturin]
-# Mixed project: Python sources live under python/, the compiled extension is
-# packaged inside the pytest_mergify package as `_mergify_ci`.
-python-source = "python"
-module-name = "pytest_mergify._mergify_ci"
-features = ["pyo3/extension-module"]
+requires-python = ">=3.8"
+dependencies = [
+    "opentelemetry-exporter-otlp-proto-http>=1.29",
+    "opentelemetry-sdk>=1.29",
+    "requests>=2",
+    "pytest>=6.0.0",
+    "pytest-timeout>=2.4.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14.9",
+    "mypy>=1.13.0",
+    "poethepoet>=0.30.0",
+    "codespell==2.4.3; python_version >= '3.9'",
+    "yamllint>=1.35.1",
+    "anys>=0.3.1",
+    "responses>=0.25.8",
+    # https://github.com/pytest-dev/pytest-asyncio/issues/706#issuecomment-2082788963
+    "pytest-asyncio>=0.24.0",
+    "freezegun>=1.5.5",
+    "pytest-xdist>=3.0",
+]
+
+# Pure Python for now (hatchling). The plugin does not use the bundled Rust
+# binding yet, so there is no maturin/abi3 build -- that lands when it adopts
+# the shared Rust code (also when the backend switches to maturin, at which
+# point hatch-vcs -- a hatchling plugin -- gives way to build-time tag stamping,
+# the way mergify-cli did on its Rust port).
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+# Version is read from git tags -- continuing the plugin's own SemVer line the
+# way upstream did -- but scoped to this client so no sibling client's tags leak
+# in: `--match` limits `git describe` to pytest-mergify tags and `tag_regex`
+# strips the prefix (pytest-mergify-v1.4.0 -> 1.4.0). `search_parent_directories`
+# lets setuptools-scm find the repo's .git two levels up (the package isn't at
+# the git root). A tagged commit builds a clean release version; other commits
+# build a `.devN` version from commit distance. `fallback_version` is the last
+# resort when history is unavailable (e.g. CI's shallow checkout with no tags).
+[tool.hatch.version]
+source = "vcs"
+raw-options = { tag_regex = "^pytest-mergify-v(?P<version>.+)$", git_describe_command = ["git", "describe", "--dirty", "--tags", "--long", "--match", "pytest-mergify-v*"], search_parent_directories = true, fallback_version = "0.0.0" }
+
+[project.entry-points.pytest11]
+pytest_mergify = "pytest_mergify"
+
+# The package lives under python/ (kept aligned with the future maturin
+# python-source layout), so tell hatchling where to find it.
+[tool.hatch.build.targets.wheel]
+packages = ["python/pytest_mergify"]
+
+[tool.poe]
+include = ["poe.toml"]
+
+[tool.mypy]
+strict = true
+warn_unreachable = true
+files = ["python/pytest_mergify", "tests"]
+mypy_path = "python"
+show_error_codes = true
+
+[tool.ruff]
+target-version = "py38"
+
+[[tool.mypy.overrides]]
+module = [
+  "pytest_opentelemetry.*",
+  "pytest_timeout.*",
+  "requests"
+]
+ignore_missing_imports = true
