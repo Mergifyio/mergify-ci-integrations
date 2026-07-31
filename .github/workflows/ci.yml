@@ -107,6 +107,18 @@ jobs:
           UV_PYTHON: "3.14"
         run: uv run --frozen poe codespell
 
+  semgrep:
+    name: pytest-mergify semgrep
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep:1.100.0
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # Scoped to the client -- upstream scanned its whole repo, which was just
+      # the plugin. A repo-wide scan would be a separate monorepo-level job.
+      - name: Run Semgrep
+        run: semgrep --config=auto --error --timeout=15 clients/pytest-mergify
+
   ci-gate:
     if: ${{ !cancelled() }}
     needs:
@@ -115,6 +127,7 @@ jobs:
       - tests
       - linters
       - codespell
+      - semgrep
     runs-on: ubuntu-latest
     steps:
       - name: Verify all jobs succeeded
