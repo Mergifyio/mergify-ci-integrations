@@ -1,0 +1,66 @@
+name: Build pytest-mergify wheels
+
+# Reusable maturin matrix that builds the per-platform abi3 wheels and uploads
+# them as `wheels-<platform>` artifacts. Both stages of the release call it: the
+# draft stage to prove the build (and attach the wheels for review), the publish
+# stage to build the artifacts that go to PyPI.
+#
+# With a `tag` it stamps that CalVer into pyproject before maturin runs; without
+# one it leaves the 0.0.0 placeholder (so a smoke build never looks like a
+# release). Each caller's checkout ref is inherited -- the dispatch commit for
+# the draft, the tag's commit for publish -- so no explicit ref is needed here.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag to stamp (pytest-mergify-v<calver>); empty leaves 0.0.0."
+        type: string
+        required: false
+        default: ""
+
+permissions: {}
+
+# Let abi3 builds proceed against a CPython newer than the one PyO3 knows about.
+env:
+  PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux-x86_64, runner: ubuntu-latest, target: x86_64 }
+          - { platform: linux-aarch64, runner: ubuntu-latest, target: aarch64 }
+          - { platform: macos-x86_64, runner: macos-latest, target: x86_64 }
+          - { platform: macos-aarch64, runner: macos-latest, target: aarch64 }
+          - { platform: windows-x64, runner: windows-latest, target: x64 }
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # hatch-vcs is gone under maturin, so the version is a build-time stamp:
+      # rewrite the 0.0.0 placeholder to the tag's CalVer before maturin runs.
+      - name: Stamp the version from the tag
+        if: inputs.tag != ''
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          version="${TAG#pytest-mergify-v}"
+          sed -i.bak -E "s/^version = \"0.0.0\".*/version = \"${version}\"/" clients/pytest-mergify/pyproject.toml
+          rm -f clients/pytest-mergify/pyproject.toml.bak
+          grep '^version = ' clients/pytest-mergify/pyproject.toml
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
+        with:
+          target: ${{ matrix.target }}
+          # `auto` is honoured on Linux (manylinux container / cross for
+          # aarch64) and ignored on macOS and Windows.
+          manylinux: auto
+          args: --release --out dist --manifest-path clients/pytest-mergify/Cargo.toml
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: wheels-${{ matrix.platform }}
+          path: dist/*.whl

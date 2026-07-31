@@ -1,42 +1,117 @@
 name: Release pytest-mergify
 
-# Releases are cut as GitHub Releases so each client in the monorepo ships
-# independently -- with its own notes and, once immutable releases is enabled
-# on the repo, a frozen and attested tag. Publishing a release tagged
-# `pytest-mergify-v2026.7.31.1` builds that version (hatch-vcs reads it straight
-# from the tag) and publishes the wheel + sdist to PyPI via Trusted Publishing
-# -- no API token.
+# Two-step release, inspired by mergify-cli (simplified: PyPI-only, no binary
+# assets). Splitting build from publish means a maturin cross-compile failure is
+# caught BEFORE anything is published -- important because the repo uses
+# immutable releases, so a published release + its tag are frozen and can't be
+# retried.
+#
+# Step 1 -- prepare the draft (`workflow_dispatch`, input `tag`):
+#   Validate the tag, build the per-platform abi3 wheels from the current commit,
+#   and create a DRAFT GitHub Release with them attached + generated notes.
+#   GitHub doesn't fire release events on draft saves, so this stage is
+#   dispatch-driven, the way mergify-cli's is.
+#
+# Step 2 -- publish (`release: published`):
+#   The maintainer reviews the draft and publishes it; that fires this stage,
+#   which rebuilds the wheels from the now-created tag and publishes them to PyPI
+#   via Trusted Publishing (PEP 740 attestations on by default). No sdist -- the
+#   binding path-depends on ../../crates, which a standalone sdist can't build.
 on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag: pytest-mergify-v<CalVer> (e.g. pytest-mergify-v2026.8.3.1), above the latest on PyPI."
+        type: string
+        required: true
   release:
     types: [published]
 
 permissions: {}
 
+concurrency:
+  group: release-pytest-mergify-${{ inputs.tag || github.event.release.tag_name }}
+  cancel-in-progress: false
+
 jobs:
-  release:
-    name: build + publish to PyPI
+  # ---------------- Step 1: prepare the draft (workflow_dispatch) ----------------
+  validate-tag:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the tag shape
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          if ! [[ "${TAG}" =~ ^pytest-mergify-v[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}\.[0-9]+$ ]]; then
+            echo "::error::tag '${TAG}' must be pytest-mergify-v<YYYY.M.D.N>"
+            exit 1
+          fi
+
+  build-draft:
+    if: github.event_name == 'workflow_dispatch'
+    needs: validate-tag
+    # Grant the reusable workflow read access; without it the top-level
+    # `permissions: {}` would leave checkout of this private repo unauthorized.
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-pytest-mergify-wheels.yml
+    with:
+      tag: ${{ inputs.tag }}
+
+  create-draft:
+    if: github.event_name == 'workflow_dispatch'
+    needs: build-draft
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the draft release
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: dist
+          pattern: wheels-*
+          merge-multiple: true
+      - name: Create the draft release with the wheels attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+          SHA: ${{ github.sha }}
+        run: |
+          gh release create "${TAG}" \
+            --repo "${REPO}" \
+            --target "${SHA}" \
+            --draft \
+            --title "pytest-mergify ${TAG#pytest-mergify-v}" \
+            --generate-notes \
+            dist/*.whl
+
+  # ---------------- Step 2: publish (release: published) ----------------
+  build-publish:
     # A GitHub Release in this monorepo isn't client-scoped, so only act on
     # pytest-mergify's tags; other clients get their own release workflows.
-    if: startsWith(github.event.release.tag_name, 'pytest-mergify-v')
+    if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'pytest-mergify-v')
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-pytest-mergify-wheels.yml
+    with:
+      tag: ${{ github.event.release.tag_name }}
+
+  publish:
+    if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'pytest-mergify-v')
+    needs: build-publish
     runs-on: ubuntu-latest
-    # The `release` environment carries the PyPI Trusted Publishing identity
-    # (and any required approvals). PyPI must be configured to trust this repo,
-    # this workflow file, and this environment.
+    # The `release` environment carries the PyPI Trusted Publishing identity.
     environment: release
     permissions:
       id-token: write # PyPI Trusted Publishing (OIDC)
-      contents: read # checkout (private repo)
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          # Build exactly the released tag; hatch-vcs derives the version from
-          # it via `git describe`, so full history and tags must be present.
-          ref: ${{ github.event.release.tag_name }}
-          fetch-depth: 0
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-      - name: Build wheel + sdist
-        run: uv build --out-dir dist clients/pytest-mergify
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+          path: dist
+          pattern: wheels-*
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
         with:
           packages-dir: dist

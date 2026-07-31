@@ -1,6 +1,6 @@
 [project]
 name = "pytest-mergify"
-dynamic = ["version"]
+version = "0.0.0" # placeholder; the release workflow stamps it from the git tag
 description = "Pytest plugin for Mergify"
 authors = [{ name = "Julien Danjou", email = "jd@mergify.com" }]
 license = "GPL-3.0-only"
@@ -30,35 +30,26 @@ dev = [
     "pytest-xdist>=3.0",
 ]
 
-# Pure Python for now (hatchling). The plugin does not use the bundled Rust
-# binding yet, so there is no maturin/abi3 build -- that lands when it adopts
-# the shared Rust code (also when the backend switches to maturin, at which
-# point hatch-vcs -- a hatchling plugin -- gives way to build-time tag stamping,
-# the way mergify-cli did on its Rust port).
+# Compiled build (maturin): the wheel now bundles the Rust binding as
+# `pytest_mergify._mergify_ci` (abi3-py38 -- one wheel per platform works across
+# all CPython 3.8+). The static `version` above is a placeholder: the release
+# workflow stamps it from the git tag before maturin runs. hatch-vcs was a
+# hatchling plugin and no longer applies, so versioning moves to that build-time
+# stamp -- the same swap mergify-cli made on its Rust port. The CalVer scheme
+# (YYYY.M.D.N) and the GitHub-Releases flow are unchanged.
 [build-system]
-requires = ["hatchling", "hatch-vcs"]
-build-backend = "hatchling.build"
-
-# Version is read from git tags -- continuing the plugin's own CalVer line
-# (YYYY.M.D.N, e.g. 2026.7.31.1) the way upstream did -- but scoped to this
-# client so no sibling client's tags leak in: `--match` limits `git describe`
-# to pytest-mergify tags and `tag_regex` strips the prefix
-# (pytest-mergify-v2026.7.31.1 -> 2026.7.31.1). `search_parent_directories`
-# lets setuptools-scm find the repo's .git two levels up (the package isn't at
-# the git root). A tagged commit builds a clean release version; other commits
-# build a `.devN` version from commit distance. `fallback_version` is the last
-# resort when history is unavailable (e.g. CI's shallow checkout with no tags).
-[tool.hatch.version]
-source = "vcs"
-raw-options = { tag_regex = "^pytest-mergify-v(?P<version>.+)$", git_describe_command = ["git", "describe", "--dirty", "--tags", "--long", "--match", "pytest-mergify-v*"], search_parent_directories = true, fallback_version = "0.0.0" }
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
 
 [project.entry-points.pytest11]
 pytest_mergify = "pytest_mergify"
 
-# The package lives under python/ (kept aligned with the future maturin
-# python-source layout), so tell hatchling where to find it.
-[tool.hatch.build.targets.wheel]
-packages = ["python/pytest_mergify"]
+# Mixed project: the Python sources live under python/ and the compiled
+# extension is packaged inside the pytest_mergify package as `_mergify_ci`.
+[tool.maturin]
+python-source = "python"
+module-name = "pytest_mergify._mergify_ci"
+features = ["pyo3/extension-module"]
 
 [tool.poe]
 include = ["poe.toml"]
