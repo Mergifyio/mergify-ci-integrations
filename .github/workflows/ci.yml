@@ -91,6 +91,22 @@ jobs:
       - name: Run ruff, mypy, yamllint
         run: uv run --frozen poe linters
 
+  codespell:
+    name: pytest-mergify codespell
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/pytest-mergify
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      # codespell runs on 3.14 (its poe task pins UV_PYTHON); --frozen uses the
+      # locked codespell.
+      - name: Run codespell
+        env:
+          UV_PYTHON: "3.14"
+        run: uv run --frozen poe codespell
+
   ci-gate:
     if: ${{ !cancelled() }}
     needs:
@@ -98,6 +114,7 @@ jobs:
       - wheel
       - tests
       - linters
+      - codespell
     runs-on: ubuntu-latest
     steps:
       - name: Verify all jobs succeeded
