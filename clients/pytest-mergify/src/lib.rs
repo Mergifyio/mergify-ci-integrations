@@ -169,7 +169,9 @@ fn test_selection_dict(py: Python<'_>, selection: &TestSelection) -> PyResult<Py
     let dict = PyDict::new(py);
     dict.set_item("selection", &selection.selection)?;
     dict.set_item("reason", &selection.reason)?;
-    dict.set_item("tests", selection.tests.clone())?;
+    // `tests` is `None` only for a `full` answer (a subset without it is
+    // rejected upstream), so an empty list is the right value for the plugin.
+    dict.set_item("tests", selection.tests.clone().unwrap_or_default())?;
     Ok(dict.into())
 }
 

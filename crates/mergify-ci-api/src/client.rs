@@ -21,10 +21,13 @@ const RETRY_BASE_DELAY: Duration = Duration::from_millis(100);
 
 /// Async client for a single repository's Mergify backend API.
 ///
-/// Fetches are *fail-open*: a `402` (no subscription) or `404` (feature not
-/// enabled) resolves to [`Outcome::Dormant`]; any other failure to
-/// [`Outcome::Failed`] with a message. A fetch never panics or returns an
-/// `Err` to the caller — degradation is the contract.
+/// Fetches are *fail-open*: a `404` (feature not enabled), and for quarantine
+/// and test-selection a `402` (no subscription), resolve to
+/// [`Outcome::Dormant`]; any other failure to [`Outcome::Failed`] with a
+/// message. (The flaky-detection context surfaces a `402` instead, matching
+/// pytest-mergify's flaky detector, which raised on everything but a `404`.) A
+/// fetch never panics or returns an `Err` to the caller — degradation is the
+/// contract.
 pub struct Client {
     config: ApiConfig,
     http: reqwest::Client,
@@ -100,8 +103,9 @@ impl Client {
         Outcome::Ready(names)
     }
 
-    /// Fetch the flaky-detection context. `402`/`404` → dormant; any other
-    /// non-success → failed.
+    /// Fetch the flaky-detection context. Only `404` (feature not enabled) →
+    /// dormant; a `402` and any other non-success → failed, matching
+    /// pytest-mergify's flaky detector (which raised on all but a `404`).
     pub async fn fetch_flaky_context(&self) -> Outcome<FlakyDetectionContext> {
         let response = match self
             .http
@@ -115,7 +119,10 @@ impl Client {
         };
 
         let status = response.status();
-        if status == StatusCode::NOT_FOUND || status == StatusCode::PAYMENT_REQUIRED {
+        // Only 404 (feature not enabled) is dormant here; unlike quarantine and
+        // test-selection, a 402 surfaces as a failure so the plugin reports that
+        // flaky detection could not be enabled (pytest-mergify parity).
+        if status == StatusCode::NOT_FOUND {
             return Outcome::Dormant;
         }
         if !status.is_success() {
@@ -130,8 +137,9 @@ impl Client {
 
     /// Fetch the test selection for a run, identified by its own `branch`,
     /// `head_sha`, and job coordinates. `402`/`404` → dormant (run everything);
-    /// any other non-success → failed. The `full`/`subset` normalisation is left
-    /// to the caller, which alone can match a subset against the collection.
+    /// any other non-success → failed, as is a `subset` answer missing its
+    /// `tests` list (a protocol break). The `full`/`subset` normalisation is
+    /// left to the caller, which alone can match a subset against the collection.
     pub async fn fetch_test_selection(
         &self,
         branch: &str,
@@ -164,10 +172,21 @@ impl Client {
             return Outcome::Failed(http_status_message(status));
         }
 
-        match response.json().await {
-            Ok(selection) => Outcome::Ready(selection),
-            Err(error) => Outcome::Failed(describe_error(&error)),
+        let selection: TestSelection = match response.json().await {
+            Ok(selection) => selection,
+            Err(error) => return Outcome::Failed(describe_error(&error)),
+        };
+        // A `subset` answer must carry a `tests` list. A *missing* one is a
+        // protocol break, surfaced (pytest-mergify raised a KeyError here)
+        // rather than silently running the full suite; a *present* empty list is
+        // a legitimate "subset matched nothing", left for the caller to
+        // normalise.
+        if selection.selection == "subset" && selection.tests.is_none() {
+            return Outcome::Failed(
+                "Mergify API returned a `subset` test-selection with no `tests` list".to_owned(),
+            );
         }
+        Outcome::Ready(selection)
     }
 
     /// Encode `spans` (under `resource_attributes`) and upload them to the
@@ -353,6 +372,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn flaky_context_surfaces_402() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/ci/o/repositories/r/flaky-detection-context"))
+            .respond_with(ResponseTemplate::new(402))
+            .mount(&server)
+            .await;
+        let client = Client::new(config(&server.uri())).unwrap();
+        // Unlike quarantine/test-selection, a 402 is surfaced here, not dormant.
+        let outcome = client.fetch_flaky_context().await;
+        assert_eq!(outcome.failure(), Some("Mergify API returned HTTP 402"));
+    }
+
+    #[tokio::test]
     async fn flaky_context_failed_on_500() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -438,7 +471,48 @@ mod tests {
             .into_ready()
             .expect("ready");
         assert_eq!(selection.selection, "subset");
-        assert_eq!(selection.tests, ["t::a", "t::b"]);
+        assert_eq!(selection.tests.unwrap(), ["t::a", "t::b"]);
+    }
+
+    #[tokio::test]
+    async fn test_selection_subset_without_tests_is_a_contract_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/ci/o/repositories/r/test-selection"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "selection": "subset",
+                "reason": "queue_rerun",
+            })))
+            .mount(&server)
+            .await;
+        let client = Client::new(config(&server.uri())).unwrap();
+        // A subset with no `tests` list is a protocol break: surfaced, not run
+        // as a silent full suite.
+        let outcome = client.fetch_test_selection("queue/main", "cafe", "CI", "unit").await;
+        assert!(outcome.failure().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_selection_subset_with_empty_tests_is_ready() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/ci/o/repositories/r/test-selection"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "selection": "subset",
+                "reason": "queue_rerun",
+                "tests": [],
+            })))
+            .mount(&server)
+            .await;
+        let client = Client::new(config(&server.uri())).unwrap();
+        // A *present* empty list is legitimate (subset matched nothing), left
+        // for the caller to normalise — not a contract error.
+        let selection = client
+            .fetch_test_selection("queue/main", "cafe", "CI", "unit")
+            .await
+            .into_ready()
+            .expect("ready");
+        assert_eq!(selection.tests, Some(Vec::new()));
     }
 
     #[tokio::test]
