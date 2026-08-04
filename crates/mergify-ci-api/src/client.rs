@@ -14,10 +14,22 @@ use crate::trace::{self, AttrValue, MAX_GZIPPED_UPLOAD_BYTES, SpanData, UploadEr
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// One initial upload plus this many retries before failing loud.
-const MAX_UPLOAD_ATTEMPTS: u32 = 4;
-/// First backoff; doubles each retry (100ms, 200ms, 400ms).
-const RETRY_BASE_DELAY: Duration = Duration::from_millis(100);
+/// Trace-upload retry schedule: one initial attempt plus `max_attempts - 1`
+/// retries, each backing off `base_delay` doubled per retry. The default
+/// approximates the OTLP exporter pytest-mergify used — six attempts with
+/// 1s/2s/4s/8s/16s backoff (~31s total) — so a briefly-degraded backend is
+/// ridden out rather than failing the run fast. Tests shrink `base_delay`.
+#[derive(Clone, Copy)]
+struct RetryPolicy {
+    max_attempts: u32,
+    base_delay: Duration,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self { max_attempts: 6, base_delay: Duration::from_secs(1) }
+    }
+}
 
 /// Async client for a single repository's Mergify backend API.
 ///
@@ -31,13 +43,14 @@ const RETRY_BASE_DELAY: Duration = Duration::from_millis(100);
 pub struct Client {
     config: ApiConfig,
     http: reqwest::Client,
+    retry: RetryPolicy,
 }
 
 impl Client {
     /// Build a client for `config`.
     pub fn new(config: ApiConfig) -> reqwest::Result<Self> {
         let http = reqwest::Client::builder().timeout(REQUEST_TIMEOUT).build()?;
-        Ok(Self { config, http })
+        Ok(Self { config, http, retry: RetryPolicy::default() })
     }
 
     fn endpoint(&self, suffix: &str) -> String {
@@ -48,8 +61,8 @@ impl Client {
     }
 
     /// Fetch the quarantined test names for `branch`, following `Link`
-    /// pagination (with a cycle guard). `402` → dormant; any other non-success
-    /// → failed.
+    /// pagination. `402` → dormant; any other non-success — including a
+    /// pagination cycle (a `next` link back to a fetched page) — → failed.
     pub async fn fetch_quarantine(&self, branch: &str) -> Outcome<Vec<String>> {
         let mut names = Vec::new();
         let mut seen = HashSet::new();
@@ -63,7 +76,13 @@ impl Client {
                     .query(&[("branch", branch), ("per_page", "100")]),
                 Some(url) => {
                     if !seen.insert(url.clone()) {
-                        break; // the server pointed us back at a seen page
+                        // A `next` link back to a page already fetched is a
+                        // pagination cycle: surface it (pytest-mergify did)
+                        // rather than returning a partial list.
+                        return Outcome::Failed(
+                            "Mergify API quarantine pagination cycled back to a fetched page"
+                                .to_owned(),
+                        );
                     }
                     self.http.get(url)
                 }
@@ -241,7 +260,7 @@ impl Client {
         // 408) surfaces immediately.
         let mut attempt: u32 = 1;
         loop {
-            let last_attempt = attempt >= MAX_UPLOAD_ATTEMPTS;
+            let last_attempt = attempt >= self.retry.max_attempts;
             match self
                 .http
                 .post(url)
@@ -265,7 +284,7 @@ impl Client {
                 Err(_error) if !last_attempt => {}
                 Err(error) => return Err(UploadError { status: None, message: error.to_string() }),
             }
-            tokio::time::sleep(RETRY_BASE_DELAY * 2u32.pow(attempt - 1)).await;
+            tokio::time::sleep(self.retry.base_delay * 2u32.pow(attempt - 1)).await;
             attempt += 1;
         }
     }
@@ -604,7 +623,9 @@ mod tests {
             .respond_with(ResponseTemplate::new(200))
             .mount(&server)
             .await;
-        let client = Client::new(config(&server.uri())).unwrap();
+        let mut client = Client::new(config(&server.uri())).unwrap();
+        // Keep the backoff imperceptible so the test doesn't sleep for seconds.
+        client.retry.base_delay = Duration::from_millis(1);
         client.upload_trace(&[], &[span(1)]).await.unwrap();
         assert_eq!(server.received_requests().await.unwrap().len(), 2);
     }
@@ -617,10 +638,44 @@ mod tests {
             .respond_with(ResponseTemplate::new(503))
             .mount(&server)
             .await;
-        let client = Client::new(config(&server.uri())).unwrap();
+        let mut client = Client::new(config(&server.uri())).unwrap();
+        client.retry.base_delay = Duration::from_millis(1);
         let error = client.upload_trace(&[], &[span(1)]).await.unwrap_err();
         assert_eq!(error.status, Some(503));
-        // One initial attempt plus three retries.
-        assert_eq!(server.received_requests().await.unwrap().len(), 4);
+        // One initial attempt plus five retries (the default `max_attempts`).
+        assert_eq!(server.received_requests().await.unwrap().len(), 6);
+    }
+
+    #[tokio::test]
+    async fn quarantine_pagination_cycle_is_surfaced() {
+        let server = MockServer::start().await;
+        let loop_url =
+            format!("{}/v1/ci/o/repositories/r/quarantines?cursor=loop", server.uri());
+        // First page points to `loop_url`...
+        Mock::given(method("GET"))
+            .and(path("/v1/ci/o/repositories/r/quarantines"))
+            .and(query_param("per_page", "100"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("link", format!("<{loop_url}>; rel=\"next\"").as_str())
+                    .set_body_json(serde_json::json!({"quarantined_tests": [{"test_name": "a"}]})),
+            )
+            .mount(&server)
+            .await;
+        // ...which points back at itself: a cycle.
+        Mock::given(method("GET"))
+            .and(path("/v1/ci/o/repositories/r/quarantines"))
+            .and(query_param("cursor", "loop"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("link", format!("<{loop_url}>; rel=\"next\"").as_str())
+                    .set_body_json(serde_json::json!({"quarantined_tests": [{"test_name": "b"}]})),
+            )
+            .mount(&server)
+            .await;
+        let client = Client::new(config(&server.uri())).unwrap();
+        // A cycle is surfaced as a failure, not a silent partial list.
+        let outcome = client.fetch_quarantine("main").await;
+        assert!(outcome.failure().is_some());
     }
 }
