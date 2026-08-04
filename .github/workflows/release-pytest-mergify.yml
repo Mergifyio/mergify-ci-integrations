@@ -128,7 +128,7 @@ jobs:
             --draft \
             --title "pytest-mergify ${TAG#pytest-mergify-v}" \
             --generate-notes \
-            dist/*.whl
+            dist/*.whl dist/*.tar.gz
 
   # ---------------- Step 2: publish (release: published) ----------------
   build-publish:
