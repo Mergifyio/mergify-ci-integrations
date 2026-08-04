@@ -35,7 +35,12 @@ jobs:
       matrix:
         include:
           - { platform: linux-x86_64, runner: ubuntu-latest, target: x86_64 }
-          - { platform: linux-aarch64, runner: ubuntu-latest, target: aarch64 }
+          # linux-aarch64 builds natively on an arm runner rather than
+          # cross-compiling: ring's ARM-asm build script needs the C compiler to
+          # define `__ARM_ARCH`, which the cross-gcc in the manylinux image does
+          # not, so `ring` (via reqwest/rustls) fails to compile. A native runner
+          # sidesteps it -- the same fix mergify-cli uses.
+          - { platform: linux-aarch64, runner: ubuntu-24.04-arm, target: aarch64 }
           - { platform: macos-x86_64, runner: macos-latest, target: x86_64 }
           - { platform: macos-aarch64, runner: macos-latest, target: aarch64 }
           - { platform: windows-x64, runner: windows-latest, target: x64 }
@@ -56,8 +61,8 @@ jobs:
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           target: ${{ matrix.target }}
-          # `auto` is honoured on Linux (manylinux container / cross for
-          # aarch64) and ignored on macOS and Windows.
+          # `auto` is honoured on Linux (manylinux container, built natively on
+          # a per-arch runner) and ignored on macOS and Windows.
           manylinux: auto
           args: --release --out dist --manifest-path clients/pytest-mergify/Cargo.toml
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
