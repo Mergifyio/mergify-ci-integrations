@@ -1,0 +1,28 @@
+{
+  "name": "mergify-ci-plugins-ts",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.0.0",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "pnpm -r run build",
+    "test": "pnpm -r run test",
+    "typecheck": "tsc --noEmit",
+    "eslint": "eslint packages/*/src packages/*/tests",
+    "format": "biome check --write .",
+    "format:check": "biome check ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.3",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.1.2",
+    "@typescript-eslint/eslint-plugin": "^8.65.0",
+    "@typescript-eslint/parser": "^8.65.0",
+    "eslint": "^10.8.0",
+    "globals": "^17.8.0",
+    "tsdown": "^0.22.14",
+    "typescript": "^6.0.3"
+  }
+}
