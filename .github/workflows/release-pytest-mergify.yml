@@ -6,11 +6,12 @@ name: Release pytest-mergify
 # immutable releases, so a published release + its tag are frozen and can't be
 # retried.
 #
-# Step 1 -- prepare the draft (`workflow_dispatch`, input `tag`):
-#   Validate the tag, build the per-platform abi3 wheels from the current commit,
-#   and create a DRAFT GitHub Release with them attached + generated notes.
-#   GitHub doesn't fire release events on draft saves, so this stage is
-#   dispatch-driven, the way mergify-cli's is.
+# Step 1 -- prepare the draft (`workflow_dispatch`):
+#   Resolve the release tag -- validating a supplied one, or auto-computing the
+#   next CalVer when none is given -- build the per-platform abi3 wheels from the
+#   current commit, and create a DRAFT GitHub Release with them attached +
+#   generated notes. GitHub doesn't fire release events on draft saves, so this
+#   stage is dispatch-driven, the way mergify-cli's is.
 #
 # Step 2 -- publish (`release: published`):
 #   The maintainer reviews the draft and publishes it; that fires this stage,
@@ -21,48 +22,90 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag: pytest-mergify-v<CalVer> (e.g. pytest-mergify-v2026.8.3.1), above the latest on PyPI."
+        description: "Release tag pytest-mergify-v<CalVer> (e.g. pytest-mergify-v2026.8.3.1). Leave empty to auto-compute the next CalVer for today."
         type: string
-        required: true
+        required: false
+        default: ""
   release:
     types: [published]
 
 permissions: {}
 
+# Serialize runs that could collide on a tag. Empty-tag dispatches share the
+# `auto` key so two near-simultaneous runs can't resolve the same CalVer and
+# then 422 on a duplicate; explicit-tag and publish runs key off the tag itself.
 concurrency:
-  group: release-pytest-mergify-${{ inputs.tag || github.event.release.tag_name }}
+  group: release-pytest-mergify-${{ github.event_name }}-${{ inputs.tag || github.event.release.tag_name || 'auto' }}
   cancel-in-progress: false
 
 jobs:
   # ---------------- Step 1: prepare the draft (workflow_dispatch) ----------------
-  validate-tag:
+  # Validate a supplied tag, or auto-compute the next CalVer when none is given,
+  # matching mergify-cli's compute-tag: today's UTC date plus one past the
+  # highest existing serial for the day, read from the git tag list (a
+  # pytest-mergify tag exists once its release is published). Both paths validate
+  # the final tag against the calver shape, so a typo or a date-arithmetic bug
+  # can't drift through the matrix. The resolved tag is the single value every
+  # downstream job stamps and releases.
+  resolve-tag:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read # checkout + read the tag list
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
     steps:
-      - name: Check the tag shape
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # The full tag list is needed to find today's highest serial.
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Resolve the release tag
+        id: resolve
         shell: bash
         env:
           TAG: ${{ inputs.tag }}
         run: |
+          set -euo pipefail
+          if [ -n "${TAG}" ]; then
+            echo "Using explicit tag: ${TAG}"
+          else
+            # `%-m`/`%-d` drop the leading zero to match the historic calver
+            # (2026.8.4.1, not 2026.08.04.01); UTC so the rollover is the same
+            # whoever triggers the run.
+            today="$(date -u +'%Y.%-m.%-d')"
+            # `grep` exiting 1 on no match is the legitimate "nothing shipped
+            # today yet" path -- swallow only that, keeping pipefail otherwise.
+            last_n="$(git tag -l "pytest-mergify-v${today}.*" \
+              | { grep -E "^pytest-mergify-v${today//./\\.}\\.[0-9]+$" || true; } \
+              | awk -F. '{print $NF}' \
+              | sort -n \
+              | tail -1)"
+            TAG="pytest-mergify-v${today}.$(( ${last_n:-0} + 1 ))"
+            echo "Auto-computed tag: ${TAG}"
+          fi
+          # Final shape check for both paths -- `gh release create` would accept
+          # any string, so validation lives here.
           if ! [[ "${TAG}" =~ ^pytest-mergify-v[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}\.[0-9]+$ ]]; then
             echo "::error::tag '${TAG}' must be pytest-mergify-v<YYYY.M.D.N>"
             exit 1
           fi
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
 
   build-draft:
     if: github.event_name == 'workflow_dispatch'
-    needs: validate-tag
+    needs: resolve-tag
     # Grant the reusable workflow read access; without it the top-level
     # `permissions: {}` would leave checkout of this private repo unauthorized.
     permissions:
       contents: read
     uses: ./.github/workflows/build-pytest-mergify-wheels.yml
     with:
-      tag: ${{ inputs.tag }}
+      tag: ${{ needs.resolve-tag.outputs.tag }}
 
   create-draft:
     if: github.event_name == 'workflow_dispatch'
-    needs: build-draft
+    needs: [resolve-tag, build-draft]
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the draft release
@@ -76,7 +119,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          TAG: ${{ inputs.tag }}
+          TAG: ${{ needs.resolve-tag.outputs.tag }}
           SHA: ${{ github.sha }}
         run: |
           gh release create "${TAG}" \
