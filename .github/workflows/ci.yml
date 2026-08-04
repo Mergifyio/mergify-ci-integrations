@@ -45,19 +45,20 @@ jobs:
         with:
           python-version: "3.x"
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-      # The plugin is still pure Python (it doesn't use the bundled Rust binding
-      # yet), so this builds a universal wheel with hatchling -- no Rust
-      # toolchain, no maturin. Adopting the binding switches this to maturin.
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # The wheel now bundles the Rust binding, so it's a compiled abi3
+      # extension built with maturin (one wheel per platform, CPython 3.8+).
       - name: Build wheel
-        run: uv build --wheel --out-dir dist clients/pytest-mergify
+        run: uvx maturin build --out dist --manifest-path clients/pytest-mergify/Cargo.toml
       - name: Install and import
         shell: bash
         run: |
           uv venv
-          # Direct file reference pins the freshly-built wheel while still
-          # resolving pytest-mergify's runtime deps from the index.
           uv pip install "pytest-mergify @ $(ls dist/*.whl)"
-          uv run python -c "import pytest_mergify; print('pytest-mergify imported')"
+          uv run python -c "import pytest_mergify; from pytest_mergify import _mergify_ci; print('imported; provider =', _mergify_ci.detect_provider())"
 
   tests:
     name: pytest-mergify tests (py${{ matrix.python }})
@@ -72,8 +73,12 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-      # The committed uv.lock pins the plugin's known-good dev/runtime deps
-      # (older otel/ruff/mypy); --frozen installs exactly that set per Python.
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # `uv run` builds the maturin extension (cargo) before the tests; the
+      # committed uv.lock pins the known-good dev/runtime deps per Python.
       - name: Run the test suite
         env:
           UV_PYTHON: ${{ matrix.python }}
@@ -88,6 +93,11 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # `uv run` builds the maturin extension before poe runs the linters.
       - name: Run ruff, mypy, yamllint
         run: uv run --frozen poe linters
 
@@ -100,8 +110,12 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-      # codespell runs on 3.14 (its poe task pins UV_PYTHON); --frozen uses the
-      # locked codespell.
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # codespell runs on 3.14 (its poe task pins UV_PYTHON); `uv run` builds
+      # the maturin extension first, then --frozen uses the locked codespell.
       - name: Run codespell
         env:
           UV_PYTHON: "3.14"
