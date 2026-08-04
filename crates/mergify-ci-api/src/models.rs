@@ -53,18 +53,21 @@ pub struct FlakyDetectionContext {
 /// that failed on a previous attempt.
 ///
 /// Polymorphic on `selection`: `tests` is part of a `subset` answer and absent
-/// from a `full` one, so it defaults to empty here. The `subset`-with-empty and
-/// `subset`-matched-nothing normalisations stay client-side, next to the
-/// collected items they compare against.
+/// from a `full` one, so it is `None` when the field is missing — letting the
+/// fetch layer tell a `subset` with no `tests` (a protocol break, surfaced)
+/// apart from a `subset` with an empty `tests` (normalised to full client-side).
+/// The `subset`-matched-nothing normalisation likewise stays client-side, next
+/// to the collected items it compares against.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct TestSelection {
     /// `"full"` (run everything) or `"subset"` (run only `tests`).
     pub selection: String,
     /// Why the server chose this selection — surfaced in the plugin report.
     pub reason: String,
-    /// The node ids to run when `selection` is `"subset"`; empty for `"full"`.
-    #[serde(default)]
-    pub tests: Vec<String>,
+    /// The node ids to run when `selection` is `"subset"`; `None` when the field
+    /// is absent (always for `"full"`; a protocol break for `"subset"`). An
+    /// `Option<T>` field is optional to serde, so a missing key is `None`.
+    pub tests: Option<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -108,7 +111,7 @@ mod tests {
         let selection: TestSelection = serde_json::from_str(json).unwrap();
         assert_eq!(selection.selection, "subset");
         assert_eq!(selection.reason, "queue_rerun");
-        assert_eq!(selection.tests, ["t::a", "t::b"]);
+        assert_eq!(selection.tests.unwrap(), ["t::a", "t::b"]);
     }
 
     #[test]
@@ -116,6 +119,7 @@ mod tests {
         let json = r#"{"selection":"full","reason":"not_requested"}"#;
         let selection: TestSelection = serde_json::from_str(json).unwrap();
         assert_eq!(selection.selection, "full");
-        assert!(selection.tests.is_empty());
+        // A missing `tests` is `None`, distinct from a present empty list.
+        assert!(selection.tests.is_none());
     }
 }
