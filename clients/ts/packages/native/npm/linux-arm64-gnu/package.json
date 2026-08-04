@@ -1,0 +1,28 @@
+{
+  "name": "@mergifyio/ci-native-linux-arm64-gnu",
+  "version": "0.0.0",
+  "cpu": [
+    "arm64"
+  ],
+  "main": "ci-native.linux-arm64-gnu.node",
+  "files": [
+    "ci-native.linux-arm64-gnu.node"
+  ],
+  "description": "Prebuilt native CI detection for Mergify CI test framework plugins",
+  "author": "Mergify <hello@mergify.com>",
+  "license": "GPL-3.0-only",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mergifyio/mergify-ci-integrations.git",
+    "directory": "clients/ts/packages/native"
+  },
+  "os": [
+    "linux"
+  ],
+  "libc": [
+    "glibc"
+  ]
+}

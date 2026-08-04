@@ -1,0 +1,25 @@
+{
+  "name": "@mergifyio/ci-native-win32-x64-msvc",
+  "version": "0.0.0",
+  "cpu": [
+    "x64"
+  ],
+  "main": "ci-native.win32-x64-msvc.node",
+  "files": [
+    "ci-native.win32-x64-msvc.node"
+  ],
+  "description": "Prebuilt native CI detection for Mergify CI test framework plugins",
+  "author": "Mergify <hello@mergify.com>",
+  "license": "GPL-3.0-only",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mergifyio/mergify-ci-integrations.git",
+    "directory": "clients/ts/packages/native"
+  },
+  "os": [
+    "win32"
+  ]
+}

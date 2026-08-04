@@ -26,6 +26,7 @@
     "node": ">=22.0.0"
   },
   "dependencies": {
+    "@mergifyio/ci-native": "workspace:*",
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/core": "^2.10.0",
     "@opentelemetry/exporter-trace-otlp-proto": "^0.221.0",
