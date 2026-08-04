@@ -32,8 +32,6 @@ export {
   generateTestRunId,
   getCIProvider,
   getRepoName,
-  getRepositoryNameFromUrl,
-  git,
   isInCI,
   resolveBranchFromAttributes,
   splitRepoName,
