@@ -11,6 +11,9 @@ crates/
 clients/
   pytest-mergify/      pytest plugin: a PyO3 (abi3) binding over the core,
                        built as a maturin mixed project
+  ts/                  TypeScript workspace (pnpm): the @mergifyio/vitest and
+                       @mergifyio/playwright reporters over a shared
+                       @mergifyio/ci-core -- pure TypeScript, no binding yet
 ```
 
 ## Core
@@ -28,12 +31,18 @@ dependency; there is no separate binding artifact. `pytest-mergify` compiles
 the PyO3 binding into its wheel as `pytest_mergify._mergify_ci`, so users
 `pip install pytest-mergify` with no Rust toolchain.
 
+The TypeScript workspace under `clients/ts/` was imported from
+[mergify-ci-plugins-ts](https://github.com/Mergifyio/mergify-ci-plugins-ts)
+with its git history and does not consume the core yet; it keeps releasing
+from the standalone repo until its monorepo CI + release wiring lands.
+
 ## Develop
 
 ```
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 maturin build --manifest-path clients/pytest-mergify/Cargo.toml
+pnpm -C clients/ts install && pnpm -C clients/ts run build && pnpm -C clients/ts test
 ```
 
 CI runs the workspace tests and builds + imports the `pytest-mergify` wheel on
