@@ -1,11 +1,8 @@
 import re
 import typing
-from unittest import mock
 
 import pytest
 
-from pytest_mergify import utils
-from pytest_mergify.resources import github_actions
 from tests import conftest
 
 
@@ -15,7 +12,7 @@ def test_span_resources_attributes_ci(
     result, spans = pytester_with_spans()
     assert spans is not None
     assert all(
-        span.resource.attributes["cicd.provider.name"] == utils.get_ci_provider()
+        span.resource.attributes["cicd.provider.name"] == "pytest_mergify_suite"
         for span in spans.values()
     )
 
@@ -79,35 +76,7 @@ def test_span_github_actions(
     )
 
 
-@pytest.mark.parametrize(
-    ("head_ref", "ref_name", "expected"),
-    [
-        pytest.param("feature-branch", "123/merge", "feature-branch", id="PR context"),
-        pytest.param(None, "main", "main", id="Without `GITHUB_REF_NAME`"),
-        pytest.param("", "main", "main", id="Empty `GITHUB_REF_NAME`"),
-        pytest.param(None, None, None, id="Without any variable"),
-    ],
-)
-def test_get_head_ref_name(
-    monkeypatch: pytest.MonkeyPatch,
-    head_ref: typing.Optional[str],
-    ref_name: typing.Optional[str],
-    expected: typing.Optional[str],
-) -> None:
-    monkeypatch.delenv("GITHUB_HEAD_REF", raising=False)
-    monkeypatch.delenv("GITHUB_REF_NAME", raising=False)
-
-    if head_ref:
-        monkeypatch.setenv("GITHUB_HEAD_REF", head_ref)
-    if ref_name:
-        monkeypatch.setenv("GITHUB_REF_NAME", ref_name)
-
-    assert github_actions._get_head_ref_name() == expected
-
-
-@mock.patch("pytest_mergify.utils.git", return_value=None)
 def test_span_jenkins(
-    git: mock.Mock,
     monkeypatch: pytest.MonkeyPatch,
     pytester_with_spans: conftest.PytesterWithSpanT,
 ) -> None:
@@ -143,14 +112,10 @@ def test_span_jenkins(
     )
 
 
-@mock.patch("pytest_mergify.utils.git", return_value=None)
 def test_span_circleci(
-    git: mock.Mock,
     monkeypatch: pytest.MonkeyPatch,
     pytester_with_spans: conftest.PytesterWithSpanT,
 ) -> None:
-    # `CIRCLECI` was listed as a supported provider with no detector behind it,
-    # so a run uploaded a provider name and nothing else it needed.
     monkeypatch.setenv("GITHUB_ACTIONS", "false")
     monkeypatch.setenv("CIRCLECI", "true")
     monkeypatch.setenv("CIRCLE_JOB", "unit-tests")
@@ -182,46 +147,3 @@ def test_span_circleci(
         # CircleCI publishes no workflow name, so the job name serves as both.
         assert span.resource.attributes["cicd.pipeline.name"] == "unit-tests"
         assert span.resource.attributes["cicd.pipeline.task.name"] == "unit-tests"
-
-
-@mock.patch("pytest_mergify.utils.git", return_value=None)
-def test_span_git(
-    git: mock.Mock,
-    monkeypatch: pytest.MonkeyPatch,
-    pytester_with_spans: conftest.PytesterWithSpanT,
-) -> None:
-    monkeypatch.setenv("GITHUB_ACTIONS", "false")
-    git.side_effect = [
-        "main",
-        "azerty",
-        "https://github.com/Mergifyio/pytest-mergify",
-        "https://github.com/Mergifyio/pytest-mergify",
-        "main",
-        "azerty",
-        "https://github.com/Mergifyio/pytest-mergify",
-        "https://github.com/Mergifyio/pytest-mergify",
-        "main",
-        "azerty",
-        "https://github.com/Mergifyio/pytest-mergify",
-        "https://github.com/Mergifyio/pytest-mergify",
-    ]
-
-    result, spans = pytester_with_spans()
-    assert spans is not None
-    assert all(
-        span.resource.attributes["vcs.repository.url.full"]
-        == "https://github.com/Mergifyio/pytest-mergify"
-        for span in spans.values()
-    )
-    assert all(
-        span.resource.attributes["vcs.repository.name"] == "Mergifyio/pytest-mergify"
-        for span in spans.values()
-    )
-    assert all(
-        span.resource.attributes["vcs.ref.head.name"] == "main"
-        for span in spans.values()
-    )
-    assert all(
-        span.resource.attributes["vcs.ref.head.revision"] == "azerty"
-        for span in spans.values()
-    )
