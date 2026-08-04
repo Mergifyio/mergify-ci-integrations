@@ -1,0 +1,71 @@
+name: Build ts native binaries
+
+# Reusable napi-rs matrix that builds the per-platform @mergifyio/ci-native
+# binaries and uploads them as `ts-native-<target>` artifacts. Both stages of
+# the ts release call it: the draft stage to prove the cross-compile (and
+# attach the binaries for review), the publish stage to build what goes to
+# npm. The `.node` binaries carry no version stamp, so no tag input is
+# needed; each caller's checkout ref is inherited.
+#
+# The target set matches build-pytest-mergify-wheels.yml (linux/macos x64 +
+# arm64, windows x64). No musl yet: alpine users hit the loader's fail-open
+# path (no detection) until a musl target is added.
+on:
+  workflow_call: {}
+
+permissions: {}
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, runner: ubuntu-latest }
+          # Cross-compiled from x64: GitHub's hosted arm64 runners are not
+          # available on private repos. Pure-Rust crate, so a cross gcc is
+          # only needed as the linker.
+          - {
+              target: aarch64-unknown-linux-gnu,
+              runner: ubuntu-latest,
+              cross-linker: gcc-aarch64-linux-gnu,
+            }
+          - { target: x86_64-apple-darwin, runner: macos-latest }
+          - { target: aarch64-apple-darwin, runner: macos-latest }
+          - { target: x86_64-pc-windows-msvc, runner: windows-latest }
+    env:
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          package_json_file: clients/ts/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: clients/ts/.node-version
+          cache: pnpm
+          cache-dependency-path: clients/ts/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install the cross linker
+        if: matrix.cross-linker
+        run: sudo apt-get update && sudo apt-get install --yes ${{ matrix.cross-linker }}
+      - run: pnpm install --frozen-lockfile
+        working-directory: clients/ts
+      - name: Build the platform binary
+        working-directory: clients/ts/packages/native
+        run: pnpm exec napi build --platform --release --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ts-native-${{ matrix.target }}
+          path: clients/ts/packages/native/*.node
+          if-no-files-found: error

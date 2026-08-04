@@ -2,21 +2,29 @@ name: Release ts clients
 
 # Two-step release, the same shape as release-pytest-mergify (see there for the
 # full rationale -- the draft stage catches build failures BEFORE anything is
-# published, since the repo uses immutable releases). Everything here is pure
-# Node: the packages contain no native code yet, so one build works everywhere.
+# published, since the repo uses immutable releases).
+#
+# The workspace ships four npm packages -- @mergifyio/ci-core, /vitest,
+# /playwright, and the /ci-native binding -- plus one prebuilt-binary package
+# per platform (@mergifyio/ci-native-<target>), built by the reusable
+# build-ts-native.yml matrix and distributed into npm/<target>/ with
+# `napi artifacts`.
 #
 # Step 1 -- prepare the draft (`workflow_dispatch`):
 #   Resolve the release tag -- validating a supplied one, or bumping the patch
 #   of the highest existing ts-v* tag when none is given -- then stamp, build,
-#   and pack the three workspace packages from the current commit and create a
-#   DRAFT GitHub Release with the tarballs attached + generated notes.
+#   and pack every package from the current commit and create a DRAFT GitHub
+#   Release with the tarballs attached + generated notes.
 #
 # Step 2 -- publish (`release: published`):
 #   The maintainer reviews the draft and publishes it; that fires this stage,
-#   which rebuilds the packages from the now-created tag and publishes them to
-#   npm with provenance via Trusted Publishing (OIDC, no token). NOTE: the
-#   npmjs.com trusted-publisher settings of @mergifyio/ci-core, /vitest, and
-#   /playwright must point at this repo + workflow before the first publish.
+#   which rebuilds everything from the now-created tag and publishes to npm
+#   with provenance via Trusted Publishing (OIDC, no token). NOTE: every
+#   published package needs its npmjs.com trusted-publisher settings pointed
+#   at this repo + workflow first -- the three pre-existing packages must be
+#   repointed away from mergify-ci-plugins-ts, and the six new ones
+#   (@mergifyio/ci-native + the five platform packages) need it configured on
+#   their first publish.
 on:
   workflow_dispatch:
     inputs:
@@ -81,9 +89,15 @@ jobs:
           fi
           echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
 
+  build-native-draft:
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-ts-native.yml
+
   create-draft:
     if: github.event_name == 'workflow_dispatch'
-    needs: resolve-tag
+    needs: [resolve-tag, build-native-draft]
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the draft release
@@ -107,9 +121,36 @@ jobs:
         env:
           TAG: ${{ needs.resolve-tag.outputs.tag }}
         run: pnpm -r version "${TAG#ts-v}" --no-git-tag-version
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: clients/ts/packages/native/artifacts
+          pattern: ts-native-*
+      - name: Assemble the platform packages
+        working-directory: clients/ts/packages/native
+        run: |
+          pnpm exec napi artifacts -d artifacts
+          # Sync the platform packages to the stamped version, and pin them as
+          # optionalDependencies of the loader package (the committed manifest
+          # carries none, so the workspace stays resolvable between releases).
+          pnpm exec napi version
+          node --eval '
+            const fs = require("node:fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            pkg.optionalDependencies = Object.fromEntries(
+              fs.readdirSync("npm").map((dir) => [
+                JSON.parse(fs.readFileSync("npm/" + dir + "/package.json", "utf8")).name,
+                pkg.version,
+              ]),
+            );
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+          '
       - run: pnpm -r run build
       - name: Pack the packages
-        run: pnpm -r pack --pack-destination "${GITHUB_WORKSPACE}/dist"
+        run: |
+          pnpm -r pack --pack-destination "${GITHUB_WORKSPACE}/dist"
+          for dir in packages/native/npm/*/; do
+            npm pack "./${dir}" --pack-destination "${GITHUB_WORKSPACE}/dist"
+          done
       - name: Create the draft release with the tarballs attached
         env:
           GH_TOKEN: ${{ github.token }}
@@ -126,10 +167,17 @@ jobs:
             "${GITHUB_WORKSPACE}"/dist/*.tgz
 
   # ---------------- Step 2: publish (release: published) ----------------
-  publish:
+  build-native-publish:
     # A GitHub Release in this monorepo isn't client-scoped, so only act on
     # ts-v* tags; other clients have their own release workflows.
     if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'ts-v')
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-ts-native.yml
+
+  publish:
+    if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'ts-v')
+    needs: build-native-publish
     runs-on: ubuntu-latest
     # The `release` environment carries the npm Trusted Publishing identity.
     environment: release
@@ -157,5 +205,32 @@ jobs:
         env:
           TAG: ${{ github.event.release.tag_name }}
         run: pnpm -r version "${TAG#ts-v}" --no-git-tag-version
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: clients/ts/packages/native/artifacts
+          pattern: ts-native-*
+      - name: Assemble the platform packages
+        working-directory: clients/ts/packages/native
+        run: |
+          pnpm exec napi artifacts -d artifacts
+          pnpm exec napi version
+          node --eval '
+            const fs = require("node:fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            pkg.optionalDependencies = Object.fromEntries(
+              fs.readdirSync("npm").map((dir) => [
+                JSON.parse(fs.readFileSync("npm/" + dir + "/package.json", "utf8")).name,
+                pkg.version,
+              ]),
+            );
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+          '
       - run: pnpm -r run build
-      - run: pnpm -r publish --provenance --access public --no-git-checks
+      - name: Publish to npm
+        run: |
+          # Platform packages first, so the loader's optionalDependencies
+          # never point at not-yet-published versions.
+          for dir in packages/native/npm/*/; do
+            npm publish "./${dir}" --provenance --access public
+          done
+          pnpm -r publish --provenance --access public --no-git-checks

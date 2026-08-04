@@ -12,6 +12,7 @@ More information at https://mergify.com
 | [`@mergifyio/vitest`](./packages/vitest) | Vitest reporter (with quarantine + flaky detection) |
 | [`@mergifyio/playwright`](./packages/playwright) | Playwright reporter (tracing + quarantine) |
 | [`@mergifyio/ci-core`](./packages/core) | Shared core (tracing, resources, APIs) — internal |
+| [`@mergifyio/ci-native`](./packages/native) | CI detection: napi binding over the repo's Rust core, prebuilt per platform — internal |
 
 See each package's README for installation and usage.
 
