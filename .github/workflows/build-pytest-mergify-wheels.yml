@@ -34,16 +34,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { platform: linux-x86_64, runner: ubuntu-latest, target: x86_64 }
-          # linux-aarch64 builds natively on an arm runner rather than
-          # cross-compiling: ring's ARM-asm build script needs the C compiler to
-          # define `__ARM_ARCH`, which the cross-gcc in the manylinux image does
-          # not, so `ring` (via reqwest/rustls) fails to compile. A native runner
-          # sidesteps it -- the same fix mergify-cli uses.
-          - { platform: linux-aarch64, runner: ubuntu-24.04-arm, target: aarch64 }
-          - { platform: macos-x86_64, runner: macos-latest, target: x86_64 }
-          - { platform: macos-aarch64, runner: macos-latest, target: aarch64 }
-          - { platform: windows-x64, runner: windows-latest, target: x64 }
+          - { platform: linux-x86_64, runner: ubuntu-latest, target: x86_64, manylinux: auto }
+          # linux-aarch64 (and musllinux-aarch64) build natively on an arm runner
+          # rather than cross-compiling: ring's ARM-asm build script needs the C
+          # compiler to define `__ARM_ARCH`, which the cross-gcc in the manylinux
+          # image does not, so `ring` (via reqwest/rustls) fails to compile. A
+          # native runner sidesteps it -- the same fix mergify-cli uses.
+          - { platform: linux-aarch64, runner: ubuntu-24.04-arm, target: aarch64, manylinux: auto }
+          # musllinux (Alpine/musl) wheels, so musl users get a prebuilt binary
+          # instead of falling back to compiling the sdist.
+          - { platform: musllinux-x86_64, runner: ubuntu-latest, target: x86_64, manylinux: musllinux_1_2 }
+          - { platform: musllinux-aarch64, runner: ubuntu-24.04-arm, target: aarch64, manylinux: musllinux_1_2 }
+          - { platform: macos-x86_64, runner: macos-latest, target: x86_64, manylinux: auto }
+          - { platform: macos-aarch64, runner: macos-latest, target: aarch64, manylinux: auto }
+          - { platform: windows-x64, runner: windows-latest, target: x64, manylinux: auto }
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # hatch-vcs is gone under maturin, so the version is a build-time stamp:
@@ -61,9 +65,10 @@ jobs:
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           target: ${{ matrix.target }}
-          # `auto` is honoured on Linux (manylinux container, built natively on
-          # a per-arch runner) and ignored on macOS and Windows.
-          manylinux: auto
+          # Selects the Linux build container -- `auto` (manylinux) or
+          # `musllinux_1_2`, built natively on a per-arch runner; ignored on
+          # macOS and Windows.
+          manylinux: ${{ matrix.manylinux }}
           args: --release --out dist --manifest-path clients/pytest-mergify/Cargo.toml
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
