@@ -7,8 +7,8 @@ export type {
 } from './flaky-detection.js';
 // Flaky detection
 export { FlakyDetector, fetchFlakyDetectionContext } from './flaky-detection.js';
+export type { CiResourceAttributes } from './native.js';
 export type { QuarantineConfig } from './quarantine.js';
-
 // Quarantine
 export { fetchQuarantineList } from './quarantine.js';
 // Resource detection
@@ -32,8 +32,6 @@ export {
   generateTestRunId,
   getCIProvider,
   getRepoName,
-  getRepositoryNameFromUrl,
-  git,
   isInCI,
   resolveBranchFromAttributes,
   splitRepoName,
