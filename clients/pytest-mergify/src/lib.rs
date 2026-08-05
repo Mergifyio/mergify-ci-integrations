@@ -40,7 +40,7 @@ fn detect_repository_name() -> Option<String> {
 #[pyfunction]
 fn detect_attributes(py: Python<'_>) -> PyResult<Py<PyDict>> {
     let dict = PyDict::new(py);
-    for (key, value) in mergify_ci_core::otel_attributes(&context()) {
+    for (key, value) in mergify_ci_core::otel_attributes(&context()).into_map() {
         match value {
             CoreAttrValue::Int(i) => dict.set_item(key, i)?,
             CoreAttrValue::Str(s) => dict.set_item(key, s)?,
