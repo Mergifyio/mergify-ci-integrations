@@ -51,6 +51,11 @@ pytest_mergify = "pytest_mergify"
 python-source = "python"
 module-name = "pytest_mergify._mergify_ci"
 features = ["pyo3/extension-module"]
+# Keep dev-only files out of the source distribution -- they are useless to a
+# consumer building from source and only bloat the tarball (uv.lock alone is
+# ~64 KiB). The test suite is deliberately kept: it ships in the sdist so
+# downstream packagers can run it (its deps are the pyproject dev group).
+exclude = ["uv.lock", "poe.toml"]
 
 [tool.poe]
 include = ["poe.toml"]
