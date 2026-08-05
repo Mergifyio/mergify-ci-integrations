@@ -1,13 +1,9 @@
 import dataclasses
-import datetime
 import gzip
 import http.server
-import os
-import re
 import socketserver
 import threading
 import typing
-import uuid
 
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
     ExportTraceServiceRequest,
@@ -15,7 +11,6 @@ from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
 
 import _pytest.pytester
 import pytest
-import responses
 from opentelemetry.sdk import trace
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
@@ -23,9 +18,82 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 )
 
 import pytest_mergify
-from pytest_mergify import _mergify_ci, utils
+from pytest_mergify import _mergify_ci
 
 pytest_plugins = ["pytester"]
+
+
+def make_flaky_context(
+    budget_ratio_for_new_tests: float = 0.1,
+    budget_ratio_for_unhealthy_tests: float = 0.05,
+    existing_test_names: typing.Optional[typing.List[str]] = None,
+    existing_tests_mean_duration_ms: int = 0,
+    unhealthy_test_names: typing.Optional[typing.List[str]] = None,
+    max_test_execution_count: int = 1000,
+    max_test_name_length: int = 65536,
+    min_budget_duration_ms: int = 4000,
+    min_test_execution_count: int = 5,
+) -> typing.Dict[str, typing.Any]:
+    """A flaky-detection context dict, as `CiApiClient.fetch_flaky_context` returns."""
+    return {
+        "budget_ratio_for_new_tests": budget_ratio_for_new_tests,
+        "budget_ratio_for_unhealthy_tests": budget_ratio_for_unhealthy_tests,
+        "existing_test_names": existing_test_names or [],
+        "existing_tests_mean_duration_ms": existing_tests_mean_duration_ms,
+        "unhealthy_test_names": unhealthy_test_names or [],
+        "max_test_execution_count": max_test_execution_count,
+        "max_test_name_length": max_test_name_length,
+        "min_budget_duration_ms": min_budget_duration_ms,
+        "min_test_execution_count": min_test_execution_count,
+    }
+
+
+def install_fake_api_client(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    quarantine: typing.Optional[typing.List[str]] = None,
+    flaky_context: typing.Optional[typing.Dict[str, typing.Any]] = None,
+    test_selection: typing.Optional[typing.Dict[str, typing.Any]] = None,
+    quarantine_error: typing.Optional[str] = None,
+    flaky_error: typing.Optional[str] = None,
+    test_selection_error: typing.Optional[str] = None,
+) -> None:
+    """Replace the binding's `CiApiClient` with a fake returning injected data.
+
+    The fetches themselves are unit-tested in Rust (wiremock: pagination,
+    402/404, failures); the plugin-side tests only need the data the lifecycle
+    would have received, so no HTTP is performed. Passing a `*_error` makes the
+    matching fetch raise `RuntimeError`, as the binding does on a real failure.
+    """
+
+    class _FakeApiClient:
+        def __init__(self, api_url: str, token: str, owner: str, repo: str) -> None:
+            pass
+
+        def fetch_quarantine(self, branch: str) -> typing.Optional[typing.List[str]]:
+            if quarantine_error is not None:
+                raise RuntimeError(quarantine_error)
+            return quarantine
+
+        def fetch_flaky_context(
+            self,
+        ) -> typing.Optional[typing.Dict[str, typing.Any]]:
+            if flaky_error is not None:
+                raise RuntimeError(flaky_error)
+            return flaky_context
+
+        def fetch_test_selection(
+            self,
+            branch: str,
+            head_sha: str,
+            pipeline_name: str,
+            job_name: str,
+        ) -> typing.Optional[typing.Dict[str, typing.Any]]:
+            if test_selection_error is not None:
+                raise RuntimeError(test_selection_error)
+            return test_selection
+
+    monkeypatch.setattr(_mergify_ci, "CiApiClient", _FakeApiClient)
 
 
 @pytest.fixture(autouse=True)
@@ -56,6 +124,8 @@ class PytesterWithSpanT(typing.Protocol):
         code: str = ...,
         setenv: typing.Optional[typing.Dict[str, typing.Optional[str]]] = ...,
         quarantined_tests: typing.Optional[typing.List[str]] = None,
+        flaky_context: typing.Optional[typing.Dict[str, typing.Any]] = None,
+        test_selection: typing.Optional[typing.Dict[str, typing.Any]] = None,
     ) -> PytesterWithSpanReturnT: ...
 
 
@@ -67,11 +137,12 @@ def pytester_with_spans(
     pytester: _pytest.pytester.Pytester,
     monkeypatch: pytest.MonkeyPatch,
 ) -> PytesterWithSpanT:
-    @responses.activate
     def _run(
         code: str = _DEFAULT_PYTESTER_CODE,
         setenv: typing.Optional[typing.Dict[str, typing.Optional[str]]] = None,
         quarantined_tests: typing.Optional[typing.List[str]] = None,
+        flaky_context: typing.Optional[typing.Dict[str, typing.Any]] = None,
+        test_selection: typing.Optional[typing.Dict[str, typing.Any]] = None,
     ) -> PytesterWithSpanReturnT:
         monkeypatch.delenv("PYTEST_MERGIFY_DEBUG", raising=False)
         monkeypatch.setenv("CI", "true")
@@ -83,45 +154,14 @@ def pytester_with_spans(
             else:
                 monkeypatch.setenv(k, v)
 
-        api_url = os.getenv("MERGIFY_API_URL")
-
-        qtest_resp: typing.Dict[str, typing.Any]
-        if not quarantined_tests:
-            qtest_resp = {"quarantined_tests": []}
-        else:
-            qtest_resp = {
-                "quarantined_tests": [
-                    {
-                        "id": uuid.uuid4().hex,
-                        "test_name": qtest,
-                        "reason": "reasonfoobar",
-                        "branch": None,
-                        "created_at": datetime.datetime.now().isoformat(),
-                    }
-                    for qtest in quarantined_tests
-                ]
-            }
-
-        responses.add(
-            responses.GET,
-            re.compile(rf"{api_url}/v1/ci/.*/repositories/.*/quarantines\?branch=.*"),
-            status=200,
-            json=qtest_resp,
+        # The plugin's fetches go through the binding (Rust reqwest); a fake
+        # client feeds them the injected data so no HTTP is attempted.
+        install_fake_api_client(
+            monkeypatch,
+            quarantine=list(quarantined_tests) if quarantined_tests else [],
+            flaky_context=flaky_context,
+            test_selection=test_selection,
         )
-
-        full_repository = _mergify_ci.detect_repository_name()
-        if full_repository is not None:
-            try:
-                owner, repo = utils.split_full_repo_name(full_repository)
-            except utils.InvalidRepositoryFullNameError:
-                pass
-            else:
-                passthrough = responses.Response(
-                    responses.POST,
-                    f"{api_url}/v1/ci/{owner}/repositories/{repo}/traces",
-                    passthrough=True,
-                )
-                responses.add(passthrough)
 
         plugin = pytest_mergify.PytestMergify()
         pytester.makepyfile(code)
