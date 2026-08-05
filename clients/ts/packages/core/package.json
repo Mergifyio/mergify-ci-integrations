@@ -2,7 +2,7 @@
   "name": "@mergifyio/ci-core",
   "version": "0.0.0",
   "description": "Shared core for Mergify CI test framework plugins",
-  "license": "GPL-3.0-only",
+  "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",

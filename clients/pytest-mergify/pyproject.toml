@@ -3,7 +3,7 @@ name = "pytest-mergify"
 version = "0.0.0" # placeholder; the release workflow stamps it from the git tag
 description = "Pytest plugin for Mergify"
 authors = [{ name = "Julien Danjou", email = "jd@mergify.com" }]
-license = "GPL-3.0-only"
+license = "Apache-2.0"
 readme = "README.md"
 
 requires-python = ">=3.8"

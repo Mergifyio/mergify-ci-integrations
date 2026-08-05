@@ -2,7 +2,7 @@
   "name": "@mergifyio/vitest",
   "version": "0.0.0",
   "description": "Vitest reporter for Mergify CI Insights",
-  "license": "GPL-3.0-only",
+  "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",
