@@ -87,4 +87,4 @@ uv run poe linters
 
 ## License
 
-GPL-3.0-only
+Apache-2.0
