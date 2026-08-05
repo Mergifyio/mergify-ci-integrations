@@ -33,8 +33,9 @@ the PyO3 binding into its wheel as `pytest_mergify._mergify_ci`, so users
 
 The TypeScript workspace under `clients/ts/` was imported from
 [mergify-ci-plugins-ts](https://github.com/Mergifyio/mergify-ci-plugins-ts)
-with its git history and does not consume the core yet; it keeps releasing
-from the standalone repo until its monorepo CI + release wiring lands.
+with its git history and does not consume the core yet. Its three npm packages
+release from this repo via `ts-v<SemVer>` tags (fixed version across the
+workspace, two-step draft-then-publish like pytest-mergify).
 
 ## Develop
 
@@ -45,5 +46,6 @@ maturin build --manifest-path clients/pytest-mergify/Cargo.toml
 pnpm -C clients/ts install && pnpm -C clients/ts run build && pnpm -C clients/ts test
 ```
 
-CI runs the workspace tests and builds + imports the `pytest-mergify` wheel on
-Linux, macOS, and Windows.
+CI runs the workspace tests, builds + imports the `pytest-mergify` wheel on
+Linux, macOS, and Windows, and runs the TS workspace's lint + test matrix
+(node 22/24).

@@ -1,0 +1,161 @@
+name: Release ts clients
+
+# Two-step release, the same shape as release-pytest-mergify (see there for the
+# full rationale -- the draft stage catches build failures BEFORE anything is
+# published, since the repo uses immutable releases). Everything here is pure
+# Node: the packages contain no native code yet, so one build works everywhere.
+#
+# Step 1 -- prepare the draft (`workflow_dispatch`):
+#   Resolve the release tag -- validating a supplied one, or bumping the patch
+#   of the highest existing ts-v* tag when none is given -- then stamp, build,
+#   and pack the three workspace packages from the current commit and create a
+#   DRAFT GitHub Release with the tarballs attached + generated notes.
+#
+# Step 2 -- publish (`release: published`):
+#   The maintainer reviews the draft and publishes it; that fires this stage,
+#   which rebuilds the packages from the now-created tag and publishes them to
+#   npm with provenance via Trusted Publishing (OIDC, no token). NOTE: the
+#   npmjs.com trusted-publisher settings of @mergifyio/ci-core, /vitest, and
+#   /playwright must point at this repo + workflow before the first publish.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag ts-v<SemVer> (e.g. ts-v0.4.0). Leave empty to auto-bump the patch of the latest ts-v* tag."
+        type: string
+        required: false
+        default: ""
+  release:
+    types: [published]
+
+permissions: {}
+
+# Serialize runs that could collide on a tag (see release-pytest-mergify).
+concurrency:
+  group: release-ts-${{ github.event_name }}-${{ inputs.tag || github.event.release.tag_name || 'auto' }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------- Step 1: prepare the draft (workflow_dispatch) ----------------
+  resolve-tag:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # checkout + read the tag list
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # The full tag list is needed to find the highest ts-v* tag.
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Resolve the release tag
+        id: resolve
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "${TAG}" ]; then
+            echo "Using explicit tag: ${TAG}"
+          else
+            # The packages continue the standalone repo's SemVer line, fixed
+            # across the workspace; 0.3.1 was the last tag cut there and seeds
+            # the bump until a ts-v* tag exists here. Auto only bumps the
+            # patch -- pass an explicit tag for a minor or major.
+            last="$(git tag -l 'ts-v*' \
+              | { grep -E '^ts-v[0-9]+\.[0-9]+\.[0-9]+$' || true; } \
+              | sort -V \
+              | tail -1)"
+            base="${last:-ts-v0.3.1}"
+            IFS=. read -r major minor patch <<<"${base#ts-v}"
+            TAG="ts-v${major}.${minor}.$((patch + 1))"
+            echo "Auto-computed tag: ${TAG}"
+          fi
+          # Final shape check for both paths -- `gh release create` would
+          # accept any string, so validation lives here.
+          if ! [[ "${TAG}" =~ ^ts-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag '${TAG}' must be ts-v<major.minor.patch>"
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+
+  create-draft:
+    if: github.event_name == 'workflow_dispatch'
+    needs: resolve-tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the draft release
+    defaults:
+      run:
+        working-directory: clients/ts
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          package_json_file: clients/ts/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: clients/ts/.node-version
+          cache: pnpm
+          cache-dependency-path: clients/ts/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      # Stamp the in-repo 0.0.0 with the release version; `pnpm pack` rewrites
+      # the workspace:* dependency ranges to the stamped version.
+      - name: Stamp the version
+        env:
+          TAG: ${{ needs.resolve-tag.outputs.tag }}
+        run: pnpm -r version "${TAG#ts-v}" --no-git-tag-version
+      - run: pnpm -r run build
+      - name: Pack the packages
+        run: pnpm -r pack --pack-destination "${GITHUB_WORKSPACE}/dist"
+      - name: Create the draft release with the tarballs attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ needs.resolve-tag.outputs.tag }}
+          SHA: ${{ github.sha }}
+        run: |
+          gh release create "${TAG}" \
+            --repo "${REPO}" \
+            --target "${SHA}" \
+            --draft \
+            --title "ts clients ${TAG#ts-v}" \
+            --generate-notes \
+            "${GITHUB_WORKSPACE}"/dist/*.tgz
+
+  # ---------------- Step 2: publish (release: published) ----------------
+  publish:
+    # A GitHub Release in this monorepo isn't client-scoped, so only act on
+    # ts-v* tags; other clients have their own release workflows.
+    if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'ts-v')
+    runs-on: ubuntu-latest
+    # The `release` environment carries the npm Trusted Publishing identity.
+    environment: release
+    permissions:
+      contents: read # checkout the tag
+      id-token: write # npm Trusted Publishing (OIDC) + provenance
+    defaults:
+      run:
+        working-directory: clients/ts
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          package_json_file: clients/ts/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: clients/ts/.node-version
+          cache: pnpm
+          cache-dependency-path: clients/ts/pnpm-lock.yaml
+          registry-url: https://registry.npmjs.org
+      - run: pnpm install --frozen-lockfile
+      - name: Stamp the version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: pnpm -r version "${TAG#ts-v}" --no-git-tag-version
+      - run: pnpm -r run build
+      - run: pnpm -r publish --provenance --access public --no-git-checks
