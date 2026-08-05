@@ -1,9 +1,9 @@
 name: Build pytest-mergify wheels
 
-# Reusable maturin matrix that builds the per-platform abi3 wheels and uploads
-# them as `wheels-<platform>` artifacts. Both stages of the release call it: the
-# draft stage to prove the build (and attach the wheels for review), the publish
-# stage to build the artifacts that go to PyPI.
+# Reusable maturin build: the per-platform abi3 wheels plus a source
+# distribution, all uploaded as `wheels-*` artifacts. Both stages of the release
+# call it: the draft stage to prove the build (and attach the artifacts for
+# review), the publish stage to build the artifacts that go to PyPI.
 #
 # With a `tag` it stamps that CalVer into pyproject before maturin runs; without
 # one it leaves the 0.0.0 placeholder (so a smoke build never looks like a
@@ -69,3 +69,33 @@ jobs:
         with:
           name: wheels-${{ matrix.platform }}
           path: dist/*.whl
+
+  # The source distribution is a fallback for platforms without a wheel: maturin
+  # vendors the path-dependency crates + the workspace manifest into the tarball,
+  # so `pip install` compiles the binding from source (needs a Rust toolchain).
+  # Built once (platform-independent); no compilation, so no manylinux container.
+  sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Stamp the version from the tag
+        if: inputs.tag != ''
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          version="${TAG#pytest-mergify-v}"
+          sed -i.bak -E "s/^version = \"0.0.0\".*/version = \"${version}\"/" clients/pytest-mergify/pyproject.toml
+          rm -f clients/pytest-mergify/pyproject.toml.bak
+          grep '^version = ' clients/pytest-mergify/pyproject.toml
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
+        with:
+          command: sdist
+          args: --out dist --manifest-path clients/pytest-mergify/Cargo.toml
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: wheels-sdist
+          path: dist/*.tar.gz
