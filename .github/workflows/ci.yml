@@ -174,6 +174,12 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: pnpm
           cache-dependency-path: clients/ts/pnpm-lock.yaml
+      # `pnpm -r run build` compiles the @mergifyio/ci-native binding (napi),
+      # so the tests exercise the real Rust detection core.
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: pnpm install --frozen-lockfile
       - run: pnpm -r run build
       - run: pnpm -r test
@@ -188,8 +194,10 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
       # Pinned to the same codespell the pytest-mergify side locks in uv.lock.
+      # Skips cover local build artifacts too, so the same command works on a
+      # developer checkout, not only CI's fresh clone.
       - name: Run codespell
-        run: uvx codespell==2.4.3 --skip='*/pnpm-lock.yaml' clients/ts
+        run: uvx codespell==2.4.3 --skip='*/pnpm-lock.yaml,*/dist,*/node_modules,*.node' clients/ts
 
   ts-semgrep:
     name: ts semgrep
