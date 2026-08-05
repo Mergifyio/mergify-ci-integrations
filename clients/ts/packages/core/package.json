@@ -41,8 +41,8 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Mergifyio/mergify-ci-plugins-ts.git",
-    "directory": "packages/core"
+    "url": "git+https://github.com/Mergifyio/mergify-ci-integrations.git",
+    "directory": "clients/ts/packages/core"
   },
   "author": "Mergify <hello@mergify.com>"
 }
