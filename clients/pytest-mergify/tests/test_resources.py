@@ -19,10 +19,16 @@ def test_span_resources_attributes_pytest(
 ) -> None:
     result, spans = pytester_with_spans()
     assert spans is not None
+    assert spans.resource["test.framework"] == "pytest"
     assert re.match(
         r"\d\.",
         typing.cast(str, spans.resource["test.framework.version"]),
     )
+    # The engine reads the test's programming language from
+    # telemetry.sdk.language (the attribute the OTel SDK set before the binding
+    # migration), so keep setting it or span_test.test_programming_language
+    # goes NULL instead of "python".
+    assert spans.resource["telemetry.sdk.language"] == "python"
 
 
 def test_span_resources_attributes_mergify(

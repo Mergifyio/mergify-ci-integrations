@@ -107,6 +107,12 @@ class MergifyCIInsights:
         )
         resource_attributes["test.framework"] = "pytest"
         resource_attributes["test.framework.version"] = pytest.__version__
+        # The OpenTelemetry SDK used to set `telemetry.sdk.language` for free;
+        # now that it is gone, set it explicitly -- the engine derives the
+        # test's language from it (the fallback for a `test.language` span
+        # attribute), so without it span_test.test_programming_language came
+        # back NULL instead of "python" on the binding versions.
+        resource_attributes["telemetry.sdk.language"] = "python"
         resource_attributes["test.run.id"] = self.test_run_id
         self.resource_attributes = resource_attributes
 
