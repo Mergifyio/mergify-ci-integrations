@@ -4,3 +4,10 @@ packages:
 allowBuilds:
   esbuild: true
   protobufjs: true
+
+# Supply-chain hardening (enforced by semgrep in CI): resolve only registry
+# sub-dependencies, wait 7 days before adopting newly published versions, and
+# refuse packages that downgrade their own security settings.
+blockExoticSubdeps: true
+minimumReleaseAge: 10080
+trustPolicy: no-downgrade
