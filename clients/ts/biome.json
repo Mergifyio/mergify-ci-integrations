@@ -5,7 +5,10 @@
       "**/*",
       "!**/dist/**/*",
       "!packages/playwright/tests/fixtures/test-results/**/*",
-      "!packages/playwright/tests/fixtures/playwright-report/**/*"
+      "!packages/playwright/tests/fixtures/playwright-report/**/*",
+      "!packages/native/index.js",
+      "!packages/native/index.d.ts",
+      "!packages/native/npm/**/*"
     ]
   },
   "formatter": {
@@ -17,7 +20,13 @@
     "lineWidth": 100,
     "attributePosition": "auto"
   },
-  "assist": { "actions": { "source": { "organizeImports": "on" } } },
+  "assist": {
+    "actions": {
+      "source": {
+        "organizeImports": "on"
+      }
+    }
+  },
   "linter": {
     "enabled": false,
     "rules": {
