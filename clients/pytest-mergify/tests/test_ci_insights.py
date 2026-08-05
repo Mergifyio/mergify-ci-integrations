@@ -138,43 +138,9 @@ def _set_test_environment(
         monkeypatch.setenv("GITHUB_REF_NAME", "main")
 
 
-def _make_quarantine_mock() -> None:
-    responses.add(
-        method=responses.GET,
-        url="https://example.com/v1/ci/Mergifyio/repositories/pytest-mergify/quarantines",
-        json={"quarantined_tests": []},
-        status=200,
-    )
-
-
-def _make_flaky_detection_context_mock(
-    budget_ratio_for_new_tests: float = 0.1,
-    budget_ratio_for_unhealthy_tests: float = 0.05,
-    existing_test_names: typing.List[str] = [],
-    existing_tests_mean_duration_ms: int = 0,
-    unhealthy_test_names: typing.List[str] = [],
-    max_test_execution_count: int = 1000,
-    max_test_name_length: int = 65536,
-    min_budget_duration_ms: int = 4000,
-    min_test_execution_count: int = 5,
-    status: int = 200,
-) -> None:
-    responses.add(
-        method=responses.GET,
-        url="https://example.com/v1/ci/Mergifyio/repositories/pytest-mergify/flaky-detection-context",
-        json={
-            "budget_ratio_for_new_tests": budget_ratio_for_new_tests,
-            "budget_ratio_for_unhealthy_tests": budget_ratio_for_unhealthy_tests,
-            "existing_test_names": existing_test_names,
-            "existing_tests_mean_duration_ms": existing_tests_mean_duration_ms,
-            "unhealthy_test_names": unhealthy_test_names,
-            "max_test_execution_count": max_test_execution_count,
-            "max_test_name_length": max_test_name_length,
-            "min_budget_duration_ms": min_budget_duration_ms,
-            "min_test_execution_count": min_test_execution_count,
-        },
-        status=status,
-    )
+# The flaky/quarantine/test-selection fetches are unit-tested in Rust
+# (mergify-ci-api, wiremock); here the plugin's binding client is faked and its
+# fetches return injected data, so these tests exercise the lifecycle only.
 
 
 def _make_test_client() -> ci_insights.MergifyCIInsights:
@@ -185,12 +151,14 @@ def _make_test_client() -> ci_insights.MergifyCIInsights:
     )
 
 
-@responses.activate
 def test_load_flaky_detection(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_test_environment(monkeypatch)
-
-    _make_quarantine_mock()
-    _make_flaky_detection_context_mock(existing_test_names=["a::test_a", "b::test_b"])
+    conftest.install_fake_api_client(
+        monkeypatch,
+        flaky_context=conftest.make_flaky_context(
+            existing_test_names=["a::test_a", "b::test_b"]
+        ),
+    )
 
     client = _make_test_client()
     assert not client.flaky_detector_error_message
@@ -201,52 +169,46 @@ def test_load_flaky_detection(monkeypatch: pytest.MonkeyPatch) -> None:
     ]
 
 
-@responses.activate
 def test_load_flaky_detection_error(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_test_environment(monkeypatch)
-
-    _make_quarantine_mock()
-    _make_flaky_detection_context_mock(status=500)
+    conftest.install_fake_api_client(
+        monkeypatch, flaky_error="Mergify API returned HTTP 500"
+    )
 
     client = _make_test_client()
     assert client.flaky_detector is None
     assert client.flaky_detector_error_message is not None
-    assert "500 Server Error" in client.flaky_detector_error_message
+    assert "HTTP 500" in client.flaky_detector_error_message
 
 
-@responses.activate
 def test_load_flaky_detection_disabled_when_not_opted_in(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A 404 means the repository has not opted into flaky detection; the
-    client skips silently rather than surfacing an error."""
+    """A dormant fetch (the repository has not opted in) skips silently rather
+    than surfacing an error."""
     _set_test_environment(monkeypatch)
-
-    _make_quarantine_mock()
-    _make_flaky_detection_context_mock(status=404)
+    conftest.install_fake_api_client(monkeypatch, flaky_context=None)
 
     client = _make_test_client()
     assert client.flaky_detector is None
     assert client.flaky_detector_error_message is None
 
 
-@responses.activate
 def test_load_flaky_detection_skipped_without_existing_tests(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """With no baseline in `new` mode, every test would look new and the whole
     suite would be rerun; the client skips silently rather than erroring."""
     _set_test_environment(monkeypatch)
-
-    _make_quarantine_mock()
-    _make_flaky_detection_context_mock(existing_test_names=[])
+    conftest.install_fake_api_client(
+        monkeypatch, flaky_context=conftest.make_flaky_context(existing_test_names=[])
+    )
 
     client = _make_test_client()
     assert client.flaky_detector is None
     assert client.flaky_detector_error_message is None
 
 
-@responses.activate
 def test_flaky_detection_for_new_tests(
     monkeypatch: pytest.MonkeyPatch,
     pytester_with_spans: conftest.PytesterWithSpanT,
@@ -254,16 +216,15 @@ def test_flaky_detection_for_new_tests(
     max_test_name_length = 100
 
     _set_test_environment(monkeypatch)
-    _make_quarantine_mock()
-    _make_flaky_detection_context_mock(
-        existing_test_names=[
-            "test_flaky_detection_for_new_tests.py::test_foo",
-            "test_flaky_detection_for_new_tests.py::test_unknown",
-        ],
-        max_test_name_length=max_test_name_length,
-    )
 
     result, spans = pytester_with_spans(
+        flaky_context=conftest.make_flaky_context(
+            existing_test_names=[
+                "test_flaky_detection_for_new_tests.py::test_foo",
+                "test_flaky_detection_for_new_tests.py::test_unknown",
+            ],
+            max_test_name_length=max_test_name_length,
+        ),
         code=f"""
         import pytest
 
@@ -291,7 +252,7 @@ def test_flaky_detection_for_new_tests(
 
         def test_corge():
             assert True
-        """
+        """,
     )
 
     result.assert_outcomes(
@@ -337,24 +298,22 @@ def test_flaky_detection_for_new_tests(
             assert span.attributes.get("cicd.test.rerun_count", 0) == 999
 
 
-@responses.activate
 def test_flaky_detection_for_unhealthy_tests(
     monkeypatch: pytest.MonkeyPatch,
     pytester_with_spans: conftest.PytesterWithSpanT,
 ) -> None:
     _set_test_environment(monkeypatch, mode="unhealthy")
-    _make_quarantine_mock()
-    _make_flaky_detection_context_mock(
-        unhealthy_test_names=[
-            "test_flaky_detection_for_unhealthy_tests.py::test_bar",
-            "test_flaky_detection_for_unhealthy_tests.py::test_baz",
-            "test_flaky_detection_for_unhealthy_tests.py::test_qux",
-            "test_flaky_detection_for_unhealthy_tests.py::test_quux",
-            "test_flaky_detection_for_unhealthy_tests.py::test_unknown",
-        ],
-    )
 
     result, spans = pytester_with_spans(
+        flaky_context=conftest.make_flaky_context(
+            unhealthy_test_names=[
+                "test_flaky_detection_for_unhealthy_tests.py::test_bar",
+                "test_flaky_detection_for_unhealthy_tests.py::test_baz",
+                "test_flaky_detection_for_unhealthy_tests.py::test_qux",
+                "test_flaky_detection_for_unhealthy_tests.py::test_quux",
+                "test_flaky_detection_for_unhealthy_tests.py::test_unknown",
+            ],
+        ),
         code="""
         import pytest
 
@@ -379,7 +338,7 @@ def test_flaky_detection_for_unhealthy_tests(
 
         def test_quux():
             assert True
-        """
+        """,
     )
 
     # The goal is to make sure the failed rerun of the flaky test does not
@@ -426,7 +385,6 @@ def test_flaky_detection_for_unhealthy_tests(
             assert span.attributes.get("test.case.result.status") == "passed"
 
 
-@responses.activate
 def test_flaky_detection_with_fixtures(
     monkeypatch: pytest.MonkeyPatch,
     pytester_with_spans: conftest.PytesterWithSpanT,
@@ -434,14 +392,6 @@ def test_flaky_detection_with_fixtures(
     max_test_name_length = 100
 
     _set_test_environment(monkeypatch)
-    _make_quarantine_mock()
-    _make_flaky_detection_context_mock(
-        existing_test_names=[
-            "test_flaky_detection_with_fixtures.py::test_first",
-            "test_flaky_detection_with_fixtures.py::test_last",
-        ],
-        max_test_name_length=max_test_name_length,
-    )
 
     suspended_calls, restored_calls = [], []
 
@@ -474,6 +424,13 @@ def test_flaky_detection_with_fixtures(
     )
 
     result, spans = pytester_with_spans(
+        flaky_context=conftest.make_flaky_context(
+            existing_test_names=[
+                "test_flaky_detection_with_fixtures.py::test_first",
+                "test_flaky_detection_with_fixtures.py::test_last",
+            ],
+            max_test_name_length=max_test_name_length,
+        ),
         code="""
         import pytest
 
@@ -517,7 +474,7 @@ def test_flaky_detection_with_fixtures(
             global SETUP_COUNT, TEARDOWN_COUNT
             assert SETUP_COUNT == 1002
             assert TEARDOWN_COUNT == 1001  # Teardown hasn't run yet for test_last.
-        """
+        """,
     )
 
     result.assert_outcomes(
@@ -534,20 +491,18 @@ def test_flaky_detection_with_fixtures(
     assert restored_calls[0] == "test_flaky_detection_with_fixtures.py::test_second"
 
 
-@responses.activate
 def test_flaky_detection_with_only_one_new_test_at_the_end(
     monkeypatch: pytest.MonkeyPatch,
     pytester_with_spans: conftest.PytesterWithSpanT,
 ) -> None:
     _set_test_environment(monkeypatch)
-    _make_quarantine_mock()
-    _make_flaky_detection_context_mock(
-        existing_test_names=[
-            "test_flaky_detection_with_only_one_new_test_at_the_end.py::test_foo",
-        ]
-    )
 
     result, spans = pytester_with_spans(
+        flaky_context=conftest.make_flaky_context(
+            existing_test_names=[
+                "test_flaky_detection_with_only_one_new_test_at_the_end.py::test_foo",
+            ]
+        ),
         code="""
         import pytest
 
@@ -565,7 +520,7 @@ def test_flaky_detection_with_only_one_new_test_at_the_end(
 
         def test_bar():
             assert True
-        """
+        """,
     )
     result.assert_outcomes(passed=1001)
 
@@ -582,7 +537,6 @@ def test_flaky_detection_with_only_one_new_test_at_the_end(
     assert span.attributes.get("cicd.test.rerun_count", 0) == 999
 
 
-@responses.activate
 def test_flaky_detection_execution_count_matches_the_cap(
     monkeypatch: pytest.MonkeyPatch,
     pytester_with_spans: conftest.PytesterWithSpanT,
@@ -595,23 +549,22 @@ def test_flaky_detection_execution_count_matches_the_cap(
     max_test_execution_count = 5
 
     _set_test_environment(monkeypatch)
-    _make_quarantine_mock()
-    _make_flaky_detection_context_mock(
-        existing_test_names=[
-            "test_flaky_detection_execution_count_matches_the_cap.py::test_existing",
-        ],
-        max_test_execution_count=max_test_execution_count,
-        min_test_execution_count=1,
-    )
 
     result, spans = pytester_with_spans(
+        flaky_context=conftest.make_flaky_context(
+            existing_test_names=[
+                "test_flaky_detection_execution_count_matches_the_cap.py::test_existing",
+            ],
+            max_test_execution_count=max_test_execution_count,
+            min_test_execution_count=1,
+        ),
         code="""
         def test_existing():
             assert True
 
         def test_new():
             assert True
-        """
+        """,
     )
 
     # `test_existing` runs once; `test_new` runs exactly up to the cap.
@@ -631,20 +584,21 @@ def test_flaky_detection_execution_count_matches_the_cap(
     )
 
 
-@responses.activate
 def test_flaky_detection_keeps_its_state_out_of_report_keywords(
     monkeypatch: pytest.MonkeyPatch,
     pytester: _pytest.pytester.Pytester,
 ) -> None:
     "Test that rerun bookkeeping stays out of pytest's keyword namespace."
     _set_test_environment(monkeypatch)
-    _make_quarantine_mock()
-    _make_flaky_detection_context_mock(
-        existing_test_names=[
-            "test_flaky_detection_keeps_its_state_out_of_report_keywords.py::test_existing",
-        ],
-        max_test_execution_count=3,
-        min_test_execution_count=1,
+    conftest.install_fake_api_client(
+        monkeypatch,
+        flaky_context=conftest.make_flaky_context(
+            existing_test_names=[
+                "test_flaky_detection_keeps_its_state_out_of_report_keywords.py::test_existing",
+            ],
+            max_test_execution_count=3,
+            min_test_execution_count=1,
+        ),
     )
 
     reported_keywords: typing.Set[str] = set()
@@ -673,20 +627,21 @@ def test_flaky_detection_keeps_its_state_out_of_report_keywords(
     assert "is_last_rerun" not in reported_keywords
 
 
-@responses.activate
 def test_flaky_detection_test_skipping_only_on_a_rerun(
     monkeypatch: pytest.MonkeyPatch,
     pytester: _pytest.pytester.Pytester,
 ) -> None:
     "Test that a test skipping part-way through its reruns stays recoverable."
     _set_test_environment(monkeypatch)
-    _make_quarantine_mock()
-    _make_flaky_detection_context_mock(
-        existing_test_names=[
-            "test_flaky_detection_test_skipping_only_on_a_rerun.py::test_existing",
-        ],
-        max_test_execution_count=5,
-        min_test_execution_count=1,
+    conftest.install_fake_api_client(
+        monkeypatch,
+        flaky_context=conftest.make_flaky_context(
+            existing_test_names=[
+                "test_flaky_detection_test_skipping_only_on_a_rerun.py::test_existing",
+            ],
+            max_test_execution_count=5,
+            min_test_execution_count=1,
+        ),
     )
 
     pytester.makepyfile(
@@ -728,19 +683,20 @@ def test_flaky_detection_test_skipping_only_on_a_rerun(
     assert 0 < result.parseoutcomes()["skipped"] <= 5
 
 
-@responses.activate
 def test_flaky_detection_slow_test_not_reran(
     monkeypatch: pytest.MonkeyPatch,
     pytester: _pytest.pytester.Pytester,
 ) -> None:
     "Test that a slow test is not reran when it can't reach 5 within the budget."
     _set_test_environment(monkeypatch)
-    _make_quarantine_mock()
-    _make_flaky_detection_context_mock(
-        existing_test_names=[
-            "test_flaky_detection_slow_test_not_reran.py::test_existing",
-        ],
-        min_test_execution_count=5,
+    conftest.install_fake_api_client(
+        monkeypatch,
+        flaky_context=conftest.make_flaky_context(
+            existing_test_names=[
+                "test_flaky_detection_slow_test_not_reran.py::test_existing",
+            ],
+            min_test_execution_count=5,
+        ),
     )
 
     class CustomPlugin:
@@ -787,30 +743,28 @@ def test_flaky_detection_slow_test_not_reran(
     )
 
 
-@responses.activate
 def test_flaky_detection_consistent_failure_is_not_flaky(
     monkeypatch: pytest.MonkeyPatch,
     pytester_with_spans: conftest.PytesterWithSpanT,
 ) -> None:
     "Test that a test failing every single time is reported as broken, not flaky."
     _set_test_environment(monkeypatch)
-    _make_quarantine_mock()
-    _make_flaky_detection_context_mock(
-        existing_test_names=[
-            "test_flaky_detection_consistent_failure_is_not_flaky.py::test_existing",
-        ],
-        max_test_execution_count=3,
-        min_test_execution_count=1,
-    )
 
     _, spans = pytester_with_spans(
+        flaky_context=conftest.make_flaky_context(
+            existing_test_names=[
+                "test_flaky_detection_consistent_failure_is_not_flaky.py::test_existing",
+            ],
+            max_test_execution_count=3,
+            min_test_execution_count=1,
+        ),
         code="""
         def test_existing():
             assert True
 
         def test_always_fails():
             assert False
-        """
+        """,
     )
 
     assert spans is not None
@@ -826,19 +780,20 @@ def test_flaky_detection_consistent_failure_is_not_flaky(
     assert span.attributes.get("cicd.test.flaky") is None
 
 
-@responses.activate
 def test_flaky_detection_slow_test_keeps_higher_scoped_finalizers(
     monkeypatch: pytest.MonkeyPatch,
     pytester: _pytest.pytester.Pytester,
 ) -> None:
     "Test that a test skipped for being too slow still tears down its module."
     _set_test_environment(monkeypatch)
-    _make_quarantine_mock()
-    _make_flaky_detection_context_mock(
-        existing_test_names=[
-            "test_flaky_detection_slow_test_keeps_higher_scoped_finalizers.py::test_existing",
-        ],
-        min_test_execution_count=5,
+    conftest.install_fake_api_client(
+        monkeypatch,
+        flaky_context=conftest.make_flaky_context(
+            existing_test_names=[
+                "test_flaky_detection_slow_test_keeps_higher_scoped_finalizers.py::test_existing",
+            ],
+            min_test_execution_count=5,
+        ),
     )
 
     class CustomPlugin:
@@ -888,19 +843,20 @@ def test_flaky_detection_slow_test_keeps_higher_scoped_finalizers(
     assert (pytester.path / "module_teardown_ran").exists()
 
 
-@responses.activate
 def test_flaky_detection_slow_teardown_keeps_higher_scoped_finalizers(
     monkeypatch: pytest.MonkeyPatch,
     pytester: _pytest.pytester.Pytester,
 ) -> None:
     "Test that the too-slow verdict cannot flip after finalizers were suspended."
     _set_test_environment(monkeypatch)
-    _make_quarantine_mock()
-    _make_flaky_detection_context_mock(
-        existing_test_names=[
-            "test_flaky_detection_slow_teardown_keeps_higher_scoped_finalizers.py::test_existing",
-        ],
-        min_test_execution_count=5,
+    conftest.install_fake_api_client(
+        monkeypatch,
+        flaky_context=conftest.make_flaky_context(
+            existing_test_names=[
+                "test_flaky_detection_slow_teardown_keeps_higher_scoped_finalizers.py::test_existing",
+            ],
+            min_test_execution_count=5,
+        ),
     )
 
     # A cheap call with an expensive teardown: cheap enough to be reran when the
@@ -946,7 +902,6 @@ def test_flaky_detection_slow_teardown_keeps_higher_scoped_finalizers(
     assert result.ret == 0
 
 
-@responses.activate
 def test_flaky_detection_budget_deadline_stops_reruns(
     monkeypatch: pytest.MonkeyPatch,
     pytester: _pytest.pytester.Pytester,
@@ -955,11 +910,13 @@ def test_flaky_detection_budget_deadline_stops_reruns(
     Test that reruns are stopped when they would exceed the budget deadline.
     """
     _set_test_environment(monkeypatch)
-    _make_quarantine_mock()
-    _make_flaky_detection_context_mock(
-        existing_test_names=[
-            "test_flaky_detection_budget_deadline_stops_reruns.py::test_existing",
-        ]
+    conftest.install_fake_api_client(
+        monkeypatch,
+        flaky_context=conftest.make_flaky_context(
+            existing_test_names=[
+                "test_flaky_detection_budget_deadline_stops_reruns.py::test_existing",
+            ]
+        ),
     )
 
     class CustomPlugin:
@@ -1014,21 +971,22 @@ def test_flaky_detection_budget_deadline_stops_reruns(
     )
 
 
-@responses.activate
 def test_flaky_detector_prepare_for_session_in_new_mode(
     monkeypatch: pytest.MonkeyPatch,
     pytester: _pytest.pytester.Pytester,
 ) -> None:
     _set_test_environment(monkeypatch, mode="new")
-    _make_quarantine_mock()
-    _make_flaky_detection_context_mock(
-        budget_ratio_for_new_tests=0.5,
-        existing_test_names=[
-            "test_flaky_detector_prepare_for_session_in_new_mode.py::test_foo",
-            "test_flaky_detector_prepare_for_session_in_new_mode.py::test_baz",  # Unknown test, should be filtered.
-        ],
-        existing_tests_mean_duration_ms=10000,
-        max_test_execution_count=10,
+    conftest.install_fake_api_client(
+        monkeypatch,
+        flaky_context=conftest.make_flaky_context(
+            budget_ratio_for_new_tests=0.5,
+            existing_test_names=[
+                "test_flaky_detector_prepare_for_session_in_new_mode.py::test_foo",
+                "test_flaky_detector_prepare_for_session_in_new_mode.py::test_baz",  # Unknown test, should be filtered.
+            ],
+            existing_tests_mean_duration_ms=10000,
+            max_test_execution_count=10,
+        ),
     )
 
     pytester.makepyfile(
@@ -1058,25 +1016,26 @@ def test_flaky_detector_prepare_for_session_in_new_mode(
     )
 
 
-@responses.activate
 def test_flaky_detector_prepare_for_session_in_unhealthy_mode(
     monkeypatch: pytest.MonkeyPatch,
     pytester: _pytest.pytester.Pytester,
 ) -> None:
     _set_test_environment(monkeypatch, mode="unhealthy")
-    _make_quarantine_mock()
-    _make_flaky_detection_context_mock(
-        budget_ratio_for_unhealthy_tests=0.5,
-        existing_tests_mean_duration_ms=10000,
-        existing_test_names=[
-            "test_flaky_detector_prepare_for_session_in_unhealthy_mode.py::test_foo",
-            "test_flaky_detector_prepare_for_session_in_unhealthy_mode.py::test_baz",  # Unknown test, should be filtered.
-        ],
-        unhealthy_test_names=[
-            "test_flaky_detector_prepare_for_session_in_unhealthy_mode.py::test_foo",
-            "test_flaky_detector_prepare_for_session_in_unhealthy_mode.py::test_baz",  # Unknown test, should be filtered.
-        ],
-        max_test_execution_count=10,
+    conftest.install_fake_api_client(
+        monkeypatch,
+        flaky_context=conftest.make_flaky_context(
+            budget_ratio_for_unhealthy_tests=0.5,
+            existing_tests_mean_duration_ms=10000,
+            existing_test_names=[
+                "test_flaky_detector_prepare_for_session_in_unhealthy_mode.py::test_foo",
+                "test_flaky_detector_prepare_for_session_in_unhealthy_mode.py::test_baz",  # Unknown test, should be filtered.
+            ],
+            unhealthy_test_names=[
+                "test_flaky_detector_prepare_for_session_in_unhealthy_mode.py::test_foo",
+                "test_flaky_detector_prepare_for_session_in_unhealthy_mode.py::test_baz",  # Unknown test, should be filtered.
+            ],
+            max_test_execution_count=10,
+        ),
     )
 
     pytester.makepyfile(
@@ -1107,7 +1066,6 @@ def test_flaky_detector_prepare_for_session_in_unhealthy_mode(
     )
 
 
-@responses.activate
 def test_empty_base_ref_falls_through_to_head_ref(
     monkeypatch: pytest.MonkeyPatch,
     pytester: _pytest.pytester.Pytester,
@@ -1120,8 +1078,9 @@ def test_empty_base_ref_falls_through_to_head_ref(
     # exists but is empty.
     monkeypatch.setenv("GITHUB_BASE_REF", "")
 
-    _make_quarantine_mock()
-    _make_flaky_detection_context_mock()
+    conftest.install_fake_api_client(
+        monkeypatch, flaky_context=conftest.make_flaky_context()
+    )
 
     pytester.makepyfile(
         """
@@ -1139,19 +1098,17 @@ def test_empty_base_ref_falls_through_to_head_ref(
     assert plugin.mergify_ci.flaky_detector.mode == "unhealthy"
 
 
-@responses.activate
 def test_flaky_detection_excludes_opted_out_tests(
     monkeypatch: pytest.MonkeyPatch,
     pytester_with_spans: conftest.PytesterWithSpanT,
 ) -> None:
     _set_test_environment(monkeypatch)
-    _make_quarantine_mock()
-    # A non-empty baseline so `new` mode loads; it is absent from the session.
-    _make_flaky_detection_context_mock(
-        existing_test_names=["baseline.py::test_baseline"],
-    )
 
     result, spans = pytester_with_spans(
+        # A non-empty baseline so `new` mode loads; it is absent from the session.
+        flaky_context=conftest.make_flaky_context(
+            existing_test_names=["baseline.py::test_baseline"],
+        ),
         code="""
         import pytest
 
@@ -1161,7 +1118,7 @@ def test_flaky_detection_excludes_opted_out_tests(
         @pytest.mark.mergify(flaky_detection=False)
         def test_excluded():
             assert True
-        """
+        """,
     )
 
     result.assert_outcomes(
