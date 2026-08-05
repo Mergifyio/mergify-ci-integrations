@@ -20,7 +20,7 @@ use std::path::Path;
 use providers::CiProvider;
 
 pub use context::{AttrValue, CiContext, Pipeline, Provider, Refs, Repository};
-pub use otel::attributes as otel_attributes;
+pub use otel::{CiResourceAttributes, attributes as otel_attributes};
 
 /// Detect CI context from an explicit environment map and working directory.
 #[must_use]
@@ -80,7 +80,7 @@ mod tests {
     }
 
     fn attrs_of(ctx: &CiContext) -> BTreeMap<String, AttrValue> {
-        otel_attributes(ctx)
+        otel_attributes(ctx).into_map()
     }
 
     // --- provider detection ---
