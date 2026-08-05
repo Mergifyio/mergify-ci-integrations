@@ -8,9 +8,9 @@ readme = "README.md"
 
 requires-python = ">=3.8"
 dependencies = [
-    "opentelemetry-exporter-otlp-proto-http>=1.29",
-    "opentelemetry-sdk>=1.29",
-    "requests>=2",
+    # The OpenTelemetry SDK, its OTLP exporter, and requests are gone: CI
+    # detection, the API fetches, and span build + OTLP upload all run through
+    # the bundled Rust binding now.
     "pytest>=6.0.0",
     "pytest-timeout>=2.4.0",
 ]
@@ -23,7 +23,8 @@ dev = [
     "codespell==2.4.3; python_version >= '3.9'",
     "yamllint>=1.35.1",
     "anys>=0.3.1",
-    "responses>=0.25.8",
+    # Decodes the OTLP protobuf the binding uploads, for the span tests.
+    "opentelemetry-proto>=1.29",
     # https://github.com/pytest-dev/pytest-asyncio/issues/706#issuecomment-2082788963
     "pytest-asyncio>=0.24.0",
     "freezegun>=1.5.5",

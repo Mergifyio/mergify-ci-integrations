@@ -1,9 +1,8 @@
-import opentelemetry.trace
 import anys
-from opentelemetry.semconv.trace import SpanAttributes
 
 import pytest
 
+import pytest_mergify
 from tests import conftest
 
 
@@ -24,9 +23,9 @@ def test_session_without_traceparent(
     result, spans = pytester_with_spans()
     assert spans is not None
     s = spans["pytest session start"]
-    assert s.attributes == {"test.scope": "session"}
-    assert s.status.status_code == opentelemetry.trace.StatusCode.OK
-    assert s.parent is None
+    assert s["attributes"] == {"test.scope": "session"}
+    assert s["status"] == "ok"
+    assert s["parent_span_id"] is None
 
 
 def test_session_with_traceparent(
@@ -40,12 +39,10 @@ def test_session_with_traceparent(
     result, spans = pytester_with_spans()
     assert spans is not None
     s = spans["pytest session start"]
-    assert s.attributes == {"test.scope": "session"}
-    assert s.status.status_code == opentelemetry.trace.StatusCode.OK
-    assert s.parent is not None
-    assert s.context.trace_id == 0x80E1AFED08E019FC1110464CFA66635C
-    assert s.parent.trace_id == 0x80E1AFED08E019FC1110464CFA66635C
-    assert s.parent.span_id == 0x7A085853722DC6D2
+    assert s["attributes"] == {"test.scope": "session"}
+    assert s["status"] == "ok"
+    assert s["parent_span_id"] == bytes.fromhex("7a085853722dc6d2")
+    assert s["trace_id"] == bytes.fromhex("80e1afed08e019fc1110464cfa66635c")
 
 
 def test_session_fail(
@@ -54,8 +51,8 @@ def test_session_fail(
     result, spans = pytester_with_spans("def test_fail(): assert False")
     assert spans is not None
     s = spans["pytest session start"]
-    assert s.attributes == {"test.scope": "session"}
-    assert s.status.status_code == opentelemetry.trace.StatusCode.ERROR
+    assert s["attributes"] == {"test.scope": "session"}
+    assert s["status"] == "error"
 
 
 def test_test(
@@ -65,7 +62,7 @@ def test_test(
     assert spans is not None
     session_span = spans["pytest session start"]
 
-    assert spans["test_test.py::test_pass"].attributes == {
+    assert spans["test_test.py::test_pass"]["attributes"] == {
         "test.scope": "case",
         "code.function": "test_pass",
         "code.lineno": 0,
@@ -76,15 +73,9 @@ def test_test(
         "code.line.number": 0,
         "cicd.test.quarantined": False,
     }
-    assert (
-        spans["test_test.py::test_pass"].status.status_code
-        == opentelemetry.trace.StatusCode.OK
-    )
-    assert session_span.context is not None
-    assert spans["test_test.py::test_pass"].parent is not None
-    assert (
-        spans["test_test.py::test_pass"].parent.span_id == session_span.context.span_id
-    )
+    assert spans["test_test.py::test_pass"]["status"] == "ok"
+    assert spans["test_test.py::test_pass"]["parent_span_id"] is not None
+    assert spans["test_test.py::test_pass"]["parent_span_id"] == session_span["span_id"]
 
 
 def test_test_failure(
@@ -94,16 +85,16 @@ def test_test_failure(
     assert spans is not None
     session_span = spans["pytest session start"]
 
-    assert spans["test_test_failure.py::test_error"].attributes == {
+    assert spans["test_test_failure.py::test_error"]["attributes"] == {
         "test.case.result.status": "failed",
         "test.scope": "case",
         "code.function": "test_error",
         "code.lineno": 0,
         "code.filepath": "test_test_failure.py",
         "code.namespace": "",
-        SpanAttributes.EXCEPTION_TYPE: "AssertionError",
-        SpanAttributes.EXCEPTION_MESSAGE: "foobar\nassert False",
-        SpanAttributes.EXCEPTION_STACKTRACE: """>   def test_error(): assert False, 'foobar'
+        "exception.type": "AssertionError",
+        "exception.message": "foobar\nassert False",
+        "exception.stacktrace": """>   def test_error(): assert False, 'foobar'
 E   AssertionError: foobar
 E   assert False
 
@@ -112,19 +103,15 @@ test_test_failure.py:1: AssertionError""",
         "code.line.number": 0,
         "cicd.test.quarantined": False,
     }
+    assert spans["test_test_failure.py::test_error"]["status"] == "error"
     assert (
-        spans["test_test_failure.py::test_error"].status.status_code
-        == opentelemetry.trace.StatusCode.ERROR
-    )
-    assert (
-        spans["test_test_failure.py::test_error"].status.description
+        spans["test_test_failure.py::test_error"]["status_message"]
         == "<class 'AssertionError'>: foobar\nassert False"
     )
-    assert session_span.context is not None
-    assert spans["test_test_failure.py::test_error"].parent is not None
+    assert spans["test_test_failure.py::test_error"]["parent_span_id"] is not None
     assert (
-        spans["test_test_failure.py::test_error"].parent.span_id
-        == session_span.context.span_id
+        spans["test_test_failure.py::test_error"]["parent_span_id"]
+        == session_span["span_id"]
     )
 
 
@@ -139,7 +126,7 @@ def test_skipped():
     assert spans is not None
     session_span = spans["pytest session start"]
 
-    assert spans["test_test_skipped.py::test_skipped"].attributes == {
+    assert spans["test_test_skipped.py::test_skipped"]["attributes"] == {
         "test.case.result.status": "skipped",
         "test.scope": "case",
         "code.function": "test_skipped",
@@ -150,15 +137,11 @@ def test_skipped():
         "code.line.number": 1,
         "cicd.test.quarantined": False,
     }
+    assert spans["test_test_skipped.py::test_skipped"]["status"] == "ok"
+    assert spans["test_test_skipped.py::test_skipped"]["parent_span_id"] is not None
     assert (
-        spans["test_test_skipped.py::test_skipped"].status.status_code
-        == opentelemetry.trace.StatusCode.OK
-    )
-    assert session_span.context is not None
-    assert spans["test_test_skipped.py::test_skipped"].parent is not None
-    assert (
-        spans["test_test_skipped.py::test_skipped"].parent.span_id
-        == session_span.context.span_id
+        spans["test_test_skipped.py::test_skipped"]["parent_span_id"]
+        == session_span["span_id"]
     )
 
 
@@ -187,7 +170,7 @@ def test_skipped():
     assert spans is not None
     session_span = spans["pytest session start"]
 
-    assert spans["test_mark_skipped.py::test_skipped"].attributes == {
+    assert spans["test_mark_skipped.py::test_skipped"]["attributes"] == {
         "test.case.result.status": "skipped",
         "test.scope": "case",
         "code.function": "test_skipped",
@@ -198,15 +181,11 @@ def test_skipped():
         "code.line.number": 1,
         "cicd.test.quarantined": False,
     }
+    assert spans["test_mark_skipped.py::test_skipped"]["status"] == "unset"
+    assert spans["test_mark_skipped.py::test_skipped"]["parent_span_id"] is not None
     assert (
-        spans["test_mark_skipped.py::test_skipped"].status.status_code
-        == opentelemetry.trace.StatusCode.UNSET
-    )
-    assert session_span.context is not None
-    assert spans["test_mark_skipped.py::test_skipped"].parent is not None
-    assert (
-        spans["test_mark_skipped.py::test_skipped"].parent.span_id
-        == session_span.context.span_id
+        spans["test_mark_skipped.py::test_skipped"]["parent_span_id"]
+        == session_span["span_id"]
     )
 
 
@@ -225,7 +204,9 @@ def test_skipped():
 """)
     result.assert_outcomes(skipped=1)
     assert spans is not None
-    assert spans["test_mark_skipped_by_an_outer_mark.py::test_skipped"].attributes == {
+    assert spans["test_mark_skipped_by_an_outer_mark.py::test_skipped"][
+        "attributes"
+    ] == {
         "test.case.result.status": "skipped",
         "test.scope": "case",
         "code.function": "test_skipped",
@@ -251,9 +232,9 @@ def test_skipped():
 """)
     result.assert_outcomes(skipped=1)
     assert spans is not None
-    assert spans[
-        "test_mark_skipped_by_a_later_condition.py::test_skipped"
-    ].attributes == {
+    assert spans["test_mark_skipped_by_a_later_condition.py::test_skipped"][
+        "attributes"
+    ] == {
         "test.case.result.status": "skipped",
         "test.scope": "case",
         "code.function": "test_skipped",
@@ -294,7 +275,7 @@ def test_not_skipped():
     assert spans is not None
     session_span = spans["pytest session start"]
 
-    assert spans["test_mark_not_skipped.py::test_not_skipped"].attributes == {
+    assert spans["test_mark_not_skipped.py::test_not_skipped"]["attributes"] == {
         "test.case.result.status": "passed",
         "test.scope": "case",
         "code.function": "test_not_skipped",
@@ -305,15 +286,14 @@ def test_not_skipped():
         "code.line.number": 1,
         "cicd.test.quarantined": False,
     }
+    assert spans["test_mark_not_skipped.py::test_not_skipped"]["status"] == "ok"
     assert (
-        spans["test_mark_not_skipped.py::test_not_skipped"].status.status_code
-        == opentelemetry.trace.StatusCode.OK
+        spans["test_mark_not_skipped.py::test_not_skipped"]["parent_span_id"]
+        is not None
     )
-    assert session_span.context is not None
-    assert spans["test_mark_not_skipped.py::test_not_skipped"].parent is not None
     assert (
-        spans["test_mark_not_skipped.py::test_not_skipped"].parent.span_id
-        == session_span.context.span_id
+        spans["test_mark_not_skipped.py::test_not_skipped"]["parent_span_id"]
+        == session_span["span_id"]
     )
 
 
@@ -348,9 +328,41 @@ def test_span_resources_test_run_id(
 ) -> None:
     result, spans = pytester_with_spans()
     assert spans is not None
-    assert all(
-        isinstance(span.resource.attributes["test.run.id"], str)
-        and len(span.resource.attributes["test.run.id"]) == 16
-        and int(span.resource.attributes["test.run.id"], 16) > 0
-        for span in spans.values()
-    )
+    run_id = spans.resource["test.run.id"]
+    assert isinstance(run_id, str)
+    assert len(run_id) == 16
+    assert int(run_id, 16) > 0
+
+
+def test_atexit_backstop(
+    pytester: pytest.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.setenv("_PYTEST_MERGIFY_TEST", "true")
+    conftest.install_fake_api_client(monkeypatch, quarantine=[])
+
+    plugin = pytest_mergify.PytestMergify()
+    pytester.makepyfile("def test_pass(): pass")
+    pytester.runpytest_inprocess(plugins=[plugin])
+
+    session_span = plugin._session_span
+    assert session_span is not None
+
+    # pytest_sessionfinish exported once; the atexit backstop firing afterwards
+    # is a guarded no-op -- the spans are not exported (or appended) twice.
+    assert plugin._exported is True
+    n_spans = len(plugin._finished_spans)
+    plugin._finalize_and_export()
+    assert plugin._exported is True
+    assert len(plugin._finished_spans) == n_spans
+
+    # If session finish had NOT run, the backstop closes the (still-open) session
+    # span and exports everything itself.
+    plugin._exported = False
+    plugin._finished_spans.remove(session_span)
+    session_span["end_unix_nano"] = 0
+    plugin._finalize_and_export()
+    assert plugin._exported is True
+    assert session_span in plugin._finished_spans
+    assert session_span["end_unix_nano"] != 0

@@ -1,5 +1,7 @@
+import atexit
 import datetime
 import os
+import time
 import typing
 
 import _pytest.config
@@ -12,19 +14,34 @@ import _pytest.reports
 import _pytest.runner
 import _pytest.skipping
 import _pytest.terminal
-import opentelemetry.trace
 import pytest
 import pytest_timeout
-from opentelemetry.semconv.trace import SpanAttributes
-from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 from pytest_mergify import flaky_detection as _flaky_detection
-from pytest_mergify import utils
+from pytest_mergify import tracing, utils
 from pytest_mergify.ci_insights import MergifyCIInsights
+
+# OpenTelemetry semantic-convention attribute keys, inlined now that the
+# semconv package is gone with the SDK.
+_CODE_FILEPATH = "code.filepath"
+_CODE_FUNCTION = "code.function"
+_CODE_LINENO = "code.lineno"
+_CODE_NAMESPACE = "code.namespace"
+_EXCEPTION_TYPE = "exception.type"
+_EXCEPTION_MESSAGE = "exception.message"
+_EXCEPTION_STACKTRACE = "exception.stacktrace"
 
 
 class PytestMergify:
     mergify_ci: MergifyCIInsights
+    # Defaulted at class level so a report hook firing before `pytest_configure`
+    # (e.g. a unit test that wires the plugin by hand) still finds them set.
+    _session_span: typing.Optional[tracing.Span] = None
+    _current_test_span: typing.Optional[tracing.Span] = None
+    _export_result: typing.Tuple[bool, typing.Optional[str]] = (False, None)
+    # Guards the one-shot export so session-finish and the atexit backstop
+    # can't upload the spans twice.
+    _exported: bool = False
 
     def pytest_configure(self, config: _pytest.config.Config) -> None:
         config.addinivalue_line(
@@ -37,6 +54,25 @@ class PytestMergify:
         if api_url is not None:
             kwargs["api_url"] = api_url
         self.mergify_ci = MergifyCIInsights(**kwargs)
+
+        # Spans are built by hand (no OpenTelemetry SDK) and handed to the
+        # binding at the end of the session; these hold the run's spans until
+        # then.
+        self._finished_spans: typing.List[tracing.Span] = []
+        self._session_span = None
+        self._current_test_span = None
+        self.has_error = False
+        # Set once the spans are exported at session finish; read by the summary.
+        self._export_result = (False, None)
+        self._exported = False
+        # Backstop, restoring the OTel SDK's atexit flush: if the session ends
+        # without pytest_sessionfinish completing (e.g. another plugin's
+        # sessionfinish raises) but the interpreter still exits cleanly, the
+        # collected spans are flushed here. `_finalize_and_export` is idempotent,
+        # so on a normal run this is a no-op. (No help on a hard kill / OOM,
+        # where atexit never runs.)
+        if self._traces_enabled:
+            atexit.register(self._finalize_and_export)
 
         self._xdist_controller = _flaky_detection.XdistFlakyDetectionController()
 
@@ -150,57 +186,55 @@ class PytestMergify:
                 terminalreporter.write_line(self.mergify_ci.test_selection.report())
 
         # Mergify Test Insights Traces upload logs
-        if self.mergify_ci.tracer_provider is None:
+        if self.mergify_ci.trace_mode is None:
             terminalreporter.write_line(
                 "Mergify Tracer didn't start for unexpected reason (please contact Mergify support); test results will not be uploaded",
                 red=True,
             )
         else:
-            try:
-                exported = self.mergify_ci.tracer_provider.force_flush()
-            except Exception as e:
+            uploaded, error = self._export_result
+            if uploaded:
                 terminalreporter.write_line(
-                    f"Error while exporting traces: {e}",
+                    f"MERGIFY_TEST_RUN_ID={self.mergify_ci.test_run_id}",
+                )
+            elif error is not None:
+                terminalreporter.write_line(
+                    f"Error while exporting traces: {error}",
                     red=True,
                 )
             else:
-                if exported:
-                    terminalreporter.write_line(
-                        f"MERGIFY_TEST_RUN_ID={self.mergify_ci.test_run_id}",
-                    )
-                else:
-                    terminalreporter.write_line(
-                        "Mergify's API did not accept the test results after retrying; they were not uploaded",
-                        red=True,
-                    )
-
-            try:
-                self.mergify_ci.tracer_provider.shutdown()
-            except Exception as e:
                 terminalreporter.write_line(
-                    f"Error while shutting down the tracer: {e}",
+                    "Mergify's API did not accept the test results; they were not uploaded",
                     red=True,
                 )
 
     @property
-    def tracer(self) -> typing.Optional[opentelemetry.trace.Tracer]:
-        return self.mergify_ci.tracer
+    def _traces_enabled(self) -> bool:
+        return self.mergify_ci.trace_mode is not None
 
     def pytest_sessionstart(self, session: _pytest.main.Session) -> None:
-        if self.tracer:
-            traceparent = os.environ.get("MERGIFY_TRACEPARENT")
-            if traceparent:
-                ctx = TraceContextTextMapPropagator().extract(
-                    carrier={"traceparent": traceparent}
-                )
+        if self._traces_enabled:
+            trace_id = tracing.new_trace_id()
+            parent_span_id: typing.Optional[bytes] = None
 
-            self.session_span = self.tracer.start_span(
-                "pytest session start",
-                attributes={
-                    "test.scope": "session",
-                },
-                context=ctx if traceparent else None,
-            )
+            # A propagated `traceparent` sets the trace this session belongs to
+            # and its parent span; a missing or malformed one starts a fresh,
+            # unparented trace.
+            traceparent = os.environ.get("MERGIFY_TRACEPARENT")
+            if traceparent and (parsed := tracing.parse_traceparent(traceparent)):
+                trace_id, parent_span_id = parsed
+
+            self._session_span = {
+                "name": "pytest session start",
+                "trace_id": trace_id,
+                "span_id": tracing.new_span_id(),
+                "parent_span_id": parent_span_id,
+                "start_unix_nano": time.time_ns(),
+                "end_unix_nano": 0,
+                "attributes": {"test.scope": "session"},
+                "status": "unset",
+                "status_message": None,
+            }
         self.has_error = False
 
     @pytest.hookimpl(trylast=True)
@@ -231,32 +265,52 @@ class PytestMergify:
                     self.mergify_ci.flaky_detector.to_serializable_metrics()
                 )
 
-        if not self.tracer:
+        if not self._traces_enabled or self._session_span is None:
             yield
             return
 
         yield
 
-        self.session_span.set_status(
-            opentelemetry.trace.StatusCode.ERROR
-            if self.has_error
-            else opentelemetry.trace.StatusCode.OK
-        )
-        self.session_span.end()
+        # Export here rather than in the terminal summary: the summary's token
+        # checks return early on a run with nothing to upload, but the capture
+        # path (tests) and the debug path have spans to hand off regardless.
+        self._finalize_and_export()
+
+    def _finalize_and_export(self) -> None:
+        """Close the session span and export every collected span, exactly once.
+
+        Called from `pytest_sessionfinish` on a normal run, and from the atexit
+        backstop if that never ran; the `_exported` guard makes the second call
+        a no-op.
+        """
+        if self._exported or not self._traces_enabled or self._session_span is None:
+            return
+        self._exported = True
+        # Whichever path runs first, drop the atexit backstop so nothing is left
+        # registered at interpreter exit.
+        atexit.unregister(self._finalize_and_export)
+        # The session span is still open when the atexit backstop runs (session
+        # finish never closed it); close it before exporting.
+        if self._session_span["end_unix_nano"] == 0:
+            self._session_span["status"] = "error" if self.has_error else "ok"
+            self._session_span["end_unix_nano"] = time.time_ns()
+            self._finished_spans.append(self._session_span)
+
+        self._export_result = self.mergify_ci.export_spans(self._finished_spans)
 
     def _get_item_attributes(
         self, item: _pytest.nodes.Item
-    ) -> typing.Dict[str, typing.Any]:
+    ) -> typing.Dict[str, tracing.AttrValue]:
         filepath, line_number, testname = item.location
         namespace = testname.replace(item.name, "")
         if namespace.endswith("."):
             namespace = namespace[:-1]
 
-        result = {
-            SpanAttributes.CODE_FILEPATH: filepath,
-            SpanAttributes.CODE_FUNCTION: item.name,
-            SpanAttributes.CODE_LINENO: line_number or 0,
-            SpanAttributes.CODE_NAMESPACE: namespace,
+        result: typing.Dict[str, tracing.AttrValue] = {
+            _CODE_FILEPATH: filepath,
+            _CODE_FUNCTION: item.name,
+            _CODE_LINENO: line_number or 0,
+            _CODE_NAMESPACE: namespace,
             "code.file.path": str(_pytest.pathlib.absolutepath(item.reportinfo()[0])),
             "code.line.number": line_number or 0,
             "test.scope": "case",
@@ -282,10 +336,10 @@ class PytestMergify:
         # flow. Returning `True` means we took care of running the protocol.
         # See:
         # https://docs.pytest.org/en/7.1.x/how-to/writing_hook_functions.html#firstresult
-        if not self.tracer and not self.mergify_ci.flaky_detector:
+        if not self._traces_enabled and not self.mergify_ci.flaky_detector:
             return None
 
-        if self.tracer:
+        if self._traces_enabled:
             return self._run_test_protocol_with_tracing(item, nextitem)
 
         return self._run_test_protocol(item, nextitem)
@@ -296,21 +350,37 @@ class PytestMergify:
         nextitem: typing.Optional[_pytest.nodes.Item],
     ) -> bool:
         """Run test protocol with tracing and optional flaky detection."""
-        assert self.tracer is not None
+        assert self._session_span is not None
 
-        with self.tracer.start_as_current_span(
-            name=item.nodeid,
-            context=opentelemetry.trace.set_span_in_context(self.session_span),
-            attributes=self._get_item_attributes(item),
-        ) as current_span:
+        # The test span is a child of the session span, in the same trace. It is
+        # held as the "current" span so the report hooks can annotate it while
+        # the test runs.
+        span: tracing.Span = {
+            "name": item.nodeid,
+            "trace_id": self._session_span["trace_id"],
+            "span_id": tracing.new_span_id(),
+            "parent_span_id": self._session_span["span_id"],
+            "start_unix_nano": time.time_ns(),
+            "end_unix_nano": 0,
+            "attributes": self._get_item_attributes(item),
+            "status": "unset",
+            "status_message": None,
+        }
+        self._current_test_span = span
+
+        try:
             distinct_outcomes, rerun_count = self._execute_test_with_reruns(
                 item, nextitem
             )
 
             if rerun_count > 0:
                 if "failed" in distinct_outcomes and "passed" in distinct_outcomes:
-                    current_span.set_attribute("cicd.test.flaky", True)
-                current_span.set_attribute("cicd.test.rerun_count", rerun_count)
+                    span["attributes"]["cicd.test.flaky"] = True
+                span["attributes"]["cicd.test.rerun_count"] = rerun_count
+        finally:
+            span["end_unix_nano"] = time.time_ns()
+            self._finished_spans.append(span)
+            self._current_test_span = None
 
         return True
 
@@ -446,33 +516,29 @@ class PytestMergify:
         call: _pytest.runner.CallInfo[typing.Any],
         report: _pytest.reports.TestReport,
     ) -> None:
-        if self.tracer is None:
+        if self._current_test_span is None:
             return
 
         excinfo = call.excinfo
 
         if excinfo is not None:
-            test_span = opentelemetry.trace.get_current_span()
-
-            test_span.set_attributes(
+            self._current_test_span["attributes"].update(
                 {
-                    SpanAttributes.EXCEPTION_TYPE: str(excinfo.type.__name__),
-                    SpanAttributes.EXCEPTION_MESSAGE: str(excinfo.value),
-                    SpanAttributes.EXCEPTION_STACKTRACE: str(report.longrepr),
+                    _EXCEPTION_TYPE: str(excinfo.type.__name__),
+                    _EXCEPTION_MESSAGE: str(excinfo.value),
+                    _EXCEPTION_STACKTRACE: str(report.longrepr),
                 }
             )
-            test_span.set_status(
-                opentelemetry.trace.Status(
-                    status_code=opentelemetry.trace.StatusCode.ERROR,
-                    description=f"{excinfo.type}: {excinfo.value}",
-                )
+            self._current_test_span["status"] = "error"
+            self._current_test_span["status_message"] = (
+                f"{excinfo.type}: {excinfo.value}"
             )
 
     def pytest_runtest_logreport(self, report: _pytest.reports.TestReport) -> None:
         if self.mergify_ci.flaky_detector:
             self.mergify_ci.flaky_detector.try_fill_metrics_from_report(report)
 
-        if self.tracer is None:
+        if self._current_test_span is None:
             return
 
         if report.when != "call":
@@ -492,29 +558,25 @@ class PytestMergify:
     def _update_current_span_from_report(
         self, report: _pytest.reports.TestReport
     ) -> None:
+        span = self._current_test_span
+        if span is None:
+            return
+
         has_error = report.outcome == "failed"
-        status_code = (
-            opentelemetry.trace.StatusCode.ERROR
-            if has_error
-            else opentelemetry.trace.StatusCode.OK
-        )
         self.has_error |= has_error
 
-        test_span = opentelemetry.trace.get_current_span()
-        test_span.set_status(status_code)
-        test_span.set_attributes(
-            {
-                "test.case.result.status": report.outcome,
-            }
-        )
+        # A status set to "error" by `pytest_exception_interact` already carries
+        # its description; leave that in place while marking the outcome here.
+        span["status"] = "error" if has_error else "ok"
+        span["attributes"]["test.case.result.status"] = report.outcome
 
         if (
             self.mergify_ci.flaky_detector
             and self.mergify_ci.flaky_detector.has_test_executed(report.nodeid)
         ):
-            test_span.set_attributes({"cicd.test.flaky_detection": True})
+            span["attributes"]["cicd.test.flaky_detection"] = True
             if self.mergify_ci.flaky_detector.mode == "new":
-                test_span.set_attributes({"cicd.test.new": True})
+                span["attributes"]["cicd.test.new"] = True
 
 
 def pytest_addoption(parser: _pytest.config.argparsing.Parser) -> None:
