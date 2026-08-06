@@ -51,8 +51,8 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Mergifyio/mergify-ci-plugins-ts.git",
-    "directory": "packages/playwright"
+    "url": "git+https://github.com/Mergifyio/mergify-ci-integrations.git",
+    "directory": "clients/ts/packages/playwright"
   },
   "author": "Mergify <hello@mergify.com>"
 }
