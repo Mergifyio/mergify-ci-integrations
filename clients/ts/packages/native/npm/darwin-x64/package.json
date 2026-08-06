@@ -1,0 +1,25 @@
+{
+  "name": "@mergifyio/ci-native-darwin-x64",
+  "version": "0.0.0",
+  "cpu": [
+    "x64"
+  ],
+  "main": "ci-native.darwin-x64.node",
+  "files": [
+    "ci-native.darwin-x64.node"
+  ],
+  "description": "Prebuilt native CI detection for Mergify CI test framework plugins",
+  "author": "Mergify <hello@mergify.com>",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mergifyio/mergify-ci-integrations.git",
+    "directory": "clients/ts/packages/native"
+  },
+  "os": [
+    "darwin"
+  ]
+}

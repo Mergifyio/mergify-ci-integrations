@@ -1,0 +1,28 @@
+{
+  "name": "@mergifyio/ci-native-linux-x64-musl",
+  "version": "0.0.0",
+  "cpu": [
+    "x64"
+  ],
+  "main": "ci-native.linux-x64-musl.node",
+  "files": [
+    "ci-native.linux-x64-musl.node"
+  ],
+  "description": "Prebuilt native CI detection for Mergify CI test framework plugins",
+  "author": "Mergify <hello@mergify.com>",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mergifyio/mergify-ci-integrations.git",
+    "directory": "clients/ts/packages/native"
+  },
+  "os": [
+    "linux"
+  ],
+  "libc": [
+    "musl"
+  ]
+}

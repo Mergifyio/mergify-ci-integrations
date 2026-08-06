@@ -10,7 +10,7 @@
     "build": "pnpm -r run build",
     "test": "pnpm -r run test",
     "typecheck": "tsc --noEmit",
-    "eslint": "eslint packages/*/src packages/*/tests",
+    "eslint": "eslint --no-error-on-unmatched-pattern packages/*/src packages/*/tests",
     "format": "biome check --write .",
     "format:check": "biome check ."
   },
