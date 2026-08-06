@@ -1,20 +1,17 @@
-// Tracing
-
-export type {
-  FlakyDetectionConfig,
-  FlakyDetectionContext,
-  FlakyDetectionMode,
-} from './flaky-detection.js';
+// Backend API client
+export type { ApiClientConfig, MergifyApiClient } from './api.js';
+export { createApiClient } from './api.js';
+export type { FlakyDetectionContext, FlakyDetectionMode } from './flaky-detection.js';
 // Flaky detection
 export { FlakyDetector, fetchFlakyDetectionContext } from './flaky-detection.js';
 export type { CiResourceAttributes } from './native.js';
-export type { QuarantineConfig } from './quarantine.js';
 // Quarantine
 export { fetchQuarantineList } from './quarantine.js';
 // Resource detection
 export { detectResources } from './resources/index.js';
 // Span helpers
 export { emitTestCaseSpan, endSessionSpan, startSessionSpan } from './spans.js';
+// Tracing
 export type { TracingConfig, TracingContext } from './tracing.js';
 export { createTracing, SynchronousBatchSpanProcessor } from './tracing.js';
 
@@ -34,6 +31,5 @@ export {
   getRepoName,
   isInCI,
   resolveBranchFromAttributes,
-  splitRepoName,
   strtobool,
 } from './utils.js';

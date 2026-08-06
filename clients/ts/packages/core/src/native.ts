@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module';
+import type { ApiClientOptions, CiApiClient } from '@mergifyio/ci-native';
 
 /**
  * Mirrors mergify-ci-core's `CiResourceAttributes` (otel.rs): the typed OTel
@@ -30,12 +31,13 @@ interface NativeBinding {
   detectProvider(): string | null;
   detectRepositoryName(): string | null;
   detectAttributes(): CiResourceAttributes;
+  CiApiClient: new (options: ApiClientOptions) => CiApiClient;
 }
 
 /**
  * The @mergifyio/ci-native binding, or null when the platform has no prebuilt
  * binary. Fail-open by design: without a binding, detection reports nothing
- * rather than breaking the test run.
+ * and the backend features stay off rather than breaking the test run.
  */
 function loadBinding(): NativeBinding | null {
   try {
@@ -85,5 +87,19 @@ export function detectNativeAttributes(): CiResourceAttributes {
     return binding.detectAttributes();
   } catch {
     return {};
+  }
+}
+
+/**
+ * The bundled Rust API client for one repository, or null when the platform
+ * has no binding or the options are rejected (a `repoName` that is not an
+ * `owner/repo` pair). Same fail-open contract as detection.
+ */
+export function createNativeApiClient(options: ApiClientOptions): CiApiClient | null {
+  if (!binding) return null;
+  try {
+    return new binding.CiApiClient(options);
+  } catch {
+    return null;
   }
 }
