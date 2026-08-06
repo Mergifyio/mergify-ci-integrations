@@ -9,13 +9,18 @@
 use std::collections::BTreeMap;
 
 use mergify_ci_api::{
-    ApiConfig, AttrValue, Client, FlakyDetectionContext, Mode, Outcome, SpanData, SpanStatus,
-    TestSelection, budget,
+    ApiConfig, AttrValue, Client, ClientInfo, FlakyDetectionContext, Mode, Outcome, SpanData,
+    SpanStatus, TestSelection, budget,
 };
 use mergify_ci_core::{AttrValue as CoreAttrValue, CiContext};
 use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict};
+
+/// The distribution this binding ships inside, as reported in the `User-Agent`.
+/// Its *version* comes from Python (`importlib.metadata`): the crate version is
+/// the build-time `0.0.0` placeholder, while the wheel carries the real one.
+const CLIENT_NAME: &str = "pytest-mergify";
 
 /// Detect from the current process environment and working directory.
 fn context() -> CiContext {
@@ -65,10 +70,23 @@ struct CiApiClient {
 #[pymethods]
 impl CiApiClient {
     #[new]
-    fn new(api_url: String, token: String, owner: String, repo: String) -> PyResult<Self> {
-        let client = Client::new(ApiConfig::new(api_url, token, owner, repo)).map_err(|error| {
-            PyRuntimeError::new_err(format!("failed to build HTTP client: {error}"))
-        })?;
+    fn new(
+        py: Python<'_>,
+        api_url: String,
+        token: String,
+        owner: String,
+        repo: String,
+        client_version: &str,
+    ) -> PyResult<Self> {
+        let python = py.version_info();
+        let client_info = ClientInfo::new(CLIENT_NAME, client_version).with_runtime(
+            "python",
+            &format!("{}.{}.{}", python.major, python.minor, python.patch),
+        );
+        let client = Client::new(ApiConfig::new(api_url, token, owner, repo), &client_info)
+            .map_err(|error| {
+                PyRuntimeError::new_err(format!("failed to build HTTP client: {error}"))
+            })?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

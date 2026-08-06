@@ -6,7 +6,7 @@ use std::time::Duration;
 use reqwest::StatusCode;
 use reqwest::header::LINK;
 
-use crate::config::ApiConfig;
+use crate::config::{ApiConfig, ClientInfo};
 use crate::models::{FlakyDetectionContext, QuarantinePage, TestSelection};
 use crate::outcome::Outcome;
 use crate::trace::{self, AttrValue, MAX_GZIPPED_UPLOAD_BYTES, SpanData, UploadError};
@@ -47,9 +47,14 @@ pub struct Client {
 }
 
 impl Client {
-    /// Build a client for `config`.
-    pub fn new(config: ApiConfig) -> reqwest::Result<Self> {
-        let http = reqwest::Client::builder().timeout(REQUEST_TIMEOUT).build()?;
+    /// Build a client for `config`, announcing itself as `client_info`.
+    pub fn new(config: ApiConfig, client_info: &ClientInfo) -> reqwest::Result<Self> {
+        let http = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            // Every request — fetches and trace uploads alike — carries it, so
+            // the backend can count who runs which version of which client.
+            .user_agent(client_info.to_string())
+            .build()?;
         Ok(Self { config, http, retry: RetryPolicy::default() })
     }
 
@@ -337,6 +342,10 @@ mod tests {
         ApiConfig::new(uri, "tok", "o", "r")
     }
 
+    fn build_client(uri: &str) -> Client {
+        Client::new(config(uri), &ClientInfo::new("test-client", "1.2.3")).unwrap()
+    }
+
     fn span(id: u8) -> SpanData {
         SpanData {
             name: format!("test_{id}"),
@@ -365,6 +374,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn requests_carry_the_client_user_agent() {
+        let server = MockServer::start().await;
+        let info =
+            ClientInfo::new("pytest-mergify", "2026.8.5.3").with_runtime("python", "3.12.1");
+        // The mock only answers a request bearing the expected User-Agent, so a
+        // client built without one falls through to wiremock's 404 (dormant).
+        Mock::given(method("GET"))
+            .and(path("/v1/ci/o/repositories/r/flaky-detection-context"))
+            .and(header("user-agent", info.to_string().as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(flaky_body()))
+            .mount(&server)
+            .await;
+        let client = Client::new(config(&server.uri()), &info).unwrap();
+        assert!(client.fetch_flaky_context().await.into_ready().is_some());
+    }
+
+    #[tokio::test]
     async fn flaky_context_ready() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -372,7 +398,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(flaky_body()))
             .mount(&server)
             .await;
-        let client = Client::new(config(&server.uri())).unwrap();
+        let client = build_client(&server.uri());
         let ctx = client.fetch_flaky_context().await.into_ready().expect("ready");
         assert_eq!(ctx.existing_test_names, ["a"]);
         assert_eq!(ctx.max_test_execution_count, 10);
@@ -386,7 +412,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(404))
             .mount(&server)
             .await;
-        let client = Client::new(config(&server.uri())).unwrap();
+        let client = build_client(&server.uri());
         assert!(client.fetch_flaky_context().await.is_dormant());
     }
 
@@ -398,7 +424,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(402))
             .mount(&server)
             .await;
-        let client = Client::new(config(&server.uri())).unwrap();
+        let client = build_client(&server.uri());
         // Unlike quarantine/test-selection, a 402 is surfaced here, not dormant.
         let outcome = client.fetch_flaky_context().await;
         assert_eq!(outcome.failure(), Some("Mergify API returned HTTP 402"));
@@ -412,7 +438,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(500))
             .mount(&server)
             .await;
-        let client = Client::new(config(&server.uri())).unwrap();
+        let client = build_client(&server.uri());
         let outcome = client.fetch_flaky_context().await;
         assert_eq!(outcome.failure(), Some("Mergify API returned HTTP 500"));
     }
@@ -439,7 +465,7 @@ mod tests {
             ))
             .mount(&server)
             .await;
-        let client = Client::new(config(&server.uri())).unwrap();
+        let client = build_client(&server.uri());
         let names = client.fetch_quarantine("main").await.into_ready().expect("ready");
         assert_eq!(names, ["a", "b"]);
     }
@@ -452,7 +478,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(402))
             .mount(&server)
             .await;
-        let client = Client::new(config(&server.uri())).unwrap();
+        let client = build_client(&server.uri());
         assert!(client.fetch_quarantine("main").await.is_dormant());
     }
 
@@ -483,7 +509,7 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let client = Client::new(config(&server.uri())).unwrap();
+        let client = build_client(&server.uri());
         let selection = client
             .fetch_test_selection("queue/main", "cafe", "CI", "unit")
             .await
@@ -504,7 +530,7 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let client = Client::new(config(&server.uri())).unwrap();
+        let client = build_client(&server.uri());
         // A subset with no `tests` list is a protocol break: surfaced, not run
         // as a silent full suite.
         let outcome = client.fetch_test_selection("queue/main", "cafe", "CI", "unit").await;
@@ -523,7 +549,7 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let client = Client::new(config(&server.uri())).unwrap();
+        let client = build_client(&server.uri());
         // A *present* empty list is legitimate (subset matched nothing), left
         // for the caller to normalise — not a contract error.
         let selection = client
@@ -542,7 +568,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(404))
             .mount(&server)
             .await;
-        let client = Client::new(config(&server.uri())).unwrap();
+        let client = build_client(&server.uri());
         assert!(
             client
                 .fetch_test_selection("main", "cafe", "CI", "unit")
@@ -562,7 +588,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200))
             .mount(&server)
             .await;
-        let client = Client::new(config(&server.uri())).unwrap();
+        let client = build_client(&server.uri());
         client
             .upload_trace(&[("test.run.id".to_owned(), "x".into())], &[span(1)])
             .await
@@ -572,7 +598,7 @@ mod tests {
     #[tokio::test]
     async fn upload_empty_is_a_noop() {
         // No server: an empty span list must never touch the network.
-        let client = Client::new(config("http://127.0.0.1:1")).unwrap();
+        let client = build_client("http://127.0.0.1:1");
         client.upload_trace(&[], &[]).await.unwrap();
     }
 
@@ -584,7 +610,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200))
             .mount(&server)
             .await;
-        let client = Client::new(config(&server.uri())).unwrap();
+        let client = build_client(&server.uri());
         let spans = vec![span(1), span(2), span(3)];
         // A 1-byte cap forces splitting down to one span per upload.
         client.upload_with_cap(&[], &spans, 1).await.unwrap();
@@ -599,7 +625,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(400).set_body_string("nope"))
             .mount(&server)
             .await;
-        let client = Client::new(config(&server.uri())).unwrap();
+        let client = build_client(&server.uri());
         let error = client.upload_trace(&[], &[span(1)]).await.unwrap_err();
         assert_eq!(error.status, Some(400));
         assert!(error.message.contains("nope"));
@@ -623,7 +649,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200))
             .mount(&server)
             .await;
-        let mut client = Client::new(config(&server.uri())).unwrap();
+        let mut client = build_client(&server.uri());
         // Keep the backoff imperceptible so the test doesn't sleep for seconds.
         client.retry.base_delay = Duration::from_millis(1);
         client.upload_trace(&[], &[span(1)]).await.unwrap();
@@ -638,7 +664,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(503))
             .mount(&server)
             .await;
-        let mut client = Client::new(config(&server.uri())).unwrap();
+        let mut client = build_client(&server.uri());
         client.retry.base_delay = Duration::from_millis(1);
         let error = client.upload_trace(&[], &[span(1)]).await.unwrap_err();
         assert_eq!(error.status, Some(503));
@@ -673,7 +699,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let client = Client::new(config(&server.uri())).unwrap();
+        let client = build_client(&server.uri());
         // A cycle is surfaced as a failure, not a silent partial list.
         let outcome = client.fetch_quarantine("main").await;
         assert!(outcome.failure().is_some());

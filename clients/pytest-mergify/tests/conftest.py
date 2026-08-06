@@ -62,7 +62,14 @@ def install_fake_api_client(
     """
 
     class _FakeApiClient:
-        def __init__(self, api_url: str, token: str, owner: str, repo: str) -> None:
+        def __init__(
+            self,
+            api_url: str,
+            token: str,
+            owner: str,
+            repo: str,
+            client_version: str,
+        ) -> None:
             pass
 
         def fetch_quarantine(self, branch: str) -> typing.Optional[typing.List[str]]:

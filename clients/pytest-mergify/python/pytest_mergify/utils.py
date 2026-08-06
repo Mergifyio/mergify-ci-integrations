@@ -1,5 +1,6 @@
 import dataclasses
 import datetime
+import importlib.metadata
 import json
 import os
 import typing
@@ -59,6 +60,22 @@ def is_env_enabled(env: str) -> bool:
 
 def is_in_ci() -> bool:
     return is_env_enabled("CI") or is_env_true("PYTEST_MERGIFY_ENABLE")
+
+
+def get_version() -> str:
+    """The installed plugin version, reported in the API `User-Agent`.
+
+    Read from the installed distribution rather than a constant: the version is
+    stamped into the wheel at release time, so this is the one place that knows
+    it.
+    """
+    try:
+        return importlib.metadata.version("pytest-mergify")
+    except importlib.metadata.PackageNotFoundError:
+        # Only reachable from a source tree that was never installed -- a wheel
+        # always registers its distribution. Report it instead of raising: the
+        # plugin never fails a test run over its own telemetry.
+        return "unknown"
 
 
 class InvalidRepositoryFullNameError(Exception):

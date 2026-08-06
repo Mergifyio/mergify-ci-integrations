@@ -133,7 +133,7 @@ class MergifyCIInsights:
                 pass
             else:
                 self.api_client = _mergify_ci.CiApiClient(
-                    self.api_url, self.token, owner, repo
+                    self.api_url, self.token, owner, repo, utils.get_version()
                 )
 
         self._load_flaky_detector(
