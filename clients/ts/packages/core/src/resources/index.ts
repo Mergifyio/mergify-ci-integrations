@@ -1,11 +1,17 @@
-import type { Attributes } from '@opentelemetry/api';
-import { type Resource, resourceFromAttributes } from '@opentelemetry/resources';
 import { detectNativeAttributes } from '../native.js';
+import type { SpanAttributes } from '../types.js';
 
-export function detectResources(frameworkAttributes: Attributes, testRunId: string): Resource {
-  return resourceFromAttributes({
-    ...detectNativeAttributes(),
+/**
+ * The run's OTLP resource attributes: what the Rust core detected about the CI
+ * environment, the framework's own identity, and this run's id.
+ */
+export function detectResources(
+  frameworkAttributes: SpanAttributes,
+  testRunId: string
+): SpanAttributes {
+  return {
+    ...(detectNativeAttributes() as SpanAttributes),
     ...frameworkAttributes,
     'test.run.id': testRunId,
-  });
+  };
 }

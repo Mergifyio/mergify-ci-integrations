@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import { InMemorySpanExporter } from '@opentelemetry/sdk-trace-base';
+import { InMemorySpanSink } from '@mergifyio/ci-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { startVitest } from 'vitest/node';
 import { MergifyReporter } from '../src/reporter.js';
@@ -8,11 +8,11 @@ const fixturesDir = resolve(import.meta.dirname, 'fixtures');
 
 function createReporterWithExporter(): {
   reporter: MergifyReporter;
-  exporter: InMemorySpanExporter;
+  sink: InMemorySpanSink;
 } {
-  const exporter = new InMemorySpanExporter();
-  const reporter = new MergifyReporter({ exporter });
-  return { reporter, exporter };
+  const sink = new InMemorySpanSink();
+  const reporter = new MergifyReporter({ sink });
+  return { reporter, sink };
 }
 
 async function runFixture(fixture: string, reporter: MergifyReporter): Promise<void> {
@@ -36,10 +36,10 @@ describe('OTel integration', () => {
   });
 
   it('creates session and test case spans for passing test', async () => {
-    const { reporter, exporter } = createReporterWithExporter();
+    const { reporter, sink } = createReporterWithExporter();
     await runFixture('passing.test.ts', reporter);
 
-    const spans = exporter.getFinishedSpans();
+    const spans = sink.getFinishedSpans();
     expect(spans).toHaveLength(2);
 
     const sessionSpan = spans.find((s) => s.attributes['test.scope'] === 'session');
@@ -55,14 +55,14 @@ describe('OTel integration', () => {
     expect(testSpan!.attributes['code.filepath']).toContain('passing.test.ts');
 
     // Test span should be child of session span
-    expect(testSpan!.parentSpanContext?.spanId).toBe(sessionSpan!.spanContext().spanId);
+    expect(testSpan!.parentSpanId).toBe(sessionSpan!.spanId);
   });
 
   it('sets exception attributes on failed test span', async () => {
-    const { reporter, exporter } = createReporterWithExporter();
+    const { reporter, sink } = createReporterWithExporter();
     await runFixture('failing.test.ts', reporter);
 
-    const spans = exporter.getFinishedSpans();
+    const spans = sink.getFinishedSpans();
     const testSpan = spans.find((s) => s.attributes['test.scope'] === 'case');
 
     expect(testSpan).toBeDefined();
@@ -73,10 +73,10 @@ describe('OTel integration', () => {
   });
 
   it('sets skipped status on skipped test span', async () => {
-    const { reporter, exporter } = createReporterWithExporter();
+    const { reporter, sink } = createReporterWithExporter();
     await runFixture('skipped.test.ts', reporter);
 
-    const spans = exporter.getFinishedSpans();
+    const spans = sink.getFinishedSpans();
     const testSpan = spans.find((s) => s.attributes['test.scope'] === 'case');
 
     expect(testSpan).toBeDefined();
@@ -84,27 +84,26 @@ describe('OTel integration', () => {
   });
 
   it('includes resource attributes', async () => {
-    const { reporter, exporter } = createReporterWithExporter();
+    const { reporter, sink } = createReporterWithExporter();
     await runFixture('passing.test.ts', reporter);
 
-    const spans = exporter.getFinishedSpans();
+    const spans = sink.getFinishedSpans();
     expect(spans.length).toBeGreaterThan(0);
 
-    const span = spans[0];
-    const resource = span.resource;
+    const resource = spans[0].resourceAttributes;
 
-    expect(resource.attributes['test.framework']).toBe('vitest');
-    expect(resource.attributes['test.framework.version']).toBeTruthy();
-    expect(resource.attributes['test.run.id']).toMatch(/^[0-9a-f]{16}$/);
-    expect(resource.attributes['cicd.provider.name']).toBe('github_actions');
-    expect(resource.attributes['vcs.repository.name']).toBe('test-owner/test-repo');
+    expect(resource['test.framework']).toBe('vitest');
+    expect(resource['test.framework.version']).toBeTruthy();
+    expect(resource['test.run.id']).toMatch(/^[0-9a-f]{16}$/);
+    expect(resource['cicd.provider.name']).toBe('github_actions');
+    expect(resource['vcs.repository.name']).toBe('test-owner/test-repo');
   });
 
   it('creates correct spans for mixed results', async () => {
-    const { reporter, exporter } = createReporterWithExporter();
+    const { reporter, sink } = createReporterWithExporter();
     await runFixture('mixed.test.ts', reporter);
 
-    const spans = exporter.getFinishedSpans();
+    const spans = sink.getFinishedSpans();
     expect(spans).toHaveLength(4);
 
     const testSpans = spans.filter((s) => s.attributes['test.scope'] === 'case');

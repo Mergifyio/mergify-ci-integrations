@@ -54,7 +54,7 @@ export async function runGlobalSetup(config: FullConfig, deps: RunGlobalSetupDep
   // `vcs.ref.base.name` (PR base) over `vcs.ref.head.name` (push branch / PR
   // head); flaky-detection mode is derived from the same split — a non-empty
   // base ref means PR-like context → "new" mode, otherwise "unhealthy".
-  const attrs = detectResources({}, testRunId).attributes;
+  const attrs = detectResources({}, testRunId);
   const branch = resolveBranchFromAttributes(attrs);
   const baseRefAttr = attrs['vcs.ref.base.name'];
   const isPullRequest = typeof baseRefAttr === 'string' && baseRefAttr.length > 0;

@@ -2,13 +2,14 @@ import type {
   FlakyDetectionContext,
   FlakyDetectionMode,
   MergifyApiClient,
+  SpanSink,
 } from '@mergifyio/ci-core';
-import type { SpanExporter } from '@opentelemetry/sdk-trace-base';
 
 export interface MergifyReporterOptions {
   apiUrl?: string;
   token?: string;
-  exporter?: SpanExporter;
+  /** Injected span sink — bypasses CI and token checks (for testing). */
+  sink?: SpanSink;
   /** Injected backend client — bypasses the bundled native one (for testing). */
   apiClient?: MergifyApiClient;
   quarantineList?: string[];

@@ -1,17 +1,99 @@
-import type { Attributes, Tracer } from '@opentelemetry/api';
-import type { Resource } from '@opentelemetry/resources';
-import {
-  BasicTracerProvider,
-  ConsoleSpanExporter,
-  type ReadableSpan,
-  SimpleSpanProcessor,
-  type SpanExporter,
-  type SpanProcessor,
-} from '@opentelemetry/sdk-trace-base';
+import type { Attribute, Span } from '@mergifyio/ci-native';
 import type { MergifyApiClient } from './api.js';
-import { NativeTraceExporter } from './native-exporter.js';
 import { detectResources } from './resources/index.js';
+import { newTraceId, parseTraceparent } from './trace-context.js';
+import type { SpanAttributes, SpanStatus } from './types.js';
 import { envToBool } from './utils.js';
+
+/** Where a run's finished spans go when the session ends. */
+export interface SpanSink {
+  export(resourceAttributes: Attribute[], spans: Span[]): Promise<void>;
+}
+
+/** Uploads through the bundled Rust client — the production sink. */
+export class ClientSpanSink implements SpanSink {
+  constructor(private client: MergifyApiClient) {}
+
+  export(resourceAttributes: Attribute[], spans: Span[]): Promise<void> {
+    return this.client.uploadTrace(resourceAttributes, spans);
+  }
+}
+
+/** `MERGIFY_CI_DEBUG`: dump the trace to stderr instead of uploading it. */
+export class ConsoleSpanSink implements SpanSink {
+  async export(resourceAttributes: Attribute[], spans: Span[]): Promise<void> {
+    // Serialized by hand because `JSON.stringify` throws on the bigint
+    // timestamps.
+    const resource = Object.fromEntries(resourceAttributes.map((a) => [a.key, a.value]));
+    process.stderr.write(`[mergify] resource ${JSON.stringify(resource)}\n`);
+    for (const span of spans) {
+      process.stderr.write(
+        `[mergify] span ${span.name} ${span.status} ${span.spanId}` +
+          ` parent=${span.parentSpanId ?? '-'}` +
+          ` ${JSON.stringify(Object.fromEntries(span.attributes.map((a) => [a.key, a.value])))}\n`
+      );
+    }
+  }
+}
+
+/**
+ * A finished span as captured for assertions: identical to the span handed to
+ * the binding, except attributes are keyed rather than a list, which is what
+ * the behavior suites actually read.
+ */
+export interface CapturedSpan {
+  name: string;
+  traceId: string;
+  spanId: string;
+  parentSpanId?: string;
+  startUnixNano: bigint;
+  endUnixNano: bigint;
+  attributes: SpanAttributes;
+  status: SpanStatus;
+  statusMessage?: string;
+  /** The run's resource attributes, repeated on each span for convenience. */
+  resourceAttributes: SpanAttributes;
+}
+
+/** Collects spans in memory instead of uploading them. For tests. */
+export class InMemorySpanSink implements SpanSink {
+  private spans: CapturedSpan[] = [];
+
+  async export(resourceAttributes: Attribute[], spans: Span[]): Promise<void> {
+    const resource = keyed(resourceAttributes);
+    for (const span of spans) {
+      this.spans.push({
+        name: span.name,
+        traceId: span.traceId,
+        spanId: span.spanId,
+        parentSpanId: span.parentSpanId ?? undefined,
+        startUnixNano: span.startUnixNano,
+        endUnixNano: span.endUnixNano,
+        attributes: keyed(span.attributes),
+        status: span.status as SpanStatus,
+        statusMessage: span.statusMessage ?? undefined,
+        resourceAttributes: resource,
+      });
+    }
+  }
+
+  getFinishedSpans(): CapturedSpan[] {
+    return this.spans;
+  }
+
+  reset(): void {
+    this.spans = [];
+  }
+}
+
+function keyed(attributes: Attribute[]): SpanAttributes {
+  return Object.fromEntries(attributes.map((a) => [a.key, a.value]));
+}
+
+/** The binding takes a list; the plugins build a record. */
+export function toAttributeList(attributes: SpanAttributes): Attribute[] {
+  return Object.entries(attributes).map(([key, value]) => ({ key, value }));
+}
 
 export interface TracingConfig {
   /**
@@ -21,94 +103,46 @@ export interface TracingConfig {
    */
   apiClient: MergifyApiClient | null;
   testRunId: string;
-  frameworkAttributes: Attributes;
-  tracerName: string;
-  /** Injected exporter — bypasses the client entirely. */
-  exporter?: SpanExporter;
+  frameworkAttributes: SpanAttributes;
+  /** Injected sink — bypasses the client entirely. */
+  sink?: SpanSink;
 }
 
 export interface TracingContext {
-  tracer: Tracer;
-  tracerProvider: BasicTracerProvider;
-  exporter: SpanExporter;
-  resource: Resource;
-  /** Whether the provider should be shut down on test run end. */
-  ownsExporter: boolean;
+  sink: SpanSink;
+  resourceAttributes: SpanAttributes;
+  /** Every span in a run belongs to one trace. */
+  traceId: string;
+  /** Parent from `MERGIFY_TRACEPARENT`, when the run is part of a wider trace. */
+  remoteParentSpanId?: string;
+  /** Spans finished so far, uploaded when the session span ends. */
+  finished: Span[];
 }
 
-export class SynchronousBatchSpanProcessor implements SpanProcessor {
-  private queue: ReadableSpan[] = [];
-
-  constructor(private exporter: SpanExporter) {}
-
-  onStart(): void {}
-
-  onEnd(span: ReadableSpan): void {
-    if (span.spanContext().traceFlags & 1) {
-      this.queue.push(span);
-    }
-  }
-
-  forceFlush(): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      this.exporter.export(this.queue, (result) => {
-        this.queue = [];
-        if (result.error) {
-          reject(result.error);
-        } else {
-          resolve();
-        }
-      });
-    });
-  }
-
-  shutdown(): Promise<void> {
-    return this.forceFlush().then(() => this.exporter.shutdown());
-  }
-}
-
-function createExporter(config: TracingConfig): SpanExporter | null {
+function defaultSink(config: TracingConfig): SpanSink | null {
   if (envToBool(process.env.MERGIFY_CI_DEBUG, false)) {
-    return new ConsoleSpanExporter();
+    return new ConsoleSpanSink();
   }
-
   if (!config.apiClient) {
     return null;
   }
-
-  return new NativeTraceExporter(config.apiClient);
+  return new ClientSpanSink(config.apiClient);
 }
 
 export function createTracing(config: TracingConfig): TracingContext | null {
-  let exporter: SpanExporter | null;
-  let ownsExporter: boolean;
+  const sink = config.sink ?? defaultSink(config);
+  if (!sink) return null;
 
-  if (config.exporter) {
-    // Injected exporter — skip CI and token checks
-    exporter = config.exporter;
-    ownsExporter = false;
-  } else {
-    exporter = createExporter(config);
-    ownsExporter = true;
-  }
+  // A `MERGIFY_TRACEPARENT` from the surrounding job makes this run a child of
+  // that trace; otherwise the session span roots a fresh one.
+  const traceparent = process.env.MERGIFY_TRACEPARENT;
+  const remote = traceparent ? parseTraceparent(traceparent) : null;
 
-  if (!exporter) return null;
-
-  const resource = detectResources(config.frameworkAttributes, config.testRunId);
-
-  // Use SimpleSpanProcessor for injected/debug exporters (exports on each span end)
-  // Use SynchronousBatchSpanProcessor for production (batches and exports on flush)
-  const useSimpleProcessor = config.exporter || envToBool(process.env.MERGIFY_CI_DEBUG, false);
-  const processor: SpanProcessor = useSimpleProcessor
-    ? new SimpleSpanProcessor(exporter)
-    : new SynchronousBatchSpanProcessor(exporter);
-
-  const tracerProvider = new BasicTracerProvider({
-    resource,
-    spanProcessors: [processor],
-  });
-
-  const tracer = tracerProvider.getTracer(config.tracerName);
-
-  return { tracer, tracerProvider, exporter, resource, ownsExporter };
+  return {
+    sink,
+    resourceAttributes: detectResources(config.frameworkAttributes, config.testRunId),
+    traceId: remote?.traceId ?? newTraceId(),
+    remoteParentSpanId: remote?.parentSpanId,
+    finished: [],
+  };
 }
