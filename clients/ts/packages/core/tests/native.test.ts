@@ -53,12 +53,12 @@ describe('native detection wiring', () => {
     process.env.GITHUB_RUN_ID = '42';
 
     const resource = detectResources({ 'test.framework': 'vitest' }, 'run-1');
-    expect(resource.attributes['cicd.provider.name']).toBe('github_actions');
-    expect(resource.attributes['vcs.repository.name']).toBe('Mergifyio/example');
+    expect(resource['cicd.provider.name']).toBe('github_actions');
+    expect(resource['vcs.repository.name']).toBe('Mergifyio/example');
     // Integer attributes stay integers across the JSON bridge.
-    expect(resource.attributes['cicd.pipeline.run.id']).toBe(42);
-    expect(resource.attributes['test.framework']).toBe('vitest');
-    expect(resource.attributes['test.run.id']).toBe('run-1');
+    expect(resource['cicd.pipeline.run.id']).toBe(42);
+    expect(resource['test.framework']).toBe('vitest');
+    expect(resource['test.run.id']).toBe('run-1');
   });
 
   it('surfaces provider and repository name through the helpers', () => {
@@ -71,8 +71,8 @@ describe('native detection wiring', () => {
 
   it('emits no provider-scoped attributes outside CI', () => {
     const resource = detectResources({}, 'run-2');
-    expect(resource.attributes['cicd.provider.name']).toBeUndefined();
-    expect(resource.attributes['test.run.id']).toBe('run-2');
+    expect(resource['cicd.provider.name']).toBeUndefined();
+    expect(resource['test.run.id']).toBe('run-2');
     expect(getCIProvider()).toBeNull();
   });
 });
