@@ -1,0 +1,40 @@
+{
+  "name": "@mergifyio/ci-native",
+  "version": "0.0.0",
+  "description": "Prebuilt native CI detection for Mergify CI test framework plugins",
+  "license": "Apache-2.0",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts"
+  ],
+  "napi": {
+    "binaryName": "ci-native",
+    "targets": [
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "aarch64-unknown-linux-musl",
+      "x86_64-unknown-linux-musl",
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.5.1"
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "test": "node --eval \"const n = require('./index.js'); const a = n.detectAttributes(); if (typeof a !== 'object') throw new Error('bad shape'); console.log('ci-native loads and detects');\""
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mergifyio/mergify-ci-integrations.git",
+    "directory": "clients/ts/packages/native"
+  },
+  "author": "Mergify <hello@mergify.com>"
+}
