@@ -3,11 +3,13 @@ import { fileURLToPath } from 'node:url';
 import type {
   FlakyDetectionContext,
   FlakyDetectionMode,
+  MergifyApiClient,
   TestCaseResult,
   TestRunSession,
   TracingContext,
 } from '@mergifyio/ci-core';
 import {
+  createApiClient,
   createTracing,
   emitTestCaseSpan,
   endSessionSpan,
@@ -25,6 +27,7 @@ import type { Reporter, TestCase, TestModule, Vitest } from 'vitest/node';
 import * as vitestResource from './resources/vitest.js';
 import type { MergifyReporterOptions } from './types.js';
 import { extractNamespace } from './utils.js';
+import { readPluginVersion } from './version.js';
 
 const DEFAULT_API_URL = 'https://api.mergify.com';
 
@@ -64,6 +67,22 @@ export class MergifyReporter implements Reporter {
     const enabled =
       isInCI() || envToBool(process.env.VITEST_MERGIFY_ENABLE, false) || !!this.options.exporter;
 
+    // One client for the whole run: quarantine and flaky detection go through
+    // it (the trace upload still has its own exporter). Null without a token, a
+    // detected repository, or a native binding for this platform — each of
+    // which means the backend features stay off.
+    const apiClient =
+      this.options.apiClient ??
+      (token && repoName
+        ? createApiClient({
+            apiUrl,
+            token,
+            repoName,
+            clientName: '@mergifyio/vitest',
+            clientVersion: readPluginVersion(),
+          })
+        : null);
+
     if (enabled) {
       this.tracing = createTracing({
         token,
@@ -94,10 +113,10 @@ export class MergifyReporter implements Reporter {
     if (this.options.quarantineList) {
       this.quarantineList = new Set(this.options.quarantineList);
       this._configureRunner(vitest);
-    } else if (this.tracing && token && repoName) {
+    } else if (this.tracing && apiClient) {
       const branch = resolveBranchFromAttributes(this.tracing.resource.attributes);
       if (branch) {
-        this._initQuarantine(vitest, { apiUrl, token, repoName, branch });
+        this._initQuarantine(vitest, apiClient, branch);
       }
     }
 
@@ -106,7 +125,7 @@ export class MergifyReporter implements Reporter {
       this.flakyContext = this.options.flakyContext;
       this.flakyMode = this.options.flakyMode;
       this._configureFlakyDetection(vitest);
-    } else if (this.tracing && token && repoName) {
+    } else if (this.tracing && apiClient) {
       // Flaky detection is server-driven: always request the context and let
       // the server opt the repository in (200) or out (404). The mode mirrors
       // the pytest/rspec clients — a PR base ref means "new", otherwise
@@ -115,18 +134,15 @@ export class MergifyReporter implements Reporter {
       const mode: FlakyDetectionMode =
         typeof baseRef === 'string' && baseRef.length > 0 ? 'new' : 'unhealthy';
       this.flakyMode = mode;
-      this._initFlakyDetection(vitest, { apiUrl, token, repoName, mode });
+      this._initFlakyDetection(vitest, apiClient, mode);
     }
   }
 
-  private _initQuarantine(
-    vitest: Vitest,
-    config: { apiUrl: string; token: string; repoName: string; branch: string }
-  ): void {
+  private _initQuarantine(vitest: Vitest, client: MergifyApiClient, branch: string): void {
     // Fetch is async but onInit is sync — we use a top-level await workaround
     // by storing the promise and resolving it in onTestRunStart
     const log = (msg: string) => vitest.logger.log(`[@mergifyio/vitest] ${msg}`);
-    this._quarantinePromise = fetchQuarantineList(config, log).then((list) => {
+    this._quarantinePromise = fetchQuarantineList(client, branch, log).then((list) => {
       this.quarantineList = list;
       if (list.size > 0) {
         this._configureRunner(vitest);
@@ -136,10 +152,11 @@ export class MergifyReporter implements Reporter {
 
   private _initFlakyDetection(
     vitest: Vitest,
-    config: { apiUrl: string; token: string; repoName: string; mode: FlakyDetectionMode }
+    client: MergifyApiClient,
+    mode: FlakyDetectionMode
   ): void {
     const log = (msg: string) => vitest.logger.log(`[@mergifyio/vitest] ${msg}`);
-    this._flakyPromise = fetchFlakyDetectionContext(config, log).then((ctx) => {
+    this._flakyPromise = fetchFlakyDetectionContext(client, mode, log).then((ctx) => {
       if (ctx) {
         this.flakyContext = ctx;
         this._configureFlakyDetection(vitest);
