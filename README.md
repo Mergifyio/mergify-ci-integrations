@@ -13,7 +13,8 @@ clients/
                        built as a maturin mixed project
   ts/                  TypeScript workspace (pnpm): the @mergifyio/vitest and
                        @mergifyio/playwright reporters over a shared
-                       @mergifyio/ci-core -- pure TypeScript, no binding yet
+                       @mergifyio/ci-core; CI detection via @mergifyio/ci-native,
+                       a napi binding over the core (prebuilt per platform)
 ```
 
 ## Core
@@ -31,11 +32,15 @@ dependency; there is no separate binding artifact. `pytest-mergify` compiles
 the PyO3 binding into its wheel as `pytest_mergify._mergify_ci`, so users
 `pip install pytest-mergify` with no Rust toolchain.
 
-The TypeScript workspace under `clients/ts/` was imported from
+The TypeScript workspace under `clients/ts/` (imported from
 [mergify-ci-plugins-ts](https://github.com/Mergifyio/mergify-ci-plugins-ts)
-with its git history and does not consume the core yet. Its three npm packages
-release from this repo via `ts-v<SemVer>` tags (fixed version across the
-workspace, two-step draft-then-publish like pytest-mergify).
+with its git history) is the exception to the bundled model: npm natives ship
+as per-platform packages, so `@mergifyio/ci-native` wraps the core behind napi
+and `@mergifyio/ci-core` consumes it for CI detection, fail-open — platforms
+without a prebuilt binary detect nothing rather than breaking the run. The
+API client is still TypeScript (MRGFY-8439). The packages release from this
+repo via `ts-v<SemVer>` tags (fixed version across the workspace, two-step
+draft-then-publish like pytest-mergify).
 
 ## Develop
 
