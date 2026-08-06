@@ -50,15 +50,6 @@ export function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** Split an "owner/repo" string into parts. */
-export function splitRepoName(fullName: string): { owner: string; repo: string } {
-  const parts = fullName.split('/');
-  if (parts.length !== 2 || !parts[0] || !parts[1]) {
-    throw new Error(`Invalid repository name: ${fullName}`);
-  }
-  return { owner: parts[0], repo: parts[1] };
-}
-
 /**
  * Resolve the API-endpoint repository name ("owner/repo") via the bundled
  * Rust core: the active provider's environment first, the git remote as

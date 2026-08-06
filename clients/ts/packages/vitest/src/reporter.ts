@@ -104,11 +104,10 @@ export class MergifyReporter implements Reporter {
     const enabled =
       isInCI() || envToBool(process.env.VITEST_MERGIFY_ENABLE, false) || !!this.options.exporter;
 
-    // One client for the whole run: quarantine, flaky detection and test
-    // selection all go through it (the trace upload still has its own
-    // exporter). Null without a token, a detected repository, or a native
-    // binding for this platform — each of which means the backend features stay
-    // off.
+    // One client for the whole run: quarantine, flaky detection, test selection
+    // and the trace upload all go through it. Null without a token, a detected
+    // repository, or a native binding for this platform — each of which means
+    // the backend features stay off.
     const apiClient =
       this.options.apiClient ??
       (token && repoName
@@ -123,9 +122,7 @@ export class MergifyReporter implements Reporter {
 
     if (enabled) {
       this.tracing = createTracing({
-        token,
-        repoName,
-        apiUrl,
+        apiClient,
         testRunId,
         frameworkAttributes: vitestResource.detect(vitest.version),
         tracerName: '@mergifyio/vitest',
