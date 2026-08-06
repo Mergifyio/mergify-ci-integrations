@@ -19,12 +19,24 @@ name: Release ts clients
 # Step 2 -- publish (`release: published`):
 #   The maintainer reviews the draft and publishes it; that fires this stage,
 #   which rebuilds everything from the now-created tag and publishes to npm
-#   with provenance via Trusted Publishing (OIDC, no token). NOTE: every
-#   published package needs its npmjs.com trusted-publisher settings pointed
-#   at this repo + workflow first -- the three pre-existing packages must be
-#   repointed away from mergify-ci-plugins-ts, and the six new ones
-#   (@mergifyio/ci-native + the five platform packages) need it configured on
-#   their first publish.
+#   with provenance via Trusted Publishing (OIDC). Every published package
+#   needs its npmjs.com trusted-publisher settings pointed at this repo +
+#   workflow: the three pre-existing packages (@mergifyio/ci-core, /vitest,
+#   /playwright) were repointed away from mergify-ci-plugins-ts.
+#
+#   The eight remaining packages -- @mergifyio/ci-native and its seven
+#   platform packages -- cannot be: npm only exposes trusted-publisher
+#   settings on a package that already exists, so their FIRST publish has no
+#   OIDC identity to authenticate with (npm/cli#8544; PyPI's pending
+#   publishers have no npm equivalent). NPM_TOKEN bridges exactly that gap --
+#   the CLI tries OIDC first and falls back to the token per package, so the
+#   repointed three still publish through trusted publishing. Provenance is
+#   unaffected: it comes from `--provenance` + `id-token: write`, which
+#   predate trusted publishing and work under token auth too.
+#
+#   Once that release lands, configure trusted publishers on the eight
+#   now-existing packages, then drop NPM_TOKEN from the `release`
+#   environment and delete the env block below.
 on:
   workflow_dispatch:
     inputs:
@@ -227,6 +239,11 @@ jobs:
           '
       - run: pnpm -r run build
       - name: Publish to npm
+        # Temporary: only the eight packages that don't exist on npm yet need
+        # this -- see the first-publish note at the top of the file. Remove it
+        # (and the secret) once they carry trusted publishers of their own.
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           # Platform packages first, so the loader's optionalDependencies
           # never point at not-yet-published versions.
