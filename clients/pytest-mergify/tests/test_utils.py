@@ -1,6 +1,8 @@
+import importlib.metadata
+
 import pytest
 
-from pytest_mergify.utils import is_in_ci
+from pytest_mergify.utils import get_version, is_in_ci
 
 
 @pytest.mark.parametrize(
@@ -31,3 +33,20 @@ def test_is_in_ci_accepts_any_value(
     monkeypatch.delenv("PYTEST_MERGIFY_ENABLE", raising=False)
 
     assert is_in_ci() is expected
+
+
+def test_get_version_reads_the_installed_distribution() -> None:
+    assert get_version() == importlib.metadata.version("pytest-mergify")
+
+
+def test_get_version_falls_back_when_not_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def not_installed(name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", not_installed)
+
+    # The User-Agent is telemetry: a plugin running from an uninstalled source
+    # tree reports an unknown version rather than breaking the session.
+    assert get_version() == "unknown"

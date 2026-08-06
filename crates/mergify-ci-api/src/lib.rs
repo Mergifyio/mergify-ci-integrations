@@ -10,7 +10,8 @@
 //! So far:
 //!
 //! - [`ApiConfig`]: the typed request configuration (base URL, token, and the
-//!   `owner`/`repo` path segments).
+//!   `owner`/`repo` path segments), and [`ClientInfo`], the calling
+//!   integration's identity, sent as the `User-Agent`.
 //! - [`models`]: the response wire types ([`QuarantinePage`],
 //!   [`FlakyDetectionContext`]).
 //! - [`Outcome`]: the tri-state every backend fetch resolves to.
@@ -35,7 +36,7 @@ mod trace;
 
 pub use budget::{BudgetPlan, Mode};
 pub use client::Client;
-pub use config::{ApiConfig, DEFAULT_API_URL, split_full_name};
+pub use config::{ApiConfig, ClientInfo, DEFAULT_API_URL, split_full_name};
 pub use models::{FlakyDetectionContext, QuarantinePage, QuarantinedTest, TestSelection};
 pub use outcome::Outcome;
 pub use trace::{AttrValue, MAX_GZIPPED_UPLOAD_BYTES, SpanData, SpanStatus, UploadError};
