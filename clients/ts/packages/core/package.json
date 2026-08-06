@@ -26,11 +26,7 @@
     "node": ">=22.0.0"
   },
   "dependencies": {
-    "@mergifyio/ci-native": "workspace:*",
-    "@opentelemetry/api": "^1.9.0",
-    "@opentelemetry/core": "^2.10.0",
-    "@opentelemetry/resources": "^2.10.0",
-    "@opentelemetry/sdk-trace-base": "^2.10.0"
+    "@mergifyio/ci-native": "workspace:*"
   },
   "devDependencies": {
     "vitest": "^4.1.10"

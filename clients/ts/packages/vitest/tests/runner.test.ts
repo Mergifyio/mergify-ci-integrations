@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import { InMemorySpanExporter } from '@opentelemetry/sdk-trace-base';
+import { InMemorySpanSink } from '@mergifyio/ci-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { startVitest } from 'vitest/node';
 import { MergifyReporter } from '../src/reporter.js';
@@ -17,9 +17,9 @@ describe('Quarantine runner', () => {
   });
 
   it('quarantined failing test does not fail the run', async () => {
-    const exporter = new InMemorySpanExporter();
+    const sink = new InMemorySpanSink();
     const reporter = new MergifyReporter({
-      exporter,
+      sink,
       // Quarantine the intentionally failing test
       quarantineList: ['failing.test.ts > math > fails intentionally'],
     });
@@ -39,9 +39,9 @@ describe('Quarantine runner', () => {
   });
 
   it('sets cicd.test.quarantined span attribute on quarantined tests', async () => {
-    const exporter = new InMemorySpanExporter();
+    const sink = new InMemorySpanSink();
     const reporter = new MergifyReporter({
-      exporter,
+      sink,
       quarantineList: ['failing.test.ts > math > fails intentionally'],
     });
 
@@ -53,7 +53,7 @@ describe('Quarantine runner', () => {
     });
     await vitest?.close();
 
-    const spans = exporter.getFinishedSpans();
+    const spans = sink.getFinishedSpans();
     const testSpan = spans.find((s) => s.attributes['test.scope'] === 'case');
 
     expect(testSpan).toBeDefined();
@@ -61,9 +61,9 @@ describe('Quarantine runner', () => {
   });
 
   it('non-quarantined failing test still fails the run', async () => {
-    const exporter = new InMemorySpanExporter();
+    const sink = new InMemorySpanSink();
     const reporter = new MergifyReporter({
-      exporter,
+      sink,
       quarantineList: ['some > other test'],
     });
 
@@ -80,9 +80,9 @@ describe('Quarantine runner', () => {
   });
 
   it('mixed: quarantined failure + passing test = passing run', async () => {
-    const exporter = new InMemorySpanExporter();
+    const sink = new InMemorySpanSink();
     const reporter = new MergifyReporter({
-      exporter,
+      sink,
       quarantineList: ['mixed.test.ts > outer > inner > fails'],
     });
 
@@ -98,7 +98,7 @@ describe('Quarantine runner', () => {
     // The only failure is quarantined, so the run should pass
     expect(session!.status).toBe('passed');
 
-    const spans = exporter.getFinishedSpans();
+    const spans = sink.getFinishedSpans();
     const quarantinedSpan = spans.find((s) => s.attributes['cicd.test.quarantined'] === true);
     expect(quarantinedSpan).toBeDefined();
   });
