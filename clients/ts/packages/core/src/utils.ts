@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
-import type { Attributes } from '@opentelemetry/api';
 import { detectNativeProvider, detectNativeRepositoryName } from './native.js';
+import type { SpanAttributes } from './types.js';
 
 export type CIProvider = 'github_actions' | 'jenkins' | 'circleci' | 'buildkite';
 
@@ -64,7 +64,7 @@ export function getRepoName(): string | undefined {
  * resource attributes: `vcs.ref.base.name` (PR target) preferred, then
  * `vcs.ref.head.name` (push branch / PR head). Empty strings fall through.
  */
-export function resolveBranchFromAttributes(attrs: Attributes): string | undefined {
+export function resolveBranchFromAttributes(attrs: SpanAttributes): string | undefined {
   const base = attrs['vcs.ref.base.name'];
   if (typeof base === 'string' && base.length > 0) return base;
   const head = attrs['vcs.ref.head.name'];

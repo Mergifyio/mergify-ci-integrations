@@ -15,12 +15,12 @@ import {
   generateTestRunId,
   getRepoName,
   isInCI,
+  type SessionSpan,
   startSessionSpan,
   type TestCaseResult,
   type TestRunSession,
   type TracingContext,
 } from '@mergifyio/ci-core';
-import type { Span } from '@opentelemetry/api';
 import type {
   FullConfig,
   FullResult,
@@ -55,7 +55,7 @@ export class MergifyReporter implements Reporter {
   private includeProject: boolean;
   private session: TestRunSession | undefined;
   private tracing: TracingContext | null = null;
-  private sessionSpan: Span | undefined;
+  private sessionSpan: SessionSpan | undefined;
   private config: FullConfig | undefined;
   private quarantineFetchedCount = 0;
   private quarantineFetchedNames: string[] = [];
@@ -120,9 +120,7 @@ export class MergifyReporter implements Reporter {
     const repoName = getRepoName();
 
     const enabled =
-      isInCI() ||
-      envToBool(process.env.PLAYWRIGHT_MERGIFY_ENABLE, false) ||
-      !!this.options.exporter;
+      isInCI() || envToBool(process.env.PLAYWRIGHT_MERGIFY_ENABLE, false) || !!this.options.sink;
 
     // The reporter only uploads: quarantine and the flaky context were already
     // fetched in globalSetup and reach it through the state file.
@@ -143,8 +141,7 @@ export class MergifyReporter implements Reporter {
         apiClient,
         testRunId,
         frameworkAttributes: playwrightResource.detect(),
-        tracerName: '@mergifyio/playwright',
-        exporter: this.options.exporter,
+        sink: this.options.sink,
       });
     }
 
@@ -310,7 +307,7 @@ export class MergifyReporter implements Reporter {
     if (this.flakyDetector) {
       this.buffered.push({ result: testCaseResult, key });
     } else if (this.tracing && this.sessionSpan) {
-      emitTestCaseSpan(this.tracing.tracer, this.sessionSpan, testCaseResult);
+      emitTestCaseSpan(this.tracing, this.sessionSpan, testCaseResult);
     }
   }
 
@@ -383,7 +380,7 @@ export class MergifyReporter implements Reporter {
     // Emit all buffered spans now.
     if (this.tracing && this.sessionSpan) {
       for (const { result: tcr } of this.buffered) {
-        emitTestCaseSpan(this.tracing.tracer, this.sessionSpan, tcr);
+        emitTestCaseSpan(this.tracing, this.sessionSpan, tcr);
       }
     }
 
@@ -580,8 +577,8 @@ export class MergifyReporter implements Reporter {
     return this.flakyDetector ? [...this.flakyDetector.getCandidates()] : undefined;
   }
 
-  getExporter() {
-    return this.tracing?.exporter;
+  getSink() {
+    return this.tracing?.sink;
   }
 }
 

@@ -1,5 +1,5 @@
 import { createRequire } from 'node:module';
-import type { Attributes } from '@opentelemetry/api';
+import type { SpanAttributes } from '@mergifyio/ci-core';
 
 function readPlaywrightVersion(): string {
   try {
@@ -11,7 +11,7 @@ function readPlaywrightVersion(): string {
   }
 }
 
-export function detect(): Attributes {
+export function detect(): SpanAttributes {
   return {
     'test.framework': 'playwright',
     'test.framework.version': readPlaywrightVersion(),
