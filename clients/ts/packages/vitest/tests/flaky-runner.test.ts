@@ -1,6 +1,5 @@
 import { resolve } from 'node:path';
-import type { FlakyDetectionContext } from '@mergifyio/ci-core';
-import { InMemorySpanExporter } from '@opentelemetry/sdk-trace-base';
+import { type FlakyDetectionContext, InMemorySpanSink } from '@mergifyio/ci-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { startVitest } from 'vitest/node';
 import { MergifyReporter } from '../src/reporter.js';
@@ -30,9 +29,9 @@ describe('Flaky detection runner', () => {
   });
 
   it('reruns candidate test and detects flakiness', async () => {
-    const exporter = new InMemorySpanExporter();
+    const sink = new InMemorySpanSink();
     const reporter = new MergifyReporter({
-      exporter,
+      sink,
       flakyContext,
       flakyMode: 'new',
     });
@@ -49,7 +48,7 @@ describe('Flaky detection runner', () => {
     expect(session).toBeDefined();
 
     // Check spans for flaky detection attributes
-    const spans = exporter.getFinishedSpans();
+    const spans = sink.getFinishedSpans();
     const testSpan = spans.find((s) => s.attributes['test.scope'] === 'case');
 
     expect(testSpan).toBeDefined();
@@ -59,7 +58,7 @@ describe('Flaky detection runner', () => {
   });
 
   it('does not rerun tests that are not candidates', async () => {
-    const exporter = new InMemorySpanExporter();
+    const sink = new InMemorySpanSink();
     // All tests are "existing" so none are candidates in "new" mode. The names
     // are the ones the reporter uploads — the server has never seen any other
     // shape, so a name carrying the file path would not match here either.
@@ -68,7 +67,7 @@ describe('Flaky detection runner', () => {
       existing_test_names: ['math > adds numbers'],
     };
     const reporter = new MergifyReporter({
-      exporter,
+      sink,
       flakyContext: ctx,
       flakyMode: 'new',
     });
@@ -81,7 +80,7 @@ describe('Flaky detection runner', () => {
     });
     await vitest?.close();
 
-    const spans = exporter.getFinishedSpans();
+    const spans = sink.getFinishedSpans();
     const testSpan = spans.find((s) => s.attributes['test.scope'] === 'case');
 
     expect(testSpan).toBeDefined();

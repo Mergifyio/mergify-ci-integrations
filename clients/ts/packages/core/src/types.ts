@@ -1,3 +1,8 @@
+/** What an OTLP attribute can hold, of the types these plugins emit. */
+export type SpanAttributeValue = string | number | boolean;
+export type SpanAttributes = Record<string, SpanAttributeValue>;
+export type SpanStatus = 'unset' | 'ok' | 'error';
+
 export interface TestCaseError {
   type: string;
   message: string;

@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { InMemorySpanExporter } from '@opentelemetry/sdk-trace-base';
+import { InMemorySpanSink } from '@mergifyio/ci-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { startVitest } from 'vitest/node';
 import { isTestSelectionOptedIn, MergifyReporter } from '../src/reporter.js';
@@ -19,9 +19,9 @@ let markerFile: string;
 async function runSelection(options: {
   testSelection?: string[];
   testNamePattern?: string;
-}): Promise<{ reporter: MergifyReporter; exporter: InMemorySpanExporter; executed: string[] }> {
-  const exporter = new InMemorySpanExporter();
-  const reporter = new MergifyReporter({ exporter, testSelection: options.testSelection });
+}): Promise<{ reporter: MergifyReporter; sink: InMemorySpanSink; executed: string[] }> {
+  const sink = new InMemorySpanSink();
+  const reporter = new MergifyReporter({ sink, testSelection: options.testSelection });
 
   const vitest = await startVitest('test', [], {
     root: fixturesDir,
@@ -35,11 +35,11 @@ async function runSelection(options: {
   const executed = existsSync(markerFile)
     ? readFileSync(markerFile, 'utf8').split('\n').filter(Boolean).sort()
     : [];
-  return { reporter, exporter, executed };
+  return { reporter, sink, executed };
 }
 
-function uploadedNames(exporter: InMemorySpanExporter): string[] {
-  return exporter
+function uploadedNames(sink: InMemorySpanSink): string[] {
+  return sink
     .getFinishedSpans()
     .map((span) => span.name)
     .filter((name) => name !== 'vitest session start')
@@ -72,10 +72,10 @@ describe('test selection', () => {
   });
 
   it('does not upload the deselected tests', async () => {
-    const { reporter, exporter } = await runSelection({ testSelection: ['selection > beta'] });
+    const { reporter, sink } = await runSelection({ testSelection: ['selection > beta'] });
 
     // A test that never ran has no result to report — not even a skipped one.
-    expect(uploadedNames(exporter)).toEqual(['selection > beta']);
+    expect(uploadedNames(sink)).toEqual(['selection > beta']);
     expect(reporter.getSession()!.testCases.map((tc) => tc.function)).toEqual(['beta']);
     // Counted, not merely absent: the end-of-run report has to say how many
     // were removed, and "0 deselected" would hide the filter doing nothing.
@@ -159,7 +159,7 @@ describe('test selection', () => {
     // name taken from a previous run's upload always matches. This is the
     // round-trip the two must agree on.
     const first = await runSelection({});
-    const uploaded = uploadedNames(first.exporter);
+    const uploaded = uploadedNames(first.sink);
 
     rmSync(markerFile, { force: true });
     const second = await runSelection({ testSelection: [uploaded[1]] });

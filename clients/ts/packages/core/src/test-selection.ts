@@ -1,5 +1,5 @@
 import type { CiApiClient } from '@mergifyio/ci-native';
-import type { Attributes } from '@opentelemetry/api';
+import type { SpanAttributes } from './types.js';
 import { describeError, envToBool } from './utils.js';
 
 /**
@@ -68,7 +68,7 @@ export function toTestSelection(
  * nothing to ask the server about.
  */
 export function resolveSelectionCoordinates(
-  attributes: Attributes
+  attributes: SpanAttributes
 ): TestSelectionCoordinates | null {
   const text = (key: string): string | undefined => {
     const value = attributes[key];
