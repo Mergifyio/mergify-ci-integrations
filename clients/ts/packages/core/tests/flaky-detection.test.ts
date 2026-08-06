@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import type { MergifyApiClient } from '../src/api.js';
 import {
   type FlakyDetectionContext,
   FlakyDetector,
@@ -202,90 +203,83 @@ describe('FlakyDetector', () => {
 });
 
 describe('fetchFlakyDetectionContext', () => {
-  const mockFetch = vi.fn();
+  // Status handling (404 dormant, 402 and 5xx surfaced) lives in the Rust
+  // client. What remains here is the null-mapping and the empty-baseline guard.
+  function client(fetchFlakyContext: MergifyApiClient['fetchFlakyContext']): MergifyApiClient {
+    return {
+      fetchQuarantine: vi.fn(),
+      fetchFlakyContext,
+      uploadTrace: vi.fn(),
+    };
+  }
 
-  beforeEach(() => {
-    vi.stubGlobal('fetch', mockFetch);
-  });
-
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it('returns context from API', async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: async () => baseContext,
-    });
+  it('returns the context the client returns', async () => {
+    const logger = vi.fn();
 
     const ctx = await fetchFlakyDetectionContext(
-      {
-        apiUrl: 'https://api.mergify.com',
-        token: 'test-token',
-        repoName: 'owner/repo',
-        mode: 'new',
-      },
-      vi.fn()
+      client(async () => baseContext),
+      'new',
+      logger
     );
 
     expect(ctx).toEqual(baseContext);
+    expect(logger).not.toHaveBeenCalled();
   });
 
-  it('logs and returns null on error', async () => {
-    mockFetch.mockResolvedValue({ ok: false, status: 500 });
+  it('skips silently when flaky detection is dormant', async () => {
     const logger = vi.fn();
 
     const ctx = await fetchFlakyDetectionContext(
-      {
-        apiUrl: 'https://api.mergify.com',
-        token: 'test-token',
-        repoName: 'owner/repo',
-        mode: 'new',
-      },
-      logger
-    );
-
-    expect(ctx).toBeNull();
-    // A real error still surfaces via the logger (the "banner").
-    expect(logger).toHaveBeenCalled();
-  });
-
-  it('skips silently on 404 (repository not opted in)', async () => {
-    mockFetch.mockResolvedValue({ ok: false, status: 404 });
-    const logger = vi.fn();
-
-    const ctx = await fetchFlakyDetectionContext(
-      {
-        apiUrl: 'https://api.mergify.com',
-        token: 'test-token',
-        repoName: 'owner/repo',
-        mode: 'new',
-      },
+      client(async () => null),
+      'new',
       logger
     );
 
     expect(ctx).toBeNull();
     expect(logger).not.toHaveBeenCalled();
+  });
+
+  it('logs the failure and returns null', async () => {
+    const logger = vi.fn();
+
+    const ctx = await fetchFlakyDetectionContext(
+      client(async () => {
+        throw new Error('Mergify API returned HTTP 402');
+      }),
+      'new',
+      logger
+    );
+
+    expect(ctx).toBeNull();
+    expect(logger).toHaveBeenCalledWith(
+      'Failed to fetch flaky detection context: Mergify API returned HTTP 402'
+    );
   });
 
   it('skips silently when "new" mode has an empty baseline', async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({ ...baseContext, existing_test_names: [] }),
-    });
     const logger = vi.fn();
 
     const ctx = await fetchFlakyDetectionContext(
-      {
-        apiUrl: 'https://api.mergify.com',
-        token: 'test-token',
-        repoName: 'owner/repo',
-        mode: 'new',
-      },
+      client(async () => ({ ...baseContext, existing_test_names: [] })),
+      'new',
       logger
     );
 
     expect(ctx).toBeNull();
     expect(logger).not.toHaveBeenCalled();
+  });
+
+  it('keeps an empty baseline usable in "unhealthy" mode', async () => {
+    // Only "new" mode needs a baseline to tell new tests apart; unhealthy
+    // tests are named outright by the server.
+    const context = { ...baseContext, existing_test_names: [] };
+
+    const ctx = await fetchFlakyDetectionContext(
+      client(async () => context),
+      'unhealthy',
+      vi.fn()
+    );
+
+    expect(ctx).toEqual(context);
   });
 });

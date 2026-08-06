@@ -1,74 +1,42 @@
-import { splitRepoName } from './utils.js';
+import type { FlakyDetectionContext } from '@mergifyio/ci-native';
+import type { MergifyApiClient } from './api.js';
+import { describeError } from './utils.js';
 
-export type FlakyDetectionContext = {
-  budget_ratio_for_new_tests: number;
-  budget_ratio_for_unhealthy_tests: number;
-  existing_test_names: string[];
-  existing_tests_mean_duration_ms: number;
-  unhealthy_test_names: string[];
-  max_test_execution_count: number;
-  max_test_name_length: number;
-  min_budget_duration_ms: number;
-  min_test_execution_count: number;
-};
+/**
+ * The server's baseline and budget parameters. Re-exported from the binding's
+ * generated types — the wire contract is defined once, in Rust, and shared
+ * with pytest-mergify. The snake_case keys are the API's.
+ */
+export type { FlakyDetectionContext };
 
 export type FlakyDetectionMode = 'new' | 'unhealthy';
 
-export type FlakyDetectionConfig = {
-  apiUrl: string;
-  token: string;
-  repoName: string;
-  // The mode is needed here so the empty-baseline guard below can skip when
-  // "new" mode has nothing to compare against.
-  mode: FlakyDetectionMode;
-};
-
+/**
+ * The flaky-detection context, or null when the feature is not usable for this
+ * run.
+ *
+ * Null covers three cases the caller treats alike — the repository has not
+ * opted in (dormant), the fetch failed (logged), or `mode` is "new" with an
+ * empty baseline. That last guard stays here rather than in the client: with no
+ * baseline every test looks new and the whole suite would rerun, so the run
+ * skips silently instead. It mirrors the Rust budget engine's `should_run`.
+ */
 export async function fetchFlakyDetectionContext(
-  config: FlakyDetectionConfig,
+  client: MergifyApiClient,
+  mode: FlakyDetectionMode,
   logger: (msg: string) => void
 ): Promise<FlakyDetectionContext | null> {
-  const { owner, repo } = splitRepoName(config.repoName);
-  const url = `${config.apiUrl}/v1/ci/${owner}/repositories/${repo}/flaky-detection-context`;
-
+  let context: FlakyDetectionContext | null;
   try {
-    const response = await fetch(url, {
-      headers: { Authorization: `Bearer ${config.token}` },
-      signal: AbortSignal.timeout(10_000),
-    });
-
-    // A 404 means the repository has not opted into flaky detection. This is
-    // the expected default rather than an error, so skip silently.
-    if (response.status === 404) {
-      return null;
-    }
-
-    if (response.status === 402) {
-      logger('Flaky detection not available (no subscription)');
-      return null;
-    }
-
-    if (!response.ok) {
-      logger(`Failed to fetch flaky detection context: HTTP ${response.status}`);
-      return null;
-    }
-
-    const context = (await response.json()) as FlakyDetectionContext;
-
-    // Without a baseline, "new" mode would treat every test as new and rerun
-    // the whole suite. Skip silently rather than surfacing an error.
-    if (config.mode === 'new' && context.existing_test_names.length === 0) {
-      return null;
-    }
-
-    return context;
+    context = await client.fetchFlakyContext();
   } catch (err) {
-    if (err instanceof DOMException && err.name === 'TimeoutError') {
-      logger('Flaky detection API request timed out');
-    } else {
-      logger(`Failed to fetch flaky detection context: ${err}`);
-    }
+    logger(`Failed to fetch flaky detection context: ${describeError(err)}`);
     return null;
   }
+
+  if (context === null) return null;
+  if (mode === 'new' && context.existing_test_names.length === 0) return null;
+  return context;
 }
 
 type TestMetrics = {

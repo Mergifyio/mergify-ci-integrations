@@ -41,6 +41,15 @@ export function getCIProvider(): CIProvider | null {
   return detectNativeProvider() as CIProvider | null;
 }
 
+/**
+ * A thrown value as a log line. The binding rejects with an `Error` carrying
+ * the Rust client's own message ("Mergify API returned HTTP 402", "Mergify API
+ * request timed out"), so the message alone is the useful part.
+ */
+export function describeError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 /** Split an "owner/repo" string into parts. */
 export function splitRepoName(fullName: string): { owner: string; repo: string } {
   const parts = fullName.split('/');
