@@ -1,6 +1,6 @@
-import { execSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import type { Attributes } from '@opentelemetry/api';
+import { detectNativeProvider, detectNativeRepositoryName } from './native.js';
 
 export type CIProvider = 'github_actions' | 'jenkins' | 'circleci' | 'buildkite';
 
@@ -36,25 +36,9 @@ export function isInCI(): boolean {
   return envToBool(process.env.CI, !!(process.env.CI ?? '').length);
 }
 
-/** Detect the current CI provider from environment variables. */
+/** Detect the current CI provider via the bundled Rust core. */
 export function getCIProvider(): CIProvider | null {
-  if (process.env.GITHUB_ACTIONS) return 'github_actions';
-  if (process.env.CIRCLECI) return 'circleci';
-  if (process.env.JENKINS_URL) return 'jenkins';
-  if (process.env.BUILDKITE) return 'buildkite';
-  return null;
-}
-
-/** Execute a git command and return trimmed stdout, or null on failure. */
-export function git(...args: string[]): string | null {
-  try {
-    return execSync(`git ${args.join(' ')}`, {
-      encoding: 'utf-8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
-  } catch {
-    return null;
-  }
+  return detectNativeProvider() as CIProvider | null;
 }
 
 /** Split an "owner/repo" string into parts. */
@@ -67,35 +51,12 @@ export function splitRepoName(fullName: string): { owner: string; repo: string }
 }
 
 /**
- * Resolve the repository name ("owner/repo") from env vars or the git remote.
- * Checks GITHUB_REPOSITORY, then GIT_URL, then falls back to `git config`.
+ * Resolve the API-endpoint repository name ("owner/repo") via the bundled
+ * Rust core: the active provider's environment first, the git remote as
+ * fallback.
  */
 export function getRepoName(): string | undefined {
-  if (process.env.GITHUB_REPOSITORY) return process.env.GITHUB_REPOSITORY;
-  if (process.env.GIT_URL) {
-    return getRepositoryNameFromUrl(process.env.GIT_URL) ?? undefined;
-  }
-  const remoteUrl = git('config', '--get', 'remote.origin.url');
-  if (remoteUrl) return getRepositoryNameFromUrl(remoteUrl) ?? undefined;
-  return undefined;
-}
-
-/** Parse a repository name from a git remote URL (SSH or HTTPS). */
-export function getRepositoryNameFromUrl(url: string): string | null {
-  // SSH: git@github.com:owner/repo.git
-  const sshMatch = url.match(/:([^/]+\/[^/]+?)(?:\.git)?$/);
-  if (sshMatch) return sshMatch[1];
-
-  // HTTPS: https://github.com/owner/repo.git
-  try {
-    const parsed = new URL(url);
-    const path = parsed.pathname.replace(/^\//, '').replace(/\.git$/, '');
-    if (path.includes('/')) return path;
-  } catch {
-    // not a valid URL
-  }
-
-  return null;
+  return detectNativeRepositoryName();
 }
 
 /**
