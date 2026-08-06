@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import {
+  createApiClient,
   detectResources,
   envToBool,
   type FlakyDetectionContext,
@@ -8,16 +9,28 @@ import {
   generateTestRunId,
   getRepoName,
   isInCI,
+  type MergifyApiClient,
   resolveBranchFromAttributes,
 } from '@mergifyio/ci-core';
 import type { FullConfig } from '@playwright/test';
 import { type SharedState, stateFilePath, writeStateFile } from './state-file.js';
+import { readPluginVersion } from './version.js';
 
 const DEFAULT_API_URL = 'https://api.mergify.com';
 
 export interface RunGlobalSetupDeps {
   cacheRoot: string;
   now: () => Date;
+  /**
+   * Backend client, injectable so tests can drive the quarantine and
+   * flaky-detection paths without a network or a native binding. Defaults to
+   * the bundled Rust client.
+   */
+  createClient?: (config: {
+    apiUrl: string;
+    token: string;
+    repoName: string;
+  }) => MergifyApiClient | null;
 }
 
 export async function runGlobalSetup(config: FullConfig, deps: RunGlobalSetupDeps): Promise<void> {
@@ -50,12 +63,26 @@ export async function runGlobalSetup(config: FullConfig, deps: RunGlobalSetupDep
     return;
   }
 
+  const createClient =
+    deps.createClient ??
+    ((target) =>
+      createApiClient({
+        ...target,
+        clientName: '@mergifyio/playwright',
+        clientVersion: readPluginVersion(),
+      }));
+  const client = createClient({ apiUrl, token, repoName });
+  // No client means no native binding for this platform, or a repository name
+  // the client rejected — the fail-open path, same as detection reporting
+  // nothing.
+  if (!client) return;
+
   const log = (msg: string) => process.stderr.write(`[@mergifyio/playwright] ${msg}\n`);
   // `fetchQuarantineList` is soft — on any error it logs via `log` and returns
   // an empty set. We just persist whatever it returns; a fetch failure and a
   // genuinely-empty list are indistinguishable downstream, and the logger has
   // already surfaced the failure to the user.
-  const list = await fetchQuarantineList({ apiUrl, token, repoName, branch }, log);
+  const list = await fetchQuarantineList(client, branch, log);
 
   // Flaky detection is server-driven: always request the context and let the
   // server opt the repository in (200) or out (404). Same soft-fail shape as
@@ -63,7 +90,7 @@ export async function runGlobalSetup(config: FullConfig, deps: RunGlobalSetupDep
   let flakyContext: FlakyDetectionContext | undefined;
   let flakyMode: 'new' | 'unhealthy' | undefined;
   const mode = isPullRequest ? 'new' : 'unhealthy';
-  const ctx = await fetchFlakyDetectionContext({ apiUrl, token, repoName, mode }, log);
+  const ctx = await fetchFlakyDetectionContext(client, mode, log);
   if (ctx) {
     flakyContext = ctx;
     flakyMode = mode;
