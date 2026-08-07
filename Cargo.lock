@@ -712,11 +712,11 @@ dependencies = [
 name = "mergify-ci-node"
 version = "0.0.0"
 dependencies = [
+ "mergify-ci-api",
  "mergify-ci-core",
  "napi",
  "napi-build",
  "napi-derive",
- "serde_json",
 ]
 
 [[package]]
@@ -753,6 +753,7 @@ dependencies = [
  "napi-sys",
  "nohash-hasher",
  "rustc-hash",
+ "tokio",
 ]
 
 [[package]]
