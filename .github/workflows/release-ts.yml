@@ -133,6 +133,11 @@ jobs:
         env:
           TAG: ${{ needs.resolve-tag.outputs.tag }}
         run: pnpm -r version "${TAG#ts-v}" --no-git-tag-version
+      # Build BEFORE assembling: the assembly injects optionalDependencies the
+      # lockfile knows nothing about, and `pnpm run` verifies deps against the
+      # lockfile first, so it would fail with ERR_PNPM_OUTDATED_LOCKFILE. Only
+      # `run`/`exec` do that check -- `pnpm pack` below is unaffected.
+      - run: pnpm -r run build
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: clients/ts/packages/native/artifacts
@@ -144,6 +149,8 @@ jobs:
           # Sync the platform packages to the stamped version, and pin them as
           # optionalDependencies of the loader package (the committed manifest
           # carries none, so the workspace stays resolvable between releases).
+          # Both `pnpm exec` calls run while the manifest is still clean; the
+          # injection below has to stay last in this step.
           pnpm exec napi version
           node --eval '
             const fs = require("node:fs");
@@ -156,7 +163,6 @@ jobs:
             );
             fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
           '
-      - run: pnpm -r run build
       - name: Pack the packages
         run: |
           pnpm -r pack --pack-destination "${GITHUB_WORKSPACE}/dist"
@@ -217,6 +223,8 @@ jobs:
         env:
           TAG: ${{ github.event.release.tag_name }}
         run: pnpm -r version "${TAG#ts-v}" --no-git-tag-version
+      # Same ordering constraint as the draft job -- see the comment there.
+      - run: pnpm -r run build
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: clients/ts/packages/native/artifacts
@@ -237,7 +245,6 @@ jobs:
             );
             fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
           '
-      - run: pnpm -r run build
       - name: Publish to npm
         # Temporary: only the eight packages that don't exist on npm yet need
         # this -- see the first-publish note at the top of the file. Remove it
