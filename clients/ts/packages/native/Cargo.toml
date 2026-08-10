@@ -12,10 +12,14 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
+mergify-ci-api = { path = "../../../../crates/mergify-ci-api" }
 mergify-ci-core = { path = "../../../../crates/mergify-ci-core" }
-napi = { version = "3", default-features = false }
+# `async` pulls in napi's tokio runtime, which drives the async API client and
+# surfaces its calls to JS as Promises. `napi6` is what gates `BigInt`, needed
+# because span timestamps are nanoseconds since the epoch — past what a JS
+# `number` holds exactly. Both are far below the N-API 9 that Node >=22 ships.
+napi = { version = "3", default-features = false, features = ["async", "napi6"] }
 napi-derive = "3"
-serde_json = "1"
 
 [build-dependencies]
 napi-build = "2"

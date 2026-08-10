@@ -700,6 +700,7 @@ if (!nativeBinding) {
 }
 
 module.exports = nativeBinding
+module.exports.CiApiClient = nativeBinding.CiApiClient
 module.exports.detectAttributes = nativeBinding.detectAttributes
 module.exports.detectProvider = nativeBinding.detectProvider
 module.exports.detectRepositoryName = nativeBinding.detectRepositoryName
