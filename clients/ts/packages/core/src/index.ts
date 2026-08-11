@@ -10,13 +10,25 @@ export { fetchQuarantineList } from './quarantine.js';
 // Resource detection
 export { detectResources } from './resources/index.js';
 // Span helpers
+export type { SessionSpan } from './spans.js';
 export { emitTestCaseSpan, endSessionSpan, startSessionSpan } from './spans.js';
+// Trace context
+export { msToUnixNano, newSpanId, newTraceId, parseTraceparent } from './trace-context.js';
 // Tracing
-export type { TracingConfig, TracingContext } from './tracing.js';
-export { createTracing, SynchronousBatchSpanProcessor } from './tracing.js';
+export type { CapturedSpan, SpanSink, TracingConfig, TracingContext } from './tracing.js';
+export {
+  ClientSpanSink,
+  ConsoleSpanSink,
+  createTracing,
+  InMemorySpanSink,
+  toAttributeList,
+} from './tracing.js';
 
 // Types
 export type {
+  SpanAttributes,
+  SpanAttributeValue,
+  SpanStatus,
   TestCaseError,
   TestCaseFlakyDetection,
   TestCaseResult,
