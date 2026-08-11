@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import {
+  createApiClient,
   createTracing,
   emitTestCaseSpan,
   endSessionSpan,
@@ -40,6 +41,7 @@ import {
   resolveIncludeProject,
   toPosix,
 } from './utils.js';
+import { readPluginVersion } from './version.js';
 
 const DEFAULT_API_URL = 'https://api.mergify.com';
 
@@ -122,11 +124,23 @@ export class MergifyReporter implements Reporter {
       envToBool(process.env.PLAYWRIGHT_MERGIFY_ENABLE, false) ||
       !!this.options.exporter;
 
+    // The reporter only uploads: quarantine and the flaky context were already
+    // fetched in globalSetup and reach it through the state file.
+    const apiClient =
+      this.options.apiClient ??
+      (token && repoName
+        ? createApiClient({
+            apiUrl,
+            token,
+            repoName,
+            clientName: '@mergifyio/playwright',
+            clientVersion: readPluginVersion(),
+          })
+        : null);
+
     if (enabled) {
       this.tracing = createTracing({
-        token,
-        repoName,
-        apiUrl,
+        apiClient,
         testRunId,
         frameworkAttributes: playwrightResource.detect(),
         tracerName: '@mergifyio/playwright',
