@@ -15,6 +15,8 @@ clients/
                        @mergifyio/playwright reporters over a shared
                        @mergifyio/ci-core; CI detection via @mergifyio/ci-native,
                        a napi binding over the core (prebuilt per platform)
+  rspec-mergify/       RSpec plugin (Ruby gem): still pure Ruby, awaiting its
+                       magnus binding over the core
 ```
 
 ## Core
@@ -38,9 +40,16 @@ with its git history) is the exception to the bundled model: npm natives ship
 as per-platform packages, so `@mergifyio/ci-native` wraps the core behind napi
 and `@mergifyio/ci-core` consumes it for CI detection, fail-open — platforms
 without a prebuilt binary detect nothing rather than breaking the run. The
-API client is still TypeScript (MRGFY-8439). The packages release from this
+API client is still TypeScript. The packages release from this
 repo via `ts-v<SemVer>` tags (fixed version across the workspace, two-step
 draft-then-publish like pytest-mergify).
+
+The RSpec gem under `clients/rspec-mergify/` (imported from
+[rspec-mergify](https://github.com/Mergifyio/rspec-mergify) with its git
+history) is not yet on the core at all — it still carries its own Ruby
+detection, API calls, and OpenTelemetry SDK export. It also still *releases*
+from the standalone repo; monorepo CI, RubyGems publishing, and the magnus
+binding all land in later steps.
 
 ## Develop
 
@@ -49,8 +58,9 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 maturin build --manifest-path clients/pytest-mergify/Cargo.toml
 pnpm -C clients/ts install && pnpm -C clients/ts run build && pnpm -C clients/ts test
+(cd clients/rspec-mergify && bundle install && bundle exec rspec && bundle exec rubocop)
 ```
 
 CI runs the workspace tests, builds + imports the `pytest-mergify` wheel on
 Linux, macOS, and Windows, and runs the TS workspace's lint + test matrix
-(node 22/24).
+(node 22/24). It does not yet run the RSpec gem's suite.

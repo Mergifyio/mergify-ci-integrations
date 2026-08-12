@@ -65,4 +65,4 @@ bundle exec rubocop
 
 ## License
 
-GPL-3.0-only
+Apache-2.0 — see the [LICENSE](../../LICENSE) at the repository root.
