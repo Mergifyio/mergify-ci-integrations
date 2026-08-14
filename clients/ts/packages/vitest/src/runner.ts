@@ -5,6 +5,7 @@ import {
 } from '@mergifyio/ci-core';
 import type { Suite, Task, Test } from '@vitest/runner';
 import { VitestTestRunner } from 'vitest/runners';
+import { buildTestKey } from './utils.js';
 
 export default class MergifyRunner extends VitestTestRunner {
   private quarantinedTests: Set<string>;
@@ -45,7 +46,7 @@ export default class MergifyRunner extends VitestTestRunner {
     const names: string[] = [];
     for (const task of suite.tasks) {
       if (task.type === 'test') {
-        names.push(task.fullName);
+        names.push(buildTestKey(task));
       } else if (task.type === 'suite') {
         names.push(...this.collectTestNames(task));
       }
@@ -58,13 +59,14 @@ export default class MergifyRunner extends VitestTestRunner {
 
     this.ensureFlakyDetector(test);
 
-    if (this.flakyDetector?.isCandidate(test.fullName)) {
+    const name = buildTestKey(test);
+    if (this.flakyDetector?.isCandidate(name)) {
       // Calculate repeats upfront using estimated duration.
       // Vitest captures test.repeats into a local const at the start of its
       // repeat loop, so adjusting it mid-loop (e.g. in onAfterTryTask) has no
       // effect. We must set the final value here before the loop begins.
       const estimatedDuration = this._flakyContext!.existing_tests_mean_duration_ms;
-      const maxRepeats = this.flakyDetector.getMaxRepeats(test.fullName, estimatedDuration);
+      const maxRepeats = this.flakyDetector.getMaxRepeats(name, estimatedDuration);
       (test as { repeats?: number }).repeats = maxRepeats;
     }
   }
@@ -74,27 +76,27 @@ export default class MergifyRunner extends VitestTestRunner {
 
     if (!this.flakyDetector) return;
 
-    const fullName = test.fullName;
-    if (!this.flakyDetector.isCandidate(fullName)) return;
+    const name = buildTestKey(test);
+    if (!this.flakyDetector.isCandidate(name)) return;
 
     const outcome = test.result?.state === 'fail' ? 'fail' : 'pass';
-    this.flakyDetector.recordOutcome(fullName, outcome);
+    this.flakyDetector.recordOutcome(name, outcome);
   }
 
   onAfterRunTask(test: Task): void {
     super.onAfterRunTask(test);
 
-    const fullName = test.fullName;
+    const name = buildTestKey(test);
     const originalState = test.result?.state;
 
     // Flaky detection: set meta attributes (before quarantine to use original state)
-    if (this.flakyDetector?.isCandidate(fullName)) {
+    if (this.flakyDetector?.isCandidate(name)) {
       const meta = test.meta as Record<string, unknown>;
       meta.flakyDetection = true;
       meta.isNew = this.flakyMode === 'new';
-      meta.rerunCount = this.flakyDetector.getRerunCount(fullName);
-      meta.flaky = this.flakyDetector.isFlaky(fullName);
-      meta.tooSlow = this.flakyDetector.isTooSlow(fullName);
+      meta.rerunCount = this.flakyDetector.getRerunCount(name);
+      meta.flaky = this.flakyDetector.isFlaky(name);
+      meta.tooSlow = this.flakyDetector.isTooSlow(name);
 
       // In "unhealthy" mode, absorb failures (similar to quarantine)
       if (this.flakyMode === 'unhealthy' && originalState === 'fail') {
@@ -104,16 +106,12 @@ export default class MergifyRunner extends VitestTestRunner {
     }
 
     // Quarantine: rewrite failed quarantined tests to pass
-    if (originalState === 'fail' && this.isQuarantined(test)) {
+    if (originalState === 'fail' && this.quarantinedTests.has(name)) {
       test.result!.state = 'pass';
       const meta = test.meta as Record<string, unknown>;
       meta.quarantined = true;
       meta.quarantineErrors = test.result!.errors;
       test.result!.errors = undefined;
     }
-  }
-
-  private isQuarantined(test: Task): boolean {
-    return this.quarantinedTests.has(test.fullName);
   }
 }

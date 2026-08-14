@@ -6,6 +6,31 @@ import { MergifyReporter } from '../src/reporter.js';
 
 const fixturesDir = resolve(import.meta.dirname, 'fixtures');
 
+async function runFixture(file: string, quarantineList: string[]) {
+  const exporter = new InMemorySpanExporter();
+  const reporter = new MergifyReporter({ exporter, quarantineList });
+
+  const vitest = await startVitest('test', [], {
+    root: fixturesDir,
+    include: [file],
+    reporters: [reporter],
+    watch: false,
+  });
+  await vitest?.close();
+
+  const caseSpans = exporter
+    .getFinishedSpans()
+    .filter((s) => s.attributes['test.scope'] === 'case');
+
+  return {
+    status: reporter.getSession()!.status,
+    uploadedNames: caseSpans.map((s) => s.name),
+    quarantinedNames: caseSpans
+      .filter((s) => s.attributes['cicd.test.quarantined'] === true)
+      .map((s) => s.name),
+  };
+}
+
 describe('Quarantine runner', () => {
   beforeEach(() => {
     vi.stubEnv('GITHUB_ACTIONS', 'true');
@@ -17,89 +42,62 @@ describe('Quarantine runner', () => {
   });
 
   it('quarantined failing test does not fail the run', async () => {
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({
-      exporter,
-      // Quarantine the intentionally failing test
-      quarantineList: ['failing.test.ts > math > fails intentionally'],
-    });
+    const run = await runFixture('failing.test.ts', ['math > fails intentionally']);
 
-    const vitest = await startVitest('test', [], {
-      root: fixturesDir,
-      include: ['failing.test.ts'],
-      reporters: [reporter],
-      watch: false,
-    });
-    await vitest?.close();
-
-    const session = reporter.getSession();
-    expect(session).toBeDefined();
     // The session should report as passed because the failure was quarantined
-    expect(session!.status).toBe('passed');
+    expect(run.status).toBe('passed');
   });
 
   it('sets cicd.test.quarantined span attribute on quarantined tests', async () => {
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({
-      exporter,
-      quarantineList: ['failing.test.ts > math > fails intentionally'],
-    });
+    const run = await runFixture('failing.test.ts', ['math > fails intentionally']);
 
-    const vitest = await startVitest('test', [], {
-      root: fixturesDir,
-      include: ['failing.test.ts'],
-      reporters: [reporter],
-      watch: false,
-    });
-    await vitest?.close();
-
-    const spans = exporter.getFinishedSpans();
-    const testSpan = spans.find((s) => s.attributes['test.scope'] === 'case');
-
-    expect(testSpan).toBeDefined();
-    expect(testSpan!.attributes['cicd.test.quarantined']).toBe(true);
+    expect(run.quarantinedNames).toEqual(['math > fails intentionally']);
   });
 
   it('non-quarantined failing test still fails the run', async () => {
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({
-      exporter,
-      quarantineList: ['some > other test'],
-    });
+    const run = await runFixture('failing.test.ts', ['some > other test']);
 
-    const vitest = await startVitest('test', [], {
-      root: fixturesDir,
-      include: ['failing.test.ts'],
-      reporters: [reporter],
-      watch: false,
-    });
-    await vitest?.close();
-
-    const session = reporter.getSession();
-    expect(session!.status).toBe('failed');
+    expect(run.status).toBe('failed');
   });
 
   it('mixed: quarantined failure + passing test = passing run', async () => {
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({
-      exporter,
-      quarantineList: ['mixed.test.ts > outer > inner > fails'],
-    });
+    const run = await runFixture('mixed.test.ts', ['outer > inner > fails']);
 
-    const vitest = await startVitest('test', [], {
-      root: fixturesDir,
-      include: ['mixed.test.ts'],
-      reporters: [reporter],
-      watch: false,
-    });
-    await vitest?.close();
-
-    const session = reporter.getSession();
     // The only failure is quarantined, so the run should pass
-    expect(session!.status).toBe('passed');
+    expect(run.status).toBe('passed');
+    expect(run.quarantinedNames).toEqual(['outer > inner > fails']);
+  });
 
-    const spans = exporter.getFinishedSpans();
-    const quarantinedSpan = spans.find((s) => s.attributes['cicd.test.quarantined'] === true);
-    expect(quarantinedSpan).toBeDefined();
+  it('ignores the file path, which the uploaded name never carries', async () => {
+    const run = await runFixture('failing.test.ts', [
+      'failing.test.ts > math > fails intentionally',
+    ]);
+
+    expect(run.status).toBe('failed');
+    expect(run.quarantinedNames).toEqual([]);
+  });
+
+  // The names the runner matches on and the names the reporter uploads have to
+  // be the same string: quarantine and flaky detection are both keyed on what
+  // the server stored, and the server only ever stores what was uploaded.
+  // Feeding a first run's own exported span names back in is what keeps this
+  // honest — it cannot pass on a name shape production never produces.
+  it.for([
+    { fixture: 'mixed.test.ts', failing: 'outer > inner > fails' },
+    // A test outside any suite uploads a bare name, with no namespace to
+    // prefix it — the one case where the two constructions handle an empty
+    // suite chain rather than joining one.
+    { fixture: 'root-level.test.ts', failing: 'fails outside any suite' },
+  ])('quarantines on the exact names the reporter uploads ($fixture)', async ({
+    fixture,
+    failing,
+  }) => {
+    const first = await runFixture(fixture, []);
+    expect(first.uploadedNames).toContain(failing);
+
+    const second = await runFixture(fixture, first.uploadedNames);
+
+    expect(second.status).toBe('passed');
+    expect(second.quarantinedNames).toEqual([failing]);
   });
 });
