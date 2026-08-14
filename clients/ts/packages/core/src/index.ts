@@ -11,6 +11,20 @@ export { fetchQuarantineList } from './quarantine.js';
 export { detectResources } from './resources/index.js';
 // Span helpers
 export { emitTestCaseSpan, endSessionSpan, startSessionSpan } from './spans.js';
+// Test identifier — the one construction every server-name match goes through
+export { buildTestIdentifier, TEST_NAME_SEPARATOR } from './test-identifier.js';
+// Test selection
+export type {
+  TestSelection,
+  TestSelectionClient,
+  TestSelectionCoordinates,
+} from './test-selection.js';
+export {
+  fetchTestSelection,
+  isTestSelectionDisabled,
+  resolveSelectionCoordinates,
+  toTestSelection,
+} from './test-selection.js';
 // Tracing
 export type { TracingConfig, TracingContext } from './tracing.js';
 export { createTracing, SynchronousBatchSpanProcessor } from './tracing.js';

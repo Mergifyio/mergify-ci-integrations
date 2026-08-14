@@ -34,7 +34,8 @@ export function extractNamespace(fullName: string, name: string): string {
 /**
  * Build the matching key for a Vitest test: the same string the Mergify backend
  * stores as `test_name` (derived from the emitted span name). Used both for
- * quarantine list matching and for flaky-detection candidate matching — the
+ * quarantine list matching, for flaky-detection candidate matching, and for
+ * intersecting a served test selection with what this worker collected — the
  * runner-side counterpart of `buildTestKey` in @mergifyio/playwright.
  *
  * Must match the span name produced by `emitTestCaseSpan` in @mergifyio/ci-core:

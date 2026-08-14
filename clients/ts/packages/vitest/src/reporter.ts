@@ -6,6 +6,8 @@ import type {
   MergifyApiClient,
   TestCaseResult,
   TestRunSession,
+  TestSelection,
+  TestSelectionClient,
   TracingContext,
 } from '@mergifyio/ci-core';
 import {
@@ -16,11 +18,15 @@ import {
   envToBool,
   fetchFlakyDetectionContext,
   fetchQuarantineList,
+  fetchTestSelection,
   generateTestRunId,
   getRepoName,
   isInCI,
+  isTestSelectionDisabled,
   resolveBranchFromAttributes,
+  resolveSelectionCoordinates,
   startSessionSpan,
+  toTestSelection,
 } from '@mergifyio/ci-core';
 import type { Span } from '@opentelemetry/api';
 import type { Reporter, TestCase, TestModule, Vitest } from 'vitest/node';
@@ -50,6 +56,10 @@ export class MergifyReporter implements Reporter {
     tooSlow: boolean;
   }> = [];
   private _flakyPromise: Promise<void> | undefined;
+  private selection: TestSelection | undefined;
+  private _selectionPromise: Promise<void> | undefined;
+  private deselectedCount = 0;
+  private selectedExecutedCount = 0;
 
   constructor(options?: MergifyReporterOptions) {
     this.options = options ?? {};
@@ -67,10 +77,11 @@ export class MergifyReporter implements Reporter {
     const enabled =
       isInCI() || envToBool(process.env.VITEST_MERGIFY_ENABLE, false) || !!this.options.exporter;
 
-    // One client for the whole run: quarantine and flaky detection go through
-    // it (the trace upload still has its own exporter). Null without a token, a
-    // detected repository, or a native binding for this platform — each of
-    // which means the backend features stay off.
+    // One client for the whole run: quarantine, flaky detection and test
+    // selection all go through it (the trace upload still has its own
+    // exporter). Null without a token, a detected repository, or a native
+    // binding for this platform — each of which means the backend features stay
+    // off.
     const apiClient =
       this.options.apiClient ??
       (token && repoName
@@ -120,6 +131,18 @@ export class MergifyReporter implements Reporter {
       }
     }
 
+    // If a subset was provided via options (for testing), use it directly —
+    // through the same normalisation as a served answer, so the seam cannot
+    // produce a selection the fetch path never could.
+    if (this.options.testSelection) {
+      this._applySelection(
+        vitest,
+        toTestSelection('subset', 'reduced_rerun', this.options.testSelection)
+      );
+    } else if (this.tracing && apiClient) {
+      this._initTestSelection(vitest, apiClient);
+    }
+
     // If flaky context was provided via options (for testing), use it directly
     if (this.options.flakyContext && this.options.flakyMode) {
       this.flakyContext = this.options.flakyContext;
@@ -148,6 +171,37 @@ export class MergifyReporter implements Reporter {
         this._configureRunner(vitest);
       }
     });
+  }
+
+  private _initTestSelection(vitest: Vitest, client: Partial<TestSelectionClient>): void {
+    const fetch = client.fetchTestSelection?.bind(client);
+    // An injected stand-in predating this feature has no such method; that
+    // reads as "no selection", i.e. run everything.
+    if (!fetch || isTestSelectionDisabled()) return;
+
+    // The selection is keyed on the run's OWN identity — the head branch and
+    // revision (a merge-queue draft branch on reruns) plus the job coordinates,
+    // the exact values reported with each uploaded test. Without all four there
+    // is nothing the server can match, so the full suite runs.
+    const coordinates = resolveSelectionCoordinates(this.tracing!.resource.attributes);
+    if (!coordinates) return;
+
+    const log = (msg: string) => vitest.logger.log(`[@mergifyio/vitest] ${msg}`);
+    this._selectionPromise = fetchTestSelection(
+      { fetchTestSelection: fetch },
+      coordinates,
+      log
+    ).then((selection) => {
+      this._applySelection(vitest, selection);
+    });
+  }
+
+  private _applySelection(vitest: Vitest, selection: TestSelection): void {
+    this.selection = selection;
+    if (selection.selection !== 'subset') return;
+
+    vitest.provide('mergify:selection', [...selection.tests]);
+    this._configureRunner(vitest);
   }
 
   private _initFlakyDetection(
@@ -197,6 +251,10 @@ export class MergifyReporter implements Reporter {
       await this._flakyPromise;
       this._flakyPromise = undefined;
     }
+    if (this._selectionPromise) {
+      await this._selectionPromise;
+      this._selectionPromise = undefined;
+    }
 
     const testRunId = this._testRunId ?? generateTestRunId();
 
@@ -216,12 +274,33 @@ export class MergifyReporter implements Reporter {
   onTestCaseResult(testCase: TestCase): void {
     if (!this.session) return;
 
+    const meta = testCase.meta() as Record<string, unknown>;
+
+    // A test the selection removed was never executed, so it has no result to
+    // report. It arrives here `pending`, which the guard below would drop
+    // anyway — but counting it first is what lets the end-of-run report say how
+    // much was skipped instead of guessing. Uploading it as "skipped" would
+    // feed the server's per-test health statistics a result no run produced.
+    if (meta.mergifyDeselected === true) {
+      this.deselectedCount++;
+      return;
+    }
+
     const result = testCase.result();
     if (result.state === 'pending') return;
 
+    // Only a test that actually ran counts: a served test the user's own filter
+    // skipped arrives here `skipped`, not `pending`, and reporting it as
+    // executed would overstate what the reduced rerun proved.
+    if (
+      (result.state === 'passed' || result.state === 'failed') &&
+      this.selection?.tests.has(testCase.fullName)
+    ) {
+      this.selectedExecutedCount++;
+    }
+
     const diagnostic = testCase.diagnostic();
     const module = testCase.module;
-    const meta = testCase.meta() as Record<string, unknown>;
     const isQuarantined = meta.quarantined === true;
 
     if (isQuarantined) {
@@ -281,7 +360,7 @@ export class MergifyReporter implements Reporter {
   }
 
   async onTestRunEnd(
-    _testModules: ReadonlyArray<TestModule>,
+    testModules: ReadonlyArray<TestModule>,
     _unhandledErrors: ReadonlyArray<unknown>,
     reason: 'passed' | 'failed' | 'interrupted'
   ): Promise<void> {
@@ -289,6 +368,8 @@ export class MergifyReporter implements Reporter {
 
     this.session.endTime = Date.now();
     this.session.status = reason;
+
+    this._reportSelection(testModules);
 
     // Print quarantine summary
     if (this.quarantineList.size > 0) {
@@ -347,8 +428,80 @@ export class MergifyReporter implements Reporter {
     }
   }
 
+  /**
+   * Print the selection report and enforce the rule no reduced rerun may break:
+   * a green run must have executed what it believed it would.
+   *
+   * The subset is matched against the tests Vitest actually collected. Served
+   * names missing from the collection are ignored — a test may legitimately
+   * have been deleted — but a subset matching *nothing* means the identifiers
+   * are stale, and the run just skipped everything. That run proves nothing, so
+   * it is failed rather than allowed to report green.
+   *
+   * pytest-mergify degrades the same situation to running the full suite,
+   * because its filter sees the whole collection before anything runs. Here the
+   * collection is only complete once the workers are done, so prevention is not
+   * available and the guard is a loud failure instead. Same invariant, later
+   * and noisier.
+   */
+  private _reportSelection(testModules: ReadonlyArray<TestModule>): void {
+    const selection = this.selection;
+    if (!selection || selection.selection !== 'subset') return;
+
+    const logger = this.vitest?.logger;
+    const collected = new Set<string>();
+    for (const module of testModules) {
+      for (const test of module.children.allTests()) collected.add(test.fullName);
+    }
+    const matched = [...selection.tests].filter((name) => collected.has(name));
+
+    logger?.log('');
+    logger?.log('[@mergifyio/vitest] Test selection report:');
+    logger?.log(`  Selection: subset (reason: ${selection.reason})`);
+    logger?.log(
+      `  Reduced rerun: executed ${this.selectedExecutedCount} previously-failing test(s), ${this.deselectedCount} deselected`
+    );
+    // The two can differ legitimately: a served test the user's own filter
+    // excluded is matched but not executed. Say so rather than let the counts
+    // look inconsistent.
+    if (matched.length !== this.selectedExecutedCount) {
+      logger?.log(
+        `  ${matched.length - this.selectedExecutedCount} served test(s) were excluded by your own filters`
+      );
+    }
+
+    // The stale-subset guard reads `matched`, not the executed count: a subset
+    // that matches collected tests the user then filtered out is the user's
+    // choice, not a broken selection.
+    if (collected.size > 0 && matched.length === 0) {
+      logger?.error(
+        `[@mergifyio/vitest] Failing this run deliberately: Mergify served ${selection.tests.size} test(s) to replay, ` +
+          'and not one of them matches a test collected here, so the run skipped everything and proves nothing.\n' +
+          '  Two things cause this:\n' +
+          '    - the tests were renamed or moved since the previous attempt, so the served identifiers no longer exist;\n' +
+          '    - this is one branch of a matrix job whose branches share a job name, and the failures belong to a sibling branch.\n' +
+          '  To get a full run instead, set MERGIFY_TEST_SELECTION_DISABLE=1.'
+      );
+      this.session!.status = 'failed';
+      process.exitCode = 1;
+    }
+  }
+
   getSession(): TestRunSession | undefined {
     return this.session;
+  }
+
+  /** The resolved selection, how many tests it removed, and how many ran. */
+  getSelection(): {
+    selection: TestSelection | undefined;
+    deselectedCount: number;
+    executedCount: number;
+  } {
+    return {
+      selection: this.selection,
+      deselectedCount: this.deselectedCount,
+      executedCount: this.selectedExecutedCount,
+    };
   }
 
   getExporter() {

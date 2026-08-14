@@ -33,8 +33,13 @@ export interface ApiClientConfig {
  * no prebuilt binary or `repoName` is not an `owner/repo` pair. Null is the
  * fail-open path: without a client the backend features stay off rather than
  * breaking the test run.
+ *
+ * Returns the binding's whole surface, not the [`MergifyApiClient`] seam: the
+ * factory really does build every method, and a caller that needs one outside
+ * that seam should not have to widen a type the factory already satisfies.
+ * Anything expecting a [`MergifyApiClient`] still accepts the result.
  */
-export function createApiClient(config: ApiClientConfig): MergifyApiClient | null {
+export function createApiClient(config: ApiClientConfig): CiApiClient | null {
   return createNativeApiClient({
     apiUrl: config.apiUrl,
     token: config.token,
