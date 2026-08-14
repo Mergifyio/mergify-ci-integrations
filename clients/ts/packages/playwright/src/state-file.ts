@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import type { FlakyDetectionContext } from '@mergifyio/ci-core';
+import type { FlakyDetectionContext, TestSelection } from '@mergifyio/ci-core';
 
 export interface SharedState {
   version: 1;
@@ -11,6 +11,15 @@ export interface SharedState {
 
   flakyContext?: FlakyDetectionContext;
   flakyMode?: 'new' | 'unhealthy';
+
+  /**
+   * The answer to "may this run replay only what failed last time?", fetched in
+   * globalSetup because that is where the API client lives, and applied by the
+   * reporter's `preprocess`, which is the only place holding the collection.
+   * Absent when we never asked (feature disabled, no client, incomplete run
+   * coordinates).
+   */
+  testSelection?: TestSelection;
 }
 
 /** @deprecated Use SharedState instead. Kept as an alias for compatibility. */
@@ -99,7 +108,25 @@ function isWellFormedState(value: object): value is SharedState {
     delete v.flakyContext;
     delete v.flakyMode;
   }
+
+  // Same treatment for the test selection, and the same reason it is safe:
+  // stripping it means the reporter has no subset to apply, so the full suite
+  // runs. Reduced reruns can only ever remove work.
+  if (v.testSelection !== undefined && !isWellFormedTestSelection(v.testSelection)) {
+    delete v.testSelection;
+  }
   return true;
+}
+
+function isWellFormedTestSelection(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    (v.selection === 'full' || v.selection === 'subset') &&
+    typeof v.reason === 'string' &&
+    Array.isArray(v.tests) &&
+    v.tests.every((t: unknown) => typeof t === 'string')
+  );
 }
 
 function isWellFormedFlakyContext(value: unknown): boolean {

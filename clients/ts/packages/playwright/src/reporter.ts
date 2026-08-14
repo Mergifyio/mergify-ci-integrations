@@ -5,18 +5,21 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import {
+  applyToCollected,
   createTracing,
   emitTestCaseSpan,
   endSessionSpan,
   envToBool,
   type FlakyDetectionContext,
   FlakyDetector,
+  formatTestSelectionReport,
   generateTestRunId,
   getRepoName,
   isInCI,
   startSessionSpan,
   type TestCaseResult,
   type TestRunSession,
+  type TestSelectionApplication,
   type TracingContext,
 } from '@mergifyio/ci-core';
 import type { Span } from '@opentelemetry/api';
@@ -29,7 +32,7 @@ import type {
   TestResult,
 } from '@playwright/test/reporter';
 import * as playwrightResource from './resources/playwright.js';
-import { readStateFile } from './state-file.js';
+import { readStateFile, type SharedState } from './state-file.js';
 import type { MergifyReporterOptions } from './types.js';
 import {
   buildTestKey,
@@ -42,6 +45,47 @@ import {
 } from './utils.js';
 
 const DEFAULT_API_URL = 'https://api.mergify.com';
+
+/**
+ * The slice of Playwright's `TestRun` this reporter uses, declared structurally
+ * instead of imported. `TestRun` only exists in `@playwright/test` 1.62+, while
+ * the package supports 1.56+; importing the type would break a consumer's own
+ * typecheck on an older Playwright, over a hook that runner never calls anyway.
+ */
+interface PlaywrightTestRun {
+  exclude(test: TestCase | Suite): void;
+  /** Hands sharding to the reporter. Optional so a stub need not provide it. */
+  skipSharding?(): void;
+}
+
+/**
+ * Every project pulled in by another project *of this run* — as a
+ * `dependencies` entry or as its `teardown`.
+ *
+ * Their tests are readonly during `preprocess`: `testRun.exclude()` throws on
+ * them ("these always run in full"). Read from the suite, NOT from
+ * `config.projects`: the latter holds every declared project regardless of
+ * `--project`, so under `playwright test --project=setup` it would mark `setup`
+ * readonly on the strength of a declaration by an `e2e` project that is not
+ * running — filtering out the entire collection, killing the reduction, and
+ * reporting `subset_matched_no_collected_test` for a cause that never happened.
+ *
+ * No graph walk is needed for chains: every project of the run contributes its
+ * own declarations, so a setup project's own setup or teardown is picked up
+ * from that project's entry. Still deliberately over-inclusive — a project both
+ * top-level and someone else's dependency lands here and keeps running in full,
+ * which is the direction this feature is allowed to err in.
+ */
+function readonlyProjectNames(suite: Suite): Set<string> {
+  const names = new Set<string>();
+  for (const projectSuite of suite.suites) {
+    const project = projectSuite.project();
+    if (!project) continue;
+    for (const dependency of project.dependencies) names.add(dependency);
+    if (project.teardown) names.add(project.teardown);
+  }
+  return names;
+}
 
 export class MergifyReporter implements Reporter {
   private options: MergifyReporterOptions;
@@ -82,6 +126,14 @@ export class MergifyReporter implements Reporter {
    */
   private phase1Outcomes: Map<string, { status: 'pass' | 'fail'; duration: number }> = new Map();
 
+  // Reduced merge-queue reruns.
+  /** Whether the running Playwright called `preprocess` — 1.62 and up do. */
+  private preprocessCalled = false;
+  /** What `preprocess` decided, once it met the collection. Reported in onEnd. */
+  private testSelection: TestSelectionApplication | undefined;
+  /** Memoised state file: `preprocess` needs it before `onBegin` reads it. */
+  private sharedState: SharedState | null | undefined;
+
   constructor(options?: MergifyReporterOptions) {
     this.options = options ?? {};
     this.includeProject = resolveIncludeProject();
@@ -90,6 +142,95 @@ export class MergifyReporter implements Reporter {
   /** Project-qualifier prefix for a test's identity, honoring the env flag. */
   private prefixFor(test: TestCase): string {
     return this.includeProject ? projectNamePrefix(projectNameFromTest(test)) : '';
+  }
+
+  /**
+   * A test's identity: the same string the backend stores, and the same one
+   * quarantine and flaky detection match on.
+   *
+   * Used by `preprocess` and by the flaky-candidate walk in `onBegin`. The
+   * `onTestEnd` builders and the worker-side fixture still assemble the key
+   * inline — the fixture holds a `TestInfo`, not a `TestCase`, so it structurally
+   * cannot call this. They agree byte-for-byte today; nothing enforces it.
+   */
+  private testKey(test: TestCase, rootDir: string): string {
+    const absolute = test.location?.file ?? '';
+    const filepath = toPosix(rootDir ? relative(rootDir, absolute) : absolute);
+    return buildTestKey(filepath, test.titlePath(), test.title, this.prefixFor(test));
+  }
+
+  /** The globalSetup-written state, read at most once per process. */
+  private loadSharedState(): SharedState | null {
+    if (this.sharedState === undefined) {
+      const statePath = process.env.MERGIFY_STATE_FILE;
+      this.sharedState = statePath ? readStateFile(statePath) : null;
+    }
+    return this.sharedState;
+  }
+
+  /**
+   * Reduce this run to the tests Mergify says failed on the previous attempt.
+   *
+   * `preprocess` is the only Playwright hook that sees the whole collection
+   * while it can still be changed. It runs after `--project`, `--grep` and
+   * `.only` have been applied — so the subset can only ever narrow what the
+   * user asked for, never widen it — and before Playwright shards, so the
+   * reduced set is what gets spread across a `--shard` matrix rather than each
+   * shard reducing its own slice.
+   *
+   * Playwright calls it from 1.62 onwards. Older runners ignore the method
+   * entirely and run the full suite; `onEnd` says so rather than leaving a user
+   * wondering why nothing was reduced.
+   */
+  async preprocess(params: {
+    config: FullConfig;
+    suite: Suite;
+    testRun: PlaywrightTestRun;
+  }): Promise<void> {
+    this.preprocessCalled = true;
+
+    // Flaky-detection rerun subprocess: its `--test-list` is already phase 1's
+    // reduced set, so filtering again could only drop reruns. `this.rerunFile`
+    // is not set yet — onBegin runs after this hook.
+    if (process.env.MERGIFY_RERUN_FILE) return;
+
+    const selection = this.loadSharedState()?.testSelection;
+    if (!selection) return;
+
+    try {
+      // Setup/teardown project tests are readonly here and always run in full,
+      // so they take no part in the reduction on either side: kept out of the
+      // match, so they can never stand in for a real hit, and never excluded.
+      const readonlyProjects = readonlyProjectNames(params.suite);
+      const rootDir = params.config.rootDir ?? '';
+      const collected = params.suite
+        .allTests()
+        .filter((test) => !readonlyProjects.has(projectNameFromTest(test) ?? ''))
+        .map((test) => ({ test, key: this.testKey(test, rootDir) }));
+
+      const applied = applyToCollected(
+        selection,
+        collected.map((entry) => entry.key)
+      );
+      this.testSelection = applied;
+      if (applied.selection !== 'subset') {
+        this.coverForDivergentShards(applied, params);
+        return;
+      }
+
+      for (const { test, key } of collected) {
+        if (!applied.keep.has(key)) params.testRun.exclude(test);
+      }
+    } catch (err) {
+      // Letting this throw would abort the whole run — the one outcome reduced
+      // reruns must never cause. A failure part-way through the loop leaves the
+      // remaining tests un-excluded, which runs MORE tests than intended, never
+      // fewer.
+      this.testSelection = undefined;
+      process.stderr.write(
+        `[@mergifyio/playwright] test selection could not be applied, tests it did not deselect will run: ${String(err)}\n`
+      );
+    }
   }
 
   printsToStdio(): boolean {
@@ -147,15 +288,12 @@ export class MergifyReporter implements Reporter {
     }
 
     let flakyContext: FlakyDetectionContext | null = null;
-    const statePath = process.env.MERGIFY_STATE_FILE;
-    if (statePath) {
-      const state = readStateFile(statePath);
-      if (state) {
-        this.quarantineFetchedCount = state.quarantinedTests.length;
-        this.quarantineFetchedNames = state.quarantinedTests;
-        if (state.flakyMode) this.flakyMode = state.flakyMode;
-        if (state.flakyContext) flakyContext = state.flakyContext;
-      }
+    const state = this.loadSharedState();
+    if (state) {
+      this.quarantineFetchedCount = state.quarantinedTests.length;
+      this.quarantineFetchedNames = state.quarantinedTests;
+      if (state.flakyMode) this.flakyMode = state.flakyMode;
+      if (state.flakyContext) flakyContext = state.flakyContext;
     }
 
     this.session = {
@@ -171,12 +309,7 @@ export class MergifyReporter implements Reporter {
     }
 
     if (flakyContext && this.flakyMode && typeof suite.allTests === 'function') {
-      const allTestNames = suite.allTests().map((tc) => {
-        const absolute = tc.location?.file ?? '';
-        const filepath = toPosix(config.rootDir ? relative(config.rootDir, absolute) : absolute);
-        const prefix = this.prefixFor(tc);
-        return buildTestKey(filepath, tc.titlePath(), tc.title, prefix);
-      });
+      const allTestNames = suite.allTests().map((tc) => this.testKey(tc, config.rootDir ?? ''));
       this.flakyDetector = new FlakyDetector(flakyContext, this.flakyMode, allTestNames);
     }
   }
@@ -373,6 +506,8 @@ export class MergifyReporter implements Reporter {
       }
     }
 
+    this.reportTestSelection();
+
     if (this.quarantineFetchedCount > 0) {
       const unused = this.quarantineFetchedCount - this.quarantinedCaught.size;
       process.stderr.write('[@mergifyio/playwright] Quarantine report:\n');
@@ -412,6 +547,64 @@ export class MergifyReporter implements Reporter {
         const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
         process.stderr.write(`[@mergifyio/playwright] Failed to flush spans: ${detail}\n`);
       }
+    }
+  }
+
+  /**
+   * Take over sharding when this shard could not reduce but its siblings could.
+   *
+   * `--shard=i/N` is N separate processes, each fetching its own selection, and
+   * Playwright partitions the collection *after* `preprocess`. So a shard whose
+   * fetch failed partitions the FULL list while its siblings partition the
+   * reduced one: the reduced slice this shard was responsible for is then run by
+   * nobody, and every shard exits green. Reproduced on Playwright 1.62 — two
+   * shards, a served subset of two, one shard 500ing: one previously-failing
+   * test was executed by neither, both exit 0.
+   *
+   * `skipSharding()` makes this shard run the whole suite instead of its slice,
+   * so the union covers everything again. Bounded waste in exchange for no
+   * coverage hole — the same trade the ticket makes for a CI matrix.
+   *
+   * Only on the failure path. A *served* `full` is deterministic for a given run
+   * identity, so every shard agrees and the partitions already line up; firing
+   * here would make every ordinary build run its suite N times over.
+   */
+  private coverForDivergentShards(
+    applied: TestSelectionApplication,
+    params: { config: FullConfig; testRun: PlaywrightTestRun }
+  ): void {
+    if (applied.reason !== 'fetch_failed' || !params.config.shard) return;
+    if (typeof params.testRun.skipSharding !== 'function') return;
+    params.testRun.skipSharding();
+    process.stderr.write(
+      '[@mergifyio/playwright] the test selection could not be fetched during a sharded run; ' +
+        'this shard runs the whole suite so no previously-failing test is missed by every shard.\n'
+    );
+  }
+
+  /**
+   * Say what the reduction did, or why it did not happen.
+   *
+   * Silence is reserved for "we never asked" (feature off, dormant repository,
+   * incomplete run identity). Once a selection was served, the run reports what
+   * it made of it — including a subset dropped because none of its names is in
+   * this collection, which is the case a user most needs to see.
+   */
+  private reportTestSelection(): void {
+    if (this.testSelection) {
+      process.stderr.write(
+        `[@mergifyio/playwright] ${formatTestSelectionReport(this.testSelection)}`
+      );
+      return;
+    }
+    // A served subset with no `preprocess` behind it: this Playwright is older
+    // than 1.62 and never offered the hook. The suite ran in full, correctly,
+    // but the user should know why nothing was reduced.
+    if (!this.preprocessCalled && this.loadSharedState()?.testSelection?.selection === 'subset') {
+      process.stderr.write(
+        '[@mergifyio/playwright] Mergify served a reduced rerun, but this Playwright does not support ' +
+          'Reporter.preprocess() (added in 1.62) — the full test suite ran. Upgrade @playwright/test to reduce reruns.\n'
+      );
     }
   }
 

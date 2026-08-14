@@ -34,6 +34,7 @@ function stubClient(overrides: Partial<MergifyApiClient> = {}): MergifyApiClient
   return {
     fetchQuarantine: vi.fn().mockResolvedValue([]),
     fetchFlakyContext: vi.fn().mockResolvedValue(null),
+    fetchTestSelection: vi.fn().mockResolvedValue(null),
     uploadTrace: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };

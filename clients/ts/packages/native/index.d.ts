@@ -26,6 +26,12 @@ export declare class CiApiClient {
    */
   fetchFlakyContext(): Promise<FlakyDetectionContext | null>
   /**
+   * The test selection for a run, identified by its own `branch`,
+   * `headSha`, and job coordinates, or `null` when reduced reruns are not
+   * enabled for the repository.
+   */
+  fetchTestSelection(branch: string, headSha: string, pipelineName: string, jobName: string): Promise<TestSelectionResponse | null>
+  /**
    * Upload `spans` under `resourceAttributes` as gzipped OTLP protobuf,
    * splitting oversized traces across several uploads. Rejects on failure.
    */
@@ -139,4 +145,25 @@ export interface Span {
   status: string
   /** The error description; only read when `status` is `"error"`. */
   statusMessage?: string
+}
+
+/**
+ * Whether a run may execute only a subset of tests, as a merge-queue rerun
+ * replaying what failed on the previous attempt.
+ *
+ * Handed over raw: `selection` is `"full"` or `"subset"`, and `tests` is
+ * `null` when the field is absent from the response. Deciding what to do with
+ * it belongs to the caller, which alone holds the framework's collection to
+ * match a subset against.
+ */
+export interface TestSelectionResponse {
+  /** `"full"` (run everything) or `"subset"` (run only `tests`). */
+  selection: string
+  /** Why the server chose this selection — surfaced in the plugin report. */
+  reason: string
+  /**
+   * The test names to run when `selection` is `"subset"`; `null` when the
+   * field is absent (always for `"full"`).
+   */
+  tests?: Array<string>
 }

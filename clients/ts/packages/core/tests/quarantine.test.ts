@@ -9,6 +9,7 @@ function client(fetchQuarantine: MergifyApiClient['fetchQuarantine']): MergifyAp
   return {
     fetchQuarantine,
     fetchFlakyContext: vi.fn(),
+    fetchTestSelection: vi.fn(),
     uploadTrace: vi.fn(),
   };
 }
