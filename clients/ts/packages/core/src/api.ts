@@ -14,7 +14,7 @@ import { createNativeApiClient } from './native.js';
  */
 export type MergifyApiClient = Pick<
   CiApiClient,
-  'fetchQuarantine' | 'fetchFlakyContext' | 'uploadTrace'
+  'fetchQuarantine' | 'fetchFlakyContext' | 'fetchTestSelection' | 'uploadTrace'
 >;
 
 export interface ApiClientConfig {

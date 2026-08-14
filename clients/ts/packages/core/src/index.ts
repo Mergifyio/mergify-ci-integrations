@@ -13,14 +13,17 @@ export { detectResources } from './resources/index.js';
 export { emitTestCaseSpan, endSessionSpan, startSessionSpan } from './spans.js';
 // Test identifier — the one construction every server-name match goes through
 export { buildTestIdentifier, TEST_NAME_SEPARATOR } from './test-identifier.js';
-// Test selection
+// Test selection (reduced merge-queue reruns)
 export type {
   TestSelection,
+  TestSelectionApplication,
   TestSelectionClient,
   TestSelectionCoordinates,
 } from './test-selection.js';
 export {
+  applyToCollected,
   fetchTestSelection,
+  formatTestSelectionReport,
   isTestSelectionDisabled,
   resolveSelectionCoordinates,
   toTestSelection,
