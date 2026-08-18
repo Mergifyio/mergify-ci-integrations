@@ -60,10 +60,12 @@ describe('Flaky detection runner', () => {
 
   it('does not rerun tests that are not candidates', async () => {
     const exporter = new InMemorySpanExporter();
-    // All tests are "existing" so none are candidates in "new" mode
+    // All tests are "existing" so none are candidates in "new" mode. The names
+    // are the ones the reporter uploads — the server has never seen any other
+    // shape, so a name carrying the file path would not match here either.
     const ctx = {
       ...flakyContext,
-      existing_test_names: ['passing.test.ts > math > adds numbers'],
+      existing_test_names: ['math > adds numbers'],
     };
     const reporter = new MergifyReporter({
       exporter,
