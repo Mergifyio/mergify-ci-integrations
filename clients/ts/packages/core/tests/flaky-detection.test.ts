@@ -209,6 +209,7 @@ describe('fetchFlakyDetectionContext', () => {
     return {
       fetchQuarantine: vi.fn(),
       fetchFlakyContext,
+      fetchTestSelection: vi.fn(),
       uploadTrace: vi.fn(),
     };
   }

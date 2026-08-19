@@ -11,6 +11,19 @@ export { fetchQuarantineList } from './quarantine.js';
 export { detectResources } from './resources/index.js';
 // Span helpers
 export { emitTestCaseSpan, endSessionSpan, startSessionSpan } from './spans.js';
+export type {
+  TestSelection,
+  TestSelectionApplication,
+  TestSelectionCoordinates,
+} from './test-selection.js';
+// Test selection (reduced merge-queue reruns)
+export {
+  applyToCollected,
+  formatTestSelectionReport,
+  isTestSelectionDisabled,
+  resolveTestSelection,
+  resolveTestSelectionCoordinates,
+} from './test-selection.js';
 // Tracing
 export type { TracingConfig, TracingContext } from './tracing.js';
 export { createTracing, SynchronousBatchSpanProcessor } from './tracing.js';

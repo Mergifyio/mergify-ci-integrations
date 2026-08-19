@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use mergify_ci_api::{
     ApiConfig, AttrValue as ApiAttrValue, Client, ClientInfo, Outcome, SpanData, SpanStatus,
+    TestSelection as ApiTestSelection,
 };
 use mergify_ci_core::{AttrValue, CiContext};
 use napi::bindgen_prelude::{BigInt, Either, Either3};
@@ -149,6 +150,34 @@ impl From<mergify_ci_api::FlakyDetectionContext> for FlakyDetectionContext {
     }
 }
 
+/// Whether a run may execute only a subset of tests, as a merge-queue rerun
+/// replaying what failed on the previous attempt.
+///
+/// Handed over raw: `selection` is `"full"` or `"subset"`, and `tests` is
+/// `null` when the field is absent from the response. Deciding what to do with
+/// it belongs to the caller, which alone holds the framework's collection to
+/// match a subset against.
+#[napi(object)]
+pub struct TestSelectionResponse {
+    /// `"full"` (run everything) or `"subset"` (run only `tests`).
+    pub selection: String,
+    /// Why the server chose this selection — surfaced in the plugin report.
+    pub reason: String,
+    /// The test names to run when `selection` is `"subset"`; `null` when the
+    /// field is absent (always for `"full"`).
+    pub tests: Option<Vec<String>>,
+}
+
+impl From<ApiTestSelection> for TestSelectionResponse {
+    fn from(selection: ApiTestSelection) -> Self {
+        Self {
+            selection: selection.selection,
+            reason: selection.reason,
+            tests: selection.tests,
+        }
+    }
+}
+
 /// One `OpenTelemetry` attribute, as a key and a JS `boolean | number | string`.
 #[napi(object)]
 pub struct Attribute {
@@ -235,6 +264,28 @@ impl CiApiClient {
     pub async fn fetch_flaky_context(&self) -> Result<Option<FlakyDetectionContext>> {
         match self.client.fetch_flaky_context().await {
             Outcome::Ready(context) => Ok(Some(context.into())),
+            Outcome::Dormant => Ok(None),
+            Outcome::Failed(message) => Err(Error::from_reason(message)),
+        }
+    }
+
+    /// The test selection for a run, identified by its own `branch`,
+    /// `headSha`, and job coordinates, or `null` when reduced reruns are not
+    /// enabled for the repository.
+    #[napi]
+    pub async fn fetch_test_selection(
+        &self,
+        branch: String,
+        head_sha: String,
+        pipeline_name: String,
+        job_name: String,
+    ) -> Result<Option<TestSelectionResponse>> {
+        match self
+            .client
+            .fetch_test_selection(&branch, &head_sha, &pipeline_name, &job_name)
+            .await
+        {
+            Outcome::Ready(selection) => Ok(Some(selection.into())),
             Outcome::Dormant => Ok(None),
             Outcome::Failed(message) => Err(Error::from_reason(message)),
         }
