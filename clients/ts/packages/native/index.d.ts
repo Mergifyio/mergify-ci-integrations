@@ -26,6 +26,12 @@ export declare class CiApiClient {
    */
   fetchFlakyContext(): Promise<FlakyDetectionContext | null>
   /**
+   * The test selection for a run, identified by its own `branch`,
+   * `headSha` and job coordinates, or `null` when test selection is not
+   * enabled for the repository.
+   */
+  fetchTestSelection(branch: string, headSha: string, pipelineName: string, jobName: string): Promise<TestSelection | null>
+  /**
    * Upload `spans` under `resourceAttributes` as gzipped OTLP protobuf,
    * splitting oversized traces across several uploads. Rejects on failure.
    */
@@ -139,4 +145,21 @@ export interface Span {
   status: string
   /** The error description; only read when `status` is `"error"`. */
   statusMessage?: string
+}
+
+/**
+ * Whether this run should execute only a subset of tests.
+ *
+ * Left as the server sent it, deliberately: only the caller holds the tests
+ * the framework actually collected, and normalising `subset` down to `full`
+ * (an empty list, a list matching nothing) is a decision that needs them. The
+ * binding's job is to deliver the answer, not to interpret it.
+ */
+export interface TestSelection {
+  /** `"full"` (run everything) or `"subset"` (run only `tests`). */
+  selection: string
+  /** Why the server chose this selection — surfaced in the plugin report. */
+  reason: string
+  /** The test identifiers to run; absent on a `full` answer. */
+  tests?: Array<string>
 }

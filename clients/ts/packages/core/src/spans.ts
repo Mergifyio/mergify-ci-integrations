@@ -1,5 +1,6 @@
 import { context, type Span, SpanStatusCode, type Tracer, trace } from '@opentelemetry/api';
 import { W3CTraceContextPropagator } from '@opentelemetry/core';
+import { buildTestIdentifier } from './test-identifier.js';
 import type { TracingContext } from './tracing.js';
 import type { TestCaseResult } from './types.js';
 
@@ -85,9 +86,8 @@ export function emitTestCaseSpan(tracer: Tracer, sessionSpan: Span, result: Test
     attributes['cicd.test.rerun_count'] = result.flakyDetection.rerunCount;
   }
 
-  const base =
-    result.namespace.length > 0 ? `${result.namespace} > ${result.function}` : result.function;
-  const spanName = (result.namePrefix ?? '') + base;
+  const spanName =
+    (result.namePrefix ?? '') + buildTestIdentifier(result.namespace, result.function);
 
   const span = tracer.startSpan(spanName, { attributes, startTime: startTimeMs }, parentCtx);
 
