@@ -364,7 +364,12 @@ fn hex_id<const N: usize>(hex: &str) -> Result<[u8; N]> {
         ));
     }
     let mut bytes = [0u8; N];
-    for (byte, pair) in bytes.iter_mut().zip(raw.chunks_exact(2)) {
+    // `as_chunks` rather than `chunks_exact`: the pair is then a `&[u8; 2]`
+    // instead of a `&[u8]`, so the length is carried by the type. The length
+    // was already guaranteed by the check above; clippy names this one and
+    // `-D warnings` turns it into a build failure.
+    let (pairs, _) = raw.as_chunks::<2>();
+    for (byte, pair) in bytes.iter_mut().zip(pairs) {
         *byte = std::str::from_utf8(pair)
             .ok()
             .and_then(|pair| u8::from_str_radix(pair, 16).ok())
