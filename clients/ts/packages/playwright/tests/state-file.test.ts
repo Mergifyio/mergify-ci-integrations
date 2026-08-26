@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -138,5 +138,70 @@ describe('readStateFile — flaky detection fields', () => {
 
     const read = readStateFile(path);
     expect(read?.flakyMode).toBeUndefined();
+  });
+});
+
+describe('readStateFile — test selection', () => {
+  // The regression that motivates this block: `TestSelection.tests` is a
+  // `ReadonlySet`, and a plain `JSON.stringify` writes a Set as `{}`. The
+  // reader's shape check rejected that, stripped the selection, and the run
+  // replayed in full with nothing printed. Each half was covered on its own —
+  // global-setup's tests stubbed the fetch to null, the reporter's tests
+  // hand-wrote an array — so only a round trip catches it.
+  it('round-trips a subset through write then read, tests still a Set', () => {
+    const path = join(dir, 'state-subset.json');
+    writeStateFile(path, {
+      ...sampleState(),
+      testSelection: {
+        selection: 'subset',
+        reason: 'reduced_rerun',
+        tests: new Set(['tests/a.spec.ts > x', 'tests/b.spec.ts > y']),
+      },
+    });
+
+    const read = readStateFile(path);
+    expect(read?.testSelection?.selection).toBe('subset');
+    expect(read?.testSelection?.reason).toBe('reduced_rerun');
+    expect(read?.testSelection?.tests).toBeInstanceOf(Set);
+    expect([...(read?.testSelection?.tests ?? [])]).toEqual([
+      'tests/a.spec.ts > x',
+      'tests/b.spec.ts > y',
+    ]);
+  });
+
+  it('writes the tests as a JSON array', () => {
+    const path = join(dir, 'state-shape.json');
+    writeStateFile(path, {
+      ...sampleState(),
+      testSelection: { selection: 'subset', reason: 'reduced_rerun', tests: new Set(['only']) },
+    });
+
+    const onDisk = JSON.parse(readFileSync(path, 'utf8'));
+    expect(onDisk.testSelection.tests).toEqual(['only']);
+  });
+
+  it('round-trips a full selection with no tests', () => {
+    const path = join(dir, 'state-full.json');
+    writeStateFile(path, {
+      ...sampleState(),
+      testSelection: { selection: 'full', reason: 'request_failed', tests: new Set() },
+    });
+
+    const read = readStateFile(path);
+    expect(read?.testSelection?.selection).toBe('full');
+    expect(read?.testSelection?.reason).toBe('request_failed');
+    expect(read?.testSelection?.tests.size).toBe(0);
+  });
+
+  it('drops a malformed selection and keeps the rest of the state', () => {
+    const path = join(dir, 'state-bad-selection.json');
+    writeFileSync(
+      path,
+      JSON.stringify({ ...sampleState(), testSelection: { selection: 'subset', tests: {} } })
+    );
+
+    const read = readStateFile(path);
+    expect(read?.testSelection).toBeUndefined();
+    expect(read?.quarantinedTests).toEqual(['tests/a.spec.ts > x']);
   });
 });
