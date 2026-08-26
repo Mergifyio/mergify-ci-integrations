@@ -19,7 +19,6 @@ import {
   startSessionSpan,
   type TestCaseResult,
   type TestRunSession,
-  type TestSelection,
   type TestSelectionApplication,
   type TracingContext,
 } from '@mergifyio/ci-core';
@@ -195,20 +194,12 @@ export class MergifyReporter implements Reporter {
     // is not set yet — onBegin runs after this hook.
     if (process.env.MERGIFY_RERUN_FILE) return;
 
-    const stored = this.loadSharedState()?.testSelection;
-    if (!stored) return;
-
-    // The state file is a process boundary: global-setup writes JSON, so
-    // `tests` arrives as an array and can never be the `ReadonlySet` the shared
-    // module works in. Rehydrating here keeps one in-memory contract instead of
-    // widening that module's type for a serialisation detail — and `Array.isArray`
-    // is not paranoia: `new Set('not-an-array')` is a Set of five characters,
-    // which would match nothing and read as a legitimate stale subset rather
-    // than as the corrupt file it is.
-    const selection: TestSelection = {
-      ...stored,
-      tests: new Set(Array.isArray(stored.tests) ? stored.tests : []),
-    };
+    // The state file is a process boundary — global-setup writes JSON, which
+    // cannot carry the `ReadonlySet` the shared module works in. `readStateFile`
+    // owns both halves of that conversion, so what comes back here is already a
+    // `TestSelection` with a real Set.
+    const selection = this.loadSharedState()?.testSelection;
+    if (!selection) return;
 
     try {
       // Setup/teardown project tests are readonly here and always run in full,

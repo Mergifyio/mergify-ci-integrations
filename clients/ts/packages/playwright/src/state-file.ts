@@ -33,7 +33,32 @@ export function stateFilePath(cacheRoot: string, testRunId: string): string {
 
 export function writeStateFile(path: string, state: SharedState): void {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`);
+  writeFileSync(path, `${JSON.stringify(serialise(state), null, 2)}\n`);
+}
+
+/**
+ * `TestSelection.tests` is a `ReadonlySet`, and `JSON.stringify` writes a Set
+ * as `{}` — which `isWellFormedTestSelection` then rejects, so the reader
+ * strips the whole selection and the run silently replays in full. Convert on
+ * the way out, right next to the `rehydrate` that converts back, so the two
+ * halves of this process boundary cannot drift apart again.
+ */
+function serialise(state: SharedState): Record<string, unknown> {
+  const { testSelection } = state;
+  if (!testSelection) return { ...state };
+  return { ...state, testSelection: { ...testSelection, tests: [...testSelection.tests] } };
+}
+
+/**
+ * The inverse of `serialise`, so callers get the same `ReadonlySet` the shared
+ * module works in whichever side of the file they are on. Runs after
+ * `isWellFormedState`, which has already established that `tests` is an array
+ * of strings.
+ */
+function rehydrate(state: SharedState): SharedState {
+  const { testSelection } = state;
+  if (!testSelection) return state;
+  return { ...state, testSelection: { ...testSelection, tests: new Set(testSelection.tests) } };
 }
 
 export function readStateFile(path: string): SharedState | null {
@@ -74,7 +99,7 @@ export function readStateFile(path: string): SharedState | null {
     return null;
   }
 
-  return parsed;
+  return rehydrate(parsed);
 }
 
 /**

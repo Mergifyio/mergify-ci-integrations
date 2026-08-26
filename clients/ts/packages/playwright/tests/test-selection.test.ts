@@ -5,7 +5,7 @@ import { InMemorySpanExporter } from '@opentelemetry/sdk-trace-base';
 import type { FullConfig, Suite, TestCase } from '@playwright/test/reporter';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MergifyReporter } from '../src/reporter.js';
-import { stateFilePath } from '../src/state-file.js';
+import { type SharedState, stateFilePath, writeStateFile } from '../src/state-file.js';
 
 interface FakeProject {
   name: string;
@@ -96,18 +96,39 @@ afterEach(() => {
   delete process.env.MERGIFY_RERUN_FILE;
 });
 
-function seedState(testSelection?: unknown): void {
-  writeFileSync(
-    statePath,
-    JSON.stringify({
-      version: 1,
-      testRunId: 'run-1',
-      createdAt: '2026-08-14T00:00:00Z',
-      rootDir: '/root',
-      quarantinedTests: [],
-      ...(testSelection !== undefined && { testSelection }),
-    })
-  );
+const BASE_STATE: SharedState = {
+  version: 1,
+  testRunId: 'run-1',
+  createdAt: '2026-08-14T00:00:00Z',
+  rootDir: '/root',
+  quarantinedTests: [],
+};
+
+/**
+ * Seed the file the way globalSetup does — through `writeStateFile`, handing it
+ * the `ReadonlySet` the shared module works in.
+ *
+ * Deliberately NOT a hand-written JSON blob: that is what let the serialisation
+ * defect ship. Every case below exercised the reader against a shape the writer
+ * never produced, so a writer that emitted `"tests": {}` for every run looked
+ * green here. Going through the real writer makes the round trip transitive.
+ */
+function seedState(testSelection?: {
+  selection: 'full' | 'subset';
+  reason: string;
+  tests: string[];
+}): void {
+  writeStateFile(statePath, {
+    ...BASE_STATE,
+    ...(testSelection && {
+      testSelection: { ...testSelection, tests: new Set(testSelection.tests) },
+    }),
+  });
+}
+
+/** A hand-written file, for the corrupt shapes `writeStateFile` cannot emit. */
+function seedRawState(testSelection: unknown): void {
+  writeFileSync(statePath, JSON.stringify({ ...BASE_STATE, testSelection }));
 }
 
 function reporter(): MergifyReporter {
@@ -252,7 +273,7 @@ describe('preprocess — the guards that keep the full suite running', () => {
   });
 
   it('excludes nothing when the persisted selection is malformed', async () => {
-    seedState({ selection: 'subset', reason: 'queue_rerun', tests: 'not-an-array' });
+    seedRawState({ selection: 'subset', reason: 'queue_rerun', tests: 'not-an-array' });
     const { excluded, testRun } = fakeTestRun();
 
     await reporter().preprocess({
