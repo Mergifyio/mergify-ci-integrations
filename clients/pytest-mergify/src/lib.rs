@@ -173,6 +173,9 @@ fn flaky_context_dict(py: Python<'_>, context: &FlakyDetectionContext) -> PyResu
     dict.set_item("existing_test_names", context.existing_test_names.clone())?;
     dict.set_item("existing_tests_mean_duration_ms", context.existing_tests_mean_duration_ms)?;
     dict.set_item("unhealthy_test_names", context.unhealthy_test_names.clone())?;
+    dict.set_item("budget_ratio_for_test_retries", context.budget_ratio_for_test_retries)?;
+    dict.set_item("flaky_test_names", context.flaky_test_names.clone())?;
+    dict.set_item("broken_test_names", context.broken_test_names.clone())?;
     dict.set_item("max_test_execution_count", context.max_test_execution_count)?;
     dict.set_item("max_test_name_length", context.max_test_name_length)?;
     dict.set_item("min_budget_duration_ms", context.min_budget_duration_ms)?;
@@ -256,6 +259,20 @@ fn context_from_dict(dict: &Bound<'_, PyDict>) -> PyResult<FlakyDetectionContext
         existing_tests_mean_duration_ms: req_item(dict, "existing_tests_mean_duration_ms")?
             .extract()?,
         unhealthy_test_names: req_item(dict, "unhealthy_test_names")?.extract()?,
+        // Optional, matching the wire model's serde defaults: a context dict
+        // built before test retry existed is still a valid one to plan from.
+        budget_ratio_for_test_retries: opt_item(dict, "budget_ratio_for_test_retries")?
+            .map(|value| value.extract())
+            .transpose()?
+            .unwrap_or_default(),
+        flaky_test_names: opt_item(dict, "flaky_test_names")?
+            .map(|value| value.extract())
+            .transpose()?
+            .unwrap_or_default(),
+        broken_test_names: opt_item(dict, "broken_test_names")?
+            .map(|value| value.extract())
+            .transpose()?
+            .unwrap_or_default(),
         max_test_execution_count: req_item(dict, "max_test_execution_count")?.extract()?,
         max_test_name_length: req_item(dict, "max_test_name_length")?.extract()?,
         min_budget_duration_ms: req_item(dict, "min_budget_duration_ms")?.extract()?,

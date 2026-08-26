@@ -38,6 +38,22 @@ pub struct FlakyDetectionContext {
     pub existing_tests_mean_duration_ms: i64,
     /// Names of tests currently considered unhealthy.
     pub unhealthy_test_names: Vec<String>,
+    /// Fraction of the suite runtime budgeted for retrying failed tests.
+    ///
+    /// Defaulted, like the two `*_test_names` fields below, so a client built
+    /// against this model still deserialises an engine that predates test
+    /// retry -- the absent mechanism then reads as one with nothing to retry.
+    #[serde(default)]
+    pub budget_ratio_for_test_retries: f64,
+    /// Names of tests the server classifies as flaky on the default branch:
+    /// the set a failed attempt may be retried on.
+    #[serde(default)]
+    pub flaky_test_names: Vec<String>,
+    /// Names of tests the server classifies as broken on the default branch.
+    /// Served so the payload says what the data is; retry never acts on them,
+    /// because a deterministic failure is not something a rerun can rescue.
+    #[serde(default)]
+    pub broken_test_names: Vec<String>,
     /// Maximum number of times a single test may be executed.
     pub max_test_execution_count: i64,
     /// Maximum test-name length the server tracks.
@@ -103,6 +119,25 @@ mod tests {
         assert_eq!(ctx.max_test_execution_count, 10);
         assert_eq!(ctx.min_budget_duration_ms, 5000);
         assert!((ctx.budget_ratio_for_new_tests - 0.1).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn defaults_test_retry_fields_on_an_engine_that_predates_them() {
+        let json = r#"{
+            "budget_ratio_for_new_tests": 0.1,
+            "budget_ratio_for_unhealthy_tests": 0.2,
+            "existing_test_names": [],
+            "existing_tests_mean_duration_ms": 120,
+            "unhealthy_test_names": [],
+            "max_test_execution_count": 10,
+            "max_test_name_length": 256,
+            "min_budget_duration_ms": 5000,
+            "min_test_execution_count": 3
+        }"#;
+        let ctx: FlakyDetectionContext = serde_json::from_str(json).unwrap();
+        assert!(ctx.flaky_test_names.is_empty());
+        assert!(ctx.broken_test_names.is_empty());
+        assert!(ctx.budget_ratio_for_test_retries.abs() < f64::EPSILON);
     }
 
     #[test]

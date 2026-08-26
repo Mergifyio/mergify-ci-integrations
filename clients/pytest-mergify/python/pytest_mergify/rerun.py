@@ -38,6 +38,12 @@ class RunContext:
     max_test_name_length: int
     min_budget_duration_ms: int
     min_test_execution_count: int
+    # Defaulted so a client running against an engine that predates test retry
+    # still builds a context: the mechanism then reads as one with no budget
+    # and nothing to retry, which is what an engine unable to serve it means.
+    budget_ratio_for_test_retries: float = 0.0
+    flaky_test_names: typing.List[str] = dataclasses.field(default_factory=list)
+    broken_test_names: typing.List[str] = dataclasses.field(default_factory=list)
 
     @property
     def existing_tests_mean_duration(self) -> datetime.timedelta:
