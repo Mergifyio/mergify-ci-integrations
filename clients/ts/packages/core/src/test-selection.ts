@@ -87,10 +87,19 @@ export function resolveSelectionCoordinates(
 }
 
 /** The kill switch, honoured before any network call is made. */
-export function isTestSelectionDisabled(): boolean {
-  // A kill switch must never break a run: a value we cannot parse reads as an
-  // attempt to disable, exactly as pytest-mergify treats it.
-  return envToBool(process.env.MERGIFY_TEST_SELECTION_DISABLE, true);
+export function isTestSelectionDisabled(
+  value = process.env.MERGIFY_TEST_SELECTION_DISABLE
+): boolean {
+  // An EMPTY value is "unset", not "disable". The standard GitHub Actions idiom
+  // for a conditional variable (`${{ cond && 'true' || '' }}`, or a `vars.X`
+  // that resolves to nothing) produces `''` for what the author means as
+  // absent; reading it as "disable" turns the feature off for a whole workflow
+  // with no diagnostic at all. A deliberate divergence from pytest-mergify,
+  // which still has that gap.
+  if (value === undefined || value.length === 0) return false;
+  // Past that, a kill switch must never break a run: a value we cannot parse
+  // reads as an attempt to disable, exactly as pytest-mergify treats it.
+  return envToBool(value, true);
 }
 
 /**
@@ -125,4 +134,91 @@ export async function fetchTestSelection(
   if (fetched === null) return fullRun('not_requested');
 
   return toTestSelection(fetched.selection, fetched.reason, fetched.tests);
+}
+
+export interface TestSelectionApplication {
+  selection: 'full' | 'subset';
+  reason: string;
+  /** The names to run. Empty — and meaningless — when `selection` is `full`. */
+  keep: Set<string>;
+  keptCount: number;
+  deselectedCount: number;
+}
+
+/**
+ * Decide what to actually run, given the whole collection.
+ *
+ * Matching is by exact name — the identifiers Mergify serves are the ones this
+ * plugin previously uploaded. Served names absent from the collection are
+ * ignored; if NOTHING matches (e.g. the tests were renamed since the previous
+ * attempt), the result is `full` — an empty reduced run would turn green
+ * without testing anything. So this can widen back to everything, which is why
+ * a caller must read `.selection` before it touches `.keep`.
+ *
+ * `collected` must be the run's whole collection, not one file's or one
+ * worker's share of it: the emptiness check is what makes a stale subset safe,
+ * and it only means that globally. That is also why this lives here and not in
+ * every reporter — a framework that never sees the whole collection before
+ * running (Vitest collects per worker) cannot use it, and has to make the
+ * emptiness safe some other way rather than pretend this call applies.
+ *
+ * An array rather than an `Iterable` on purpose: the body needs two passes, and
+ * a lazy one-shot iterable would be silently empty on the second.
+ */
+export function applyToCollected(
+  selection: TestSelection,
+  collected: readonly string[]
+): TestSelectionApplication {
+  if (selection.selection !== 'subset') {
+    return {
+      selection: 'full',
+      reason: selection.reason,
+      keep: new Set(),
+      keptCount: 0,
+      deselectedCount: 0,
+    };
+  }
+
+  // One pass. `keptCount` counts OCCURRENCES, not distinct names — a Playwright
+  // test caught in several projects shares one identity but is several collected
+  // entries — so the two counts add up to what actually runs.
+  const keep = new Set<string>();
+  let keptCount = 0;
+  for (const name of collected) {
+    if (!selection.tests.has(name)) continue;
+    keep.add(name);
+    keptCount += 1;
+  }
+
+  if (keep.size === 0) {
+    return {
+      selection: 'full',
+      reason: 'subset_matched_no_collected_test',
+      keep: new Set(),
+      keptCount: 0,
+      deselectedCount: 0,
+    };
+  }
+
+  return {
+    selection: 'subset',
+    reason: selection.reason,
+    keep,
+    keptCount,
+    deselectedCount: collected.length - keptCount,
+  };
+}
+
+/** The end-of-run report block, mirroring pytest-mergify's wording. */
+export function formatTestSelectionReport(application: TestSelectionApplication): string {
+  const lines = [
+    '✂️ Test selection',
+    `  selection: ${application.selection} (reason: ${application.reason})`,
+  ];
+  if (application.selection === 'subset') {
+    lines.push(
+      `  reduced rerun: executing ${application.keptCount} previously-failing test(s), ${application.deselectedCount} deselected`
+    );
+  }
+  return `${lines.join('\n')}\n`;
 }

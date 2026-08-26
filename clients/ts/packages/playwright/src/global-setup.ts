@@ -6,12 +6,17 @@ import {
   type FlakyDetectionContext,
   fetchFlakyDetectionContext,
   fetchQuarantineList,
+  fetchTestSelection,
   generateTestRunId,
   getRepoName,
   isInCI,
+  isTestSelectionDisabled,
   type MergifyApiClient,
   resolveBranchFromAttributes,
+  resolveSelectionCoordinates,
+  type TestSelection,
 } from '@mergifyio/ci-core';
+import type { Attributes } from '@opentelemetry/api';
 import type { FullConfig } from '@playwright/test';
 import { type SharedState, stateFilePath, writeStateFile } from './state-file.js';
 import { readPluginVersion } from './version.js';
@@ -96,6 +101,12 @@ export async function runGlobalSetup(config: FullConfig, deps: RunGlobalSetupDep
     flakyMode = mode;
   }
 
+  // Reduced merge-queue reruns. Asked for here — this is where the API client
+  // lives, and globalSetup runs once per Playwright process, before any test
+  // file is loaded. Applying the answer is the reporter's job: `preprocess` is
+  // the only hook holding the collection to match a subset against.
+  const testSelection = await loadTestSelection(client, attrs, log);
+
   const state: SharedState = {
     version: 1,
     testRunId,
@@ -104,6 +115,7 @@ export async function runGlobalSetup(config: FullConfig, deps: RunGlobalSetupDep
     quarantinedTests: [...list],
     ...(flakyContext && { flakyContext }),
     ...(flakyMode && { flakyMode }),
+    ...(testSelection && { testSelection }),
   };
 
   const path = stateFilePath(deps.cacheRoot, testRunId);
@@ -113,6 +125,34 @@ export async function runGlobalSetup(config: FullConfig, deps: RunGlobalSetupDep
   } catch (err) {
     process.stderr.write(`[@mergifyio/playwright] failed to write state file: ${String(err)}\n`);
   }
+}
+
+/**
+ * The test selection for this run, or undefined when nothing was served.
+ *
+ * Undefined covers three cases the reporter treats alike, by staying silent:
+ * the user kill switch, a run whose own identity is incomplete (a missing head
+ * SHA, pipeline, or job name — a request keyed on a partial identity could only
+ * match the wrong run), and a dormant repository. All three mean the full
+ * suite, which is also what a failure degrades to — but a failure comes back as
+ * a real value so the end-of-run report can say so.
+ */
+async function loadTestSelection(
+  client: MergifyApiClient,
+  attrs: Attributes,
+  log: (msg: string) => void
+): Promise<TestSelection | undefined> {
+  if (isTestSelectionDisabled()) return undefined;
+  const coordinates = resolveSelectionCoordinates(attrs);
+  if (!coordinates) return undefined;
+  const selection = await fetchTestSelection(client, coordinates, log);
+  // A dormant repository stays silent: nothing was served, so the end-of-run
+  // block says nothing, exactly like the quarantine and flaky-detection
+  // fetches. The shared module folds that case into a `full` answer reasoned
+  // `not_requested` rather than returning null, so it is read off the reason
+  // and not off nullness. A failure is NOT dormant — it is a real "run
+  // everything" that a user whose reruns stopped shrinking needs to see.
+  return selection.reason === 'not_requested' ? undefined : selection;
 }
 
 export default async function playwrightGlobalSetup(config: FullConfig): Promise<void> {

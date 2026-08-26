@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  applyToCollected,
   fetchTestSelection,
+  formatTestSelectionReport,
   isTestSelectionDisabled,
   resolveSelectionCoordinates,
+  type TestSelection,
   type TestSelectionClient,
 } from '../src/test-selection.js';
 
@@ -160,5 +163,127 @@ describe('isTestSelectionDisabled', () => {
     vi.stubEnv('MERGIFY_TEST_SELECTION_DISABLE', 'maybe');
     expect(isTestSelectionDisabled()).toBe(true);
     vi.unstubAllEnvs();
+  });
+});
+
+describe('isTestSelectionDisabled', () => {
+  it('is enabled when the kill switch is unset', () => {
+    expect(isTestSelectionDisabled(undefined)).toBe(false);
+  });
+
+  it.each(['true', '1', 'yes', 'on'])('is disabled by %s', (value) => {
+    expect(isTestSelectionDisabled(value)).toBe(true);
+  });
+
+  it.each(['false', '0', 'no', 'off'])('stays enabled on %s', (value) => {
+    expect(isTestSelectionDisabled(value)).toBe(false);
+  });
+
+  it('reads an unparsable value as an attempt to disable', () => {
+    expect(isTestSelectionDisabled('maybe')).toBe(true);
+  });
+});
+
+describe('applyToCollected', () => {
+  const subset = (tests: string[]): TestSelection => ({
+    selection: 'subset',
+    reason: 'queue_rerun',
+    tests: new Set(tests),
+  });
+
+  it('keeps the served tests and deselects the rest', () => {
+    const applied = applyToCollected(subset(['b', 'd']), ['a', 'b', 'c', 'd']);
+
+    expect(applied.selection).toBe('subset');
+    expect(applied.reason).toBe('queue_rerun');
+    expect([...applied.keep]).toEqual(['b', 'd']);
+    expect(applied.keptCount).toBe(2);
+    expect(applied.deselectedCount).toBe(2);
+  });
+
+  it('ignores served names the collection does not have', () => {
+    const applied = applyToCollected(subset(['b', 'renamed-away']), ['a', 'b']);
+
+    expect(applied.selection).toBe('subset');
+    expect([...applied.keep]).toEqual(['b']);
+    expect(applied.keptCount).toBe(1);
+    expect(applied.deselectedCount).toBe(1);
+  });
+
+  it('runs the full suite when the served subset matches nothing', () => {
+    // The filet against a stale set: every served name was renamed since the
+    // previous attempt, and a reduced run would turn green testing nothing.
+    const applied = applyToCollected(subset(['old-name-1', 'old-name-2']), ['a', 'b']);
+
+    expect(applied.selection).toBe('full');
+    expect(applied.reason).toBe('subset_matched_no_collected_test');
+    expect(applied.keep.size).toBe(0);
+  });
+
+  it('runs the full suite when the collection is empty', () => {
+    const applied = applyToCollected(subset(['a']), []);
+
+    expect(applied.selection).toBe('full');
+    expect(applied.reason).toBe('subset_matched_no_collected_test');
+  });
+
+  it('passes a full selection straight through', () => {
+    const applied = applyToCollected(
+      { selection: 'full', reason: 'not_requested', tests: new Set([]) },
+      ['a', 'b']
+    );
+
+    expect(applied.selection).toBe('full');
+    expect(applied.reason).toBe('not_requested');
+    expect(applied.keep.size).toBe(0);
+  });
+
+  it('counts a name collected several times once per occurrence', () => {
+    // A Playwright test caught in two projects shares one identity but is two
+    // collected entries; the counts must still add up to what actually runs.
+    const applied = applyToCollected(subset(['b']), ['a', 'b', 'b', 'c']);
+
+    expect(applied.keptCount).toBe(2);
+    expect(applied.deselectedCount).toBe(2);
+  });
+
+  it('counts every occurrence exactly once over a long collection', () => {
+    // Guards the single-pass rewrite: an earlier version counted `keptCount` in
+    // a second pass over the same parameter, which a lazy caller would have
+    // exhausted. Counting must stay consistent with `deselectedCount`.
+    const collected = ['a', 'b', 'c', 'b', 'd', 'b'];
+    const applied = applyToCollected(subset(['b']), collected);
+
+    expect(applied.keptCount).toBe(3);
+    expect(applied.deselectedCount).toBe(3);
+    expect(applied.keptCount + applied.deselectedCount).toBe(collected.length);
+  });
+});
+
+describe('formatTestSelectionReport', () => {
+  it('reports the reduction with both counts', () => {
+    const report = formatTestSelectionReport(
+      applyToCollected({ selection: 'subset', reason: 'queue_rerun', tests: new Set(['b']) }, [
+        'a',
+        'b',
+        'c',
+      ])
+    );
+
+    expect(report).toBe(
+      '✂️ Test selection\n  selection: subset (reason: queue_rerun)\n  reduced rerun: executing 1 previously-failing test(s), 2 deselected\n'
+    );
+  });
+
+  it('reports why the full suite is running', () => {
+    const report = formatTestSelectionReport(
+      applyToCollected({ selection: 'subset', reason: 'queue_rerun', tests: new Set(['gone']) }, [
+        'a',
+      ])
+    );
+
+    expect(report).toBe(
+      '✂️ Test selection\n  selection: full (reason: subset_matched_no_collected_test)\n'
+    );
   });
 });
