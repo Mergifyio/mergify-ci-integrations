@@ -6,7 +6,7 @@ import _pytest.pytester
 import pytest
 
 import pytest_mergify
-from pytest_mergify import ci_insights, flaky_detection
+from pytest_mergify import ci_insights, flaky_detection, rerun
 from tests import conftest
 from tests.test_ci_insights import _set_test_environment
 
@@ -263,7 +263,7 @@ def test_serialized_metrics_stay_serializable_after_timeout_prevention() -> None
 
     test = "test_slow"
     detector._tests_to_process = [test]
-    detector._test_metrics[test] = flaky_detection._TestMetrics()
+    detector._test_metrics[test] = rerun.TestMetrics()
     detector._available_budget_duration = datetime.timedelta(seconds=100)
 
     # A tight timeout forces the timeout-prevention branch, which records the

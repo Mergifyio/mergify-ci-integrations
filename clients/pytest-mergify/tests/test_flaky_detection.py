@@ -8,6 +8,7 @@ import pytest
 
 import pytest_mergify
 from pytest_mergify import flaky_detection
+from pytest_mergify import rerun
 from pytest_mergify import utils
 
 _NOW = datetime.datetime(
@@ -43,8 +44,8 @@ def _make_flaky_detection_context(
     max_test_name_length: int = 0,
     min_budget_duration_ms: int = 0,
     min_test_execution_count: int = 0,
-) -> flaky_detection._FlakyDetectionContext:
-    return flaky_detection._FlakyDetectionContext(
+) -> rerun.RunContext:
+    return rerun.RunContext(
         budget_ratio_for_new_tests=budget_ratio_for_new_tests,
         budget_ratio_for_unhealthy_tests=budget_ratio_for_unhealthy_tests,
         existing_test_names=existing_test_names,
@@ -103,11 +104,9 @@ def test_flaky_detector_count_remaining_tests() -> None:
     detector.mode = "new"
     detector._tests_to_process = ["foo", "bar", "baz"]
     detector._test_metrics = {
-        "foo": flaky_detection._TestMetrics(
-            deadline=datetime.datetime.now(datetime.timezone.utc)
-        ),
-        "bar": flaky_detection._TestMetrics(),
-        "baz": flaky_detection._TestMetrics(),
+        "foo": rerun.TestMetrics(deadline=datetime.datetime.now(datetime.timezone.utc)),
+        "bar": rerun.TestMetrics(),
+        "baz": rerun.TestMetrics(),
     }
     assert detector._count_remaining_tests() == 2
 
@@ -118,9 +117,9 @@ def test_flaky_detector_count_remaining_tests() -> None:
 @pytest.mark.parametrize(
     argnames=("metrics", "expected"),
     argvalues=[
-        pytest.param(flaky_detection._TestMetrics(), True, id="Deadline not set"),
+        pytest.param(rerun.TestMetrics(), True, id="Deadline not set"),
         pytest.param(
-            flaky_detection._TestMetrics(
+            rerun.TestMetrics(
                 deadline=datetime.datetime.fromisoformat("2025-01-02T00:00:00+00:00"),
                 initial_call_duration=datetime.timedelta(seconds=1),
             ),
@@ -128,7 +127,7 @@ def test_flaky_detector_count_remaining_tests() -> None:
             id="Not exceeded",
         ),
         pytest.param(
-            flaky_detection._TestMetrics(
+            rerun.TestMetrics(
                 deadline=datetime.datetime.fromisoformat("2025-01-01T00:00:00+00:00"),
                 initial_call_duration=datetime.timedelta(),
             ),
@@ -136,7 +135,7 @@ def test_flaky_detector_count_remaining_tests() -> None:
             id="Exceeded by deadline",
         ),
         pytest.param(
-            flaky_detection._TestMetrics(
+            rerun.TestMetrics(
                 deadline=datetime.datetime.fromisoformat("2025-01-01T00:00:00+00:00"),
                 initial_call_duration=datetime.timedelta(minutes=2),
             ),
@@ -146,7 +145,7 @@ def test_flaky_detector_count_remaining_tests() -> None:
     ],
 )
 def test_flaky_detector_will_exceed_test_deadline(
-    metrics: flaky_detection._TestMetrics,
+    metrics: rerun.TestMetrics,
     expected: bool,
 ) -> None:
     assert metrics.will_exceed_deadline() == expected
@@ -162,7 +161,7 @@ def test_flaky_detector_will_exceed_test_deadline(
         pytest.param(
             datetime.timedelta(seconds=1),
             {
-                "baz": flaky_detection._TestMetrics(
+                "baz": rerun.TestMetrics(
                     total_duration=datetime.timedelta(milliseconds=500)
                 ),
             },
@@ -176,7 +175,7 @@ def test_flaky_detector_will_exceed_test_deadline(
         pytest.param(
             datetime.timedelta(milliseconds=400),
             {
-                "baz": flaky_detection._TestMetrics(
+                "baz": rerun.TestMetrics(
                     total_duration=datetime.timedelta(milliseconds=500)
                 ),
             },
@@ -187,7 +186,7 @@ def test_flaky_detector_will_exceed_test_deadline(
 )
 def test_flaky_detector_get_remaining_budget_duration(
     available_budget_duration: datetime.timedelta,
-    test_metrics: typing.Dict[str, flaky_detection._TestMetrics],
+    test_metrics: typing.Dict[str, rerun.TestMetrics],
     expected: datetime.timedelta,
 ) -> None:
     detector = InitializedFlakyDetector()
@@ -200,7 +199,7 @@ def test_flaky_detector_to_serializable_metrics() -> None:
     detector = InitializedFlakyDetector()
     detector._context = _make_flaky_detection_context(max_test_name_length=100)
     detector._test_metrics = {
-        "test_foo": flaky_detection._TestMetrics(
+        "test_foo": rerun.TestMetrics(
             initial_setup_duration=datetime.timedelta(milliseconds=100),
             initial_call_duration=datetime.timedelta(milliseconds=200),
             initial_teardown_duration=datetime.timedelta(milliseconds=50),
@@ -306,7 +305,7 @@ def test_flaky_detector_set_test_deadline_static() -> None:
     detector._available_budget_duration = datetime.timedelta(seconds=10)
     detector._tests_to_process = ["foo", "bar"]
     detector._test_metrics = {
-        "foo": flaky_detection._TestMetrics(),
+        "foo": rerun.TestMetrics(),
     }
 
     detector.set_test_deadline(test="foo")
@@ -352,7 +351,7 @@ def test_used_budget_counts_reruns_only() -> None:
     detector._context = _make_flaky_detection_context()
     detector._available_budget_duration = datetime.timedelta(seconds=10)
     detector._test_metrics = {
-        "test_foo": flaky_detection._TestMetrics(
+        "test_foo": rerun.TestMetrics(
             initial_setup_duration=datetime.timedelta(milliseconds=100),
             initial_call_duration=datetime.timedelta(milliseconds=200),
             initial_teardown_duration=datetime.timedelta(milliseconds=50),
