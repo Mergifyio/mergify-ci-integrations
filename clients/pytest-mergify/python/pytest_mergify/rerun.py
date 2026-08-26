@@ -213,6 +213,16 @@ class RerunLoop:
         """Choose this mechanism's targets and budget for the session."""
         raise NotImplementedError
 
+    @property
+    def targeted_tests(self) -> typing.Set[str]:
+        """The tests this mechanism will rerun this session.
+
+        Public because the mechanisms have to agree on who reruns what: two of
+        them driving one test would double-spend and hand a single finalizer
+        stack to two owners.
+        """
+        return set(self._tests_to_process)
+
     def try_fill_metrics_from_report(self, report: _pytest.reports.TestReport) -> None:
         test = report.nodeid
 
@@ -251,6 +261,15 @@ class RerunLoop:
 
         return metrics is not None and metrics.deadline is not None
 
+    @property
+    def executions_needed_to_answer(self) -> int:
+        """How many executions this mechanism must fit before it is worth starting.
+
+        A mechanism that learns from a test needs a sample; one that only has
+        to see the test pass once needs a single attempt.
+        """
+        return self._context.min_test_execution_count
+
     def decide_test_is_too_slow(self, test: str) -> bool:
         """
         Decide whether the test can still be rerun enough times before its
@@ -263,7 +282,7 @@ class RerunLoop:
         """
         metrics = self._test_metrics[test]
         metrics.too_slow = (
-            metrics.initial_duration * self._context.min_test_execution_count
+            metrics.initial_duration * self.executions_needed_to_answer
             > metrics.remaining_time()
         )
 
@@ -272,13 +291,6 @@ class RerunLoop:
     def is_test_too_slow(self, test: str) -> bool:
         """The decision taken at the test's first teardown."""
         return self._test_metrics[test].too_slow
-
-    def has_test_been_rerun(self, test: str) -> bool:
-        """Whether the test is past its initial execution, so the report or span
-        at hand belongs to a rerun rather than to the first run."""
-        return (
-            metrics := self._test_metrics.get(test)
-        ) is not None and metrics.rerun_count > 1
 
     def has_test_executed(self, test: str) -> bool:
         """Whether this mechanism tracks the test and it has completed at
@@ -328,8 +340,8 @@ class RerunLoop:
 
         if self._is_xdist:
             # Static allocation: equal share of total budget per test.
-            per_test_budget = self._available_budget_duration / max(
-                len(self._tests_to_process), 1
+            per_test_budget = (
+                self._available_budget_duration / self.tests_sharing_budget
             )
             metrics.deadline = (
                 datetime.datetime.now(datetime.timezone.utc) + per_test_budget
@@ -340,7 +352,7 @@ class RerunLoop:
                     test=test,
                     available_budget=str(self._available_budget_duration),
                     is_xdist=True,
-                    all_tests=len(self._tests_to_process),
+                    all_tests=self.tests_sharing_budget,
                 )
             )
         else:
@@ -443,12 +455,22 @@ class RerunLoop:
             ],
         }
 
+    @property
+    def tests_sharing_budget(self) -> int:
+        """How many tests the budget has to stretch over.
+
+        The targeted set for a mechanism that reruns every test it targets. One
+        that only reruns the tests that fail has to answer differently, or it
+        divides the budget by a population it will never spend it on.
+        """
+        return max(len(self._tests_to_process), 1)
+
     def _count_remaining_tests(self) -> int:
         already_processed_tests = {
             test for test, metrics in self._test_metrics.items() if metrics.deadline
         }
 
-        return max(len(self._tests_to_process) - len(already_processed_tests), 1)
+        return max(self.tests_sharing_budget - len(already_processed_tests), 1)
 
     def _get_used_budget_duration(self) -> datetime.timedelta:
         return sum(

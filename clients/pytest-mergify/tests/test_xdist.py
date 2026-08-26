@@ -298,7 +298,8 @@ def test_worker_does_not_fetch_flaky_context(
         repo_name="Mergifyio/pytest-mergify",
         api_url="https://example.com",
     )
-    insights._load_flaky_detector(mode="new")
+    insights._load_run_context()
 
+    assert insights.run_context_dict is None
     assert insights.flaky_detector is None
     assert insights.flaky_detector_error_message is None

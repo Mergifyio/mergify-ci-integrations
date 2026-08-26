@@ -12,27 +12,7 @@ from pytest_mergify import ci_insights
 from tests import conftest
 
 
-def _set_test_environment(
-    monkeypatch: pytest.MonkeyPatch,
-    mode: typing.Literal["new", "unhealthy"] = "new",
-) -> None:
-    monkeypatch.setenv("_PYTEST_MERGIFY_TEST", "true")
-    monkeypatch.setenv("CI", "true")
-    monkeypatch.setenv("GITHUB_ACTIONS", "true")
-    monkeypatch.setenv("GITHUB_REPOSITORY", "Mergifyio/pytest-mergify")
-    monkeypatch.setenv("MERGIFY_API_URL", "https://example.com")
-    monkeypatch.setenv("MERGIFY_TOKEN", "my_token")
-
-    if mode == "new":
-        # Simulate a PR context: `GITHUB_BASE_REF` is only set for PRs and is
-        # the signal used to select `new` mode.
-        monkeypatch.setenv("GITHUB_BASE_REF", "main")
-    else:
-        # Simulate a push/scheduled context: no base ref, head ref comes from
-        # `GITHUB_REF_NAME`.
-        monkeypatch.delenv("GITHUB_BASE_REF", raising=False)
-        monkeypatch.delenv("GITHUB_HEAD_REF", raising=False)
-        monkeypatch.setenv("GITHUB_REF_NAME", "main")
+_set_test_environment = conftest.set_test_environment
 
 
 # The flaky/quarantine/test-selection fetches are unit-tested in Rust
@@ -976,7 +956,12 @@ def test_empty_base_ref_falls_through_to_head_ref(
     monkeypatch.setenv("GITHUB_BASE_REF", "")
 
     conftest.install_fake_api_client(
-        monkeypatch, flaky_context=conftest.make_flaky_context()
+        monkeypatch,
+        flaky_context=conftest.make_flaky_context(
+            existing_test_names=[
+                "test_empty_base_ref_falls_through_to_head_ref.py::test_foo",
+            ],
+        ),
     )
 
     pytester.makepyfile(

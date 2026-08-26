@@ -165,7 +165,12 @@ impl CiApiClient {
 }
 
 /// Marshal a [`FlakyDetectionContext`] into the dict shape pytest-mergify feeds
-/// to its own dataclass (`_FlakyDetectionContext(**dict)`).
+/// to its own dataclass (`RunContext(**dict)`).
+///
+/// Every field of the model has to be set here. A forgotten one does not fail
+/// to compile and does not fail the Python suite either -- those tests replace
+/// this client wholesale -- it just makes the field arrive as its dataclass
+/// default, which for `flaky_test_names` means test retry is silently off.
 fn flaky_context_dict(py: Python<'_>, context: &FlakyDetectionContext) -> PyResult<Py<PyDict>> {
     let dict = PyDict::new(py);
     dict.set_item("budget_ratio_for_new_tests", context.budget_ratio_for_new_tests)?;

@@ -113,14 +113,28 @@ class XdistFlakyDetectionController:
     )
     _available_budget_duration_ms: float = dataclasses.field(default=0.0)
 
-    def extract_context_from_detector(self, detector: FlakyDetector) -> None:
-        """Extract context from an already-loaded detector for distribution."""
-        self._context_dict = dataclasses.asdict(detector._context)
-        self._mode = detector.mode
+    def set_context(
+        self,
+        context_dict: typing.Dict[str, typing.Any],
+        mode: typing.Optional[str],
+    ) -> None:
+        """Hold the run context for distribution to the workers.
+
+        The context travels even when `mode` is `None` -- a repository that
+        opted into test retry alone has no flaky detection to run, but its
+        workers still need the context retry is built from.
+        """
+        self._context_dict = context_dict
+        self._mode = mode
 
     @property
     def has_context(self) -> bool:
         return self._context_dict is not None
+
+    @property
+    def has_mode(self) -> bool:
+        "Whether flaky detection itself ran, so there is a report to write."
+        return self._mode is not None
 
     def populate_workerinput(self, workerinput: typing.Dict[str, typing.Any]) -> None:
         """Add flaky detection context to a worker's input dict."""

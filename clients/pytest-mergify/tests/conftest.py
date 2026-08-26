@@ -18,6 +18,29 @@ from pytest_mergify import _mergify_ci, tracing
 pytest_plugins = ["pytester"]
 
 
+def set_test_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: typing.Literal["new", "unhealthy"] = "new",
+) -> None:
+    monkeypatch.setenv("_PYTEST_MERGIFY_TEST", "true")
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "Mergifyio/pytest-mergify")
+    monkeypatch.setenv("MERGIFY_API_URL", "https://example.com")
+    monkeypatch.setenv("MERGIFY_TOKEN", "my_token")
+
+    if mode == "new":
+        # Simulate a PR context: `GITHUB_BASE_REF` is only set for PRs and is
+        # the signal used to select `new` mode.
+        monkeypatch.setenv("GITHUB_BASE_REF", "main")
+    else:
+        # Simulate a push/scheduled context: no base ref, head ref comes from
+        # `GITHUB_REF_NAME`.
+        monkeypatch.delenv("GITHUB_BASE_REF", raising=False)
+        monkeypatch.delenv("GITHUB_HEAD_REF", raising=False)
+        monkeypatch.setenv("GITHUB_REF_NAME", "main")
+
+
 def make_flaky_context(
     budget_ratio_for_new_tests: float = 0.1,
     budget_ratio_for_unhealthy_tests: float = 0.05,
