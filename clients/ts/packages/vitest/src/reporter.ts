@@ -1,4 +1,4 @@
-import { dirname, resolve } from 'node:path';
+import { dirname, extname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
   FlakyDetectionContext,
@@ -228,10 +228,18 @@ export class MergifyReporter implements Reporter {
     // Provide quarantine list to workers via ProvidedContext
     vitest.provide('mergify:quarantine', [...this.quarantineList]);
 
-    // Auto-configure the custom runner if not already set
-    const dir =
-      typeof __dirname !== 'undefined' ? __dirname : dirname(fileURLToPath(import.meta.url));
-    const mergifyRunner = resolve(dir, 'runner.js');
+    // Auto-configure the custom runner if not already set.
+    //
+    // The runner is a sibling of this very module and always carries the same
+    // extension: tsdown emits `index.mjs` next to `runner.mjs` and `index.cjs`
+    // next to `runner.cjs`, and under vitest the sources run as `.ts`. There is
+    // no `runner.js` in any of those worlds, so deriving the extension from the
+    // module being executed is what keeps the pair in step — a hardcoded one
+    // resolved to a file that ships in no build at all, and vitest then failed
+    // the whole run with ERR_MODULE_NOT_FOUND the moment a repository had its
+    // first quarantined test (#87).
+    const self = typeof __filename !== 'undefined' ? __filename : fileURLToPath(import.meta.url);
+    const mergifyRunner = resolve(dirname(self), `runner${extname(self)}`);
     if (!vitest.config.runner) {
       vitest.config.runner = mergifyRunner;
     } else if (vitest.config.runner !== mergifyRunner) {
