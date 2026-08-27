@@ -37,6 +37,33 @@ import { readPluginVersion } from './version.js';
 
 const DEFAULT_API_URL = 'https://api.mergify.com';
 
+/**
+ * Test selection is OFF here unless explicitly asked for — a Vitest-only
+ * default, not the shared kill switch.
+ *
+ * On a sharded job every shard reports the same `job_name`, so each is served
+ * the pooled failing set of all shards. A shard owning none of those tests
+ * matches nothing, and `_reportSelection`'s stale-subset guard then fails the
+ * run deliberately — correctly, since a run that skipped everything proves
+ * nothing, but the batch cannot merge past it. `pytest-mergify` avoids this by
+ * widening back to a full run; it can, because it sees the whole collection in
+ * one process before anything executes. Here the collection is only complete
+ * once the workers are done, so prevention is not available and the guard is
+ * all that is left.
+ *
+ * Off by default rather than removed: the feature is correct and measured on
+ * non-sharded runs, and it comes back the day a per-shard identity exists
+ * (MRGFY-8629 and its successors). MRGFY-8906 carries the decision.
+ *
+ * The `false` here is NOT what makes it off by default — `envToBool` returns
+ * false for an unset variable regardless. It governs only an unparsable value,
+ * and it points the same way as the shared kill switch does with `true`: both
+ * resolve garbage towards running the full suite.
+ */
+export function isTestSelectionOptedIn(): boolean {
+  return envToBool(process.env.VITEST_MERGIFY_TEST_SELECTION_ENABLE, false);
+}
+
 export class MergifyReporter implements Reporter {
   private vitest: Vitest | undefined;
   private session: TestRunSession | undefined;
@@ -177,7 +204,7 @@ export class MergifyReporter implements Reporter {
     const fetch = client.fetchTestSelection?.bind(client);
     // An injected stand-in predating this feature has no such method; that
     // reads as "no selection", i.e. run everything.
-    if (!fetch || isTestSelectionDisabled()) return;
+    if (!fetch || isTestSelectionDisabled() || !isTestSelectionOptedIn()) return;
 
     // The selection is keyed on the run's OWN identity — the head branch and
     // revision (a merge-queue draft branch on reruns) plus the job coordinates,
