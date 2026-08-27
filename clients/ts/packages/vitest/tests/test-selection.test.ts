@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path';
 import { InMemorySpanExporter } from '@opentelemetry/sdk-trace-base';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { startVitest } from 'vitest/node';
-import { MergifyReporter } from '../src/reporter.js';
+import { isTestSelectionOptedIn, MergifyReporter } from '../src/reporter.js';
 
 const fixturesDir = resolve(import.meta.dirname, 'fixtures');
 
@@ -166,5 +166,40 @@ describe('test selection', () => {
 
     expect(uploaded).toEqual(['selection > alpha', 'selection > beta', 'selection > gamma']);
     expect(second.executed).toEqual(['beta']);
+  });
+});
+
+describe('the opt-in gate', () => {
+  // `_initTestSelection` itself has no coverage — nothing in this package
+  // injects an `apiClient`, and every test above bypasses the fetch through the
+  // `testSelection` option. That gap predates this gate and is not closed here;
+  // what is pinned is the decision the gate encodes.
+  const VAR = 'VITEST_MERGIFY_TEST_SELECTION_ENABLE';
+
+  afterEach(() => {
+    delete process.env[VAR];
+  });
+
+  it('is off when nothing asks for it', () => {
+    delete process.env[VAR];
+    // A contract test, and deliberately not a guard on the fallback argument:
+    // `envToBool` returns false for an unset variable whatever that argument
+    // says, so flipping it to `true` does NOT make this case fail. What it
+    // pins is the behaviour a reader depends on — silence means off, because
+    // on a sharded job the plugin fails a batch that would otherwise merge
+    // (MRGFY-8906). The fallback is pinned by the unparsable case below.
+    expect(isTestSelectionOptedIn()).toBe(false);
+  });
+
+  it('is on only when explicitly enabled', () => {
+    process.env[VAR] = '1';
+    expect(isTestSelectionOptedIn()).toBe(true);
+  });
+
+  it('treats an unparsable value as off, never as on', () => {
+    // Opposite of the shared kill switch, which reads garbage as "disable".
+    // Both resolve the same way — towards running the full suite.
+    process.env[VAR] = 'perhaps';
+    expect(isTestSelectionOptedIn()).toBe(false);
   });
 });
