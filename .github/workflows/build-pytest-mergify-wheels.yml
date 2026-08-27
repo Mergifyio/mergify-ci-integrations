@@ -49,7 +49,7 @@ jobs:
           - { platform: macos-aarch64, runner: macos-latest, target: aarch64, manylinux: auto }
           - { platform: windows-x64, runner: windows-latest, target: x64, manylinux: auto }
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # hatch-vcs is gone under maturin, so the version is a build-time stamp:
       # rewrite the 0.0.0 placeholder to the tag's CalVer before maturin runs.
       - name: Stamp the version from the tag
@@ -92,7 +92,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Stamp the version from the tag
         if: inputs.tag != ''
         shell: bash
