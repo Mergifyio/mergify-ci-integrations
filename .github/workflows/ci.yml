@@ -125,7 +125,7 @@ jobs:
     name: pytest-mergify semgrep
     runs-on: ubuntu-latest
     container:
-      image: semgrep/semgrep:1.100.0
+      image: semgrep/semgrep:1.175.0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Scoped to the client -- upstream scanned its whole repo, which was just
@@ -203,7 +203,7 @@ jobs:
     name: ts semgrep
     runs-on: ubuntu-latest
     container:
-      image: semgrep/semgrep:1.100.0
+      image: semgrep/semgrep:1.175.0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run Semgrep
