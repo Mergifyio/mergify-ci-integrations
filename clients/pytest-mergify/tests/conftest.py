@@ -18,12 +18,38 @@ from pytest_mergify import _mergify_ci, tracing
 pytest_plugins = ["pytester"]
 
 
+def set_test_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: typing.Literal["new", "unhealthy"] = "new",
+) -> None:
+    monkeypatch.setenv("_PYTEST_MERGIFY_TEST", "true")
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "Mergifyio/pytest-mergify")
+    monkeypatch.setenv("MERGIFY_API_URL", "https://example.com")
+    monkeypatch.setenv("MERGIFY_TOKEN", "my_token")
+
+    if mode == "new":
+        # Simulate a PR context: `GITHUB_BASE_REF` is only set for PRs and is
+        # the signal used to select `new` mode.
+        monkeypatch.setenv("GITHUB_BASE_REF", "main")
+    else:
+        # Simulate a push/scheduled context: no base ref, head ref comes from
+        # `GITHUB_REF_NAME`.
+        monkeypatch.delenv("GITHUB_BASE_REF", raising=False)
+        monkeypatch.delenv("GITHUB_HEAD_REF", raising=False)
+        monkeypatch.setenv("GITHUB_REF_NAME", "main")
+
+
 def make_flaky_context(
     budget_ratio_for_new_tests: float = 0.1,
     budget_ratio_for_unhealthy_tests: float = 0.05,
     existing_test_names: typing.Optional[typing.List[str]] = None,
     existing_tests_mean_duration_ms: int = 0,
     unhealthy_test_names: typing.Optional[typing.List[str]] = None,
+    budget_ratio_for_test_retries: float = 0.05,
+    flaky_test_names: typing.Optional[typing.List[str]] = None,
+    broken_test_names: typing.Optional[typing.List[str]] = None,
     max_test_execution_count: int = 1000,
     max_test_name_length: int = 65536,
     min_budget_duration_ms: int = 4000,
@@ -36,6 +62,9 @@ def make_flaky_context(
         "existing_test_names": existing_test_names or [],
         "existing_tests_mean_duration_ms": existing_tests_mean_duration_ms,
         "unhealthy_test_names": unhealthy_test_names or [],
+        "budget_ratio_for_test_retries": budget_ratio_for_test_retries,
+        "flaky_test_names": flaky_test_names or [],
+        "broken_test_names": broken_test_names or [],
         "max_test_execution_count": max_test_execution_count,
         "max_test_name_length": max_test_name_length,
         "min_budget_duration_ms": min_budget_duration_ms,
