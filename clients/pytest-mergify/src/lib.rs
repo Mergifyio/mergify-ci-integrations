@@ -195,8 +195,12 @@ fn test_selection_dict(py: Python<'_>, selection: &TestSelection) -> PyResult<Py
     let dict = PyDict::new(py);
     dict.set_item("selection", &selection.selection)?;
     dict.set_item("reason", &selection.reason)?;
-    // `tests` is `None` only for a `full` answer (a subset without it is
-    // rejected upstream), so an empty list is the right value for the plugin.
+    // `tests` is `None` for any answer that carries no subset -- `full`, and
+    // any variant this client predates -- since a `subset` without it is
+    // rejected upstream. An empty list is the right value for the plugin: it
+    // keeps the key present, so `TestSelection(**dict)` never raises, and the
+    // Python-side normalisation reads it as "nothing to select" and runs
+    // everything.
     dict.set_item("tests", selection.tests.clone().unwrap_or_default())?;
     Ok(dict.into())
 }

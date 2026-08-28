@@ -81,8 +81,9 @@ pub struct TestSelection {
     /// Why the server chose this selection — surfaced in the plugin report.
     pub reason: String,
     /// The node ids to run when `selection` is `"subset"`; `None` when the field
-    /// is absent (always for `"full"`; a protocol break for `"subset"`). An
-    /// `Option<T>` field is optional to serde, so a missing key is `None`.
+    /// is absent -- for any answer that carries no subset, `"full"` and any
+    /// variant this client predates included; a protocol break for `"subset"`.
+    /// An `Option<T>` field is optional to serde, so a missing key is `None`.
     pub tests: Option<Vec<String>>,
 }
 
@@ -156,5 +157,22 @@ mod tests {
         assert_eq!(selection.selection, "full");
         // A missing `tests` is `None`, distinct from a present empty list.
         assert!(selection.tests.is_none());
+    }
+
+    // A published client is older than the server it talks to: the server may
+    // answer with a `selection` variant that did not exist when the client was
+    // built (`empty` -- run nothing, the predecessor already ran them -- is the
+    // first one). Decoding must still succeed, so that the client's own
+    // normalisation can fall back to running the full suite. Keeping
+    // `selection` a plain `String` rather than a closed enum is what makes that
+    // true: an enum would reject the payload outright and every already-shipped
+    // client would stop selecting -- or worse, fail its run -- the day the
+    // server ships a new variant.
+    #[test]
+    fn deserializes_a_selection_variant_this_client_predates() {
+        let json = r#"{"selection":"empty","reason":"predecessor_job_succeeded"}"#;
+        let selection: TestSelection = serde_json::from_str(json).unwrap();
+        assert_eq!(selection.selection, "empty");
+        assert_eq!(selection.tests, None);
     }
 }
