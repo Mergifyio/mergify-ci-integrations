@@ -8,7 +8,7 @@ import pytest
 
 import pytest_mergify.quarantine
 import pytest_mergify.test_selection
-from pytest_mergify import _mergify_ci, flaky_detection, tracing, utils
+from pytest_mergify import _mergify_ci, flaky_detection, test_retry, tracing, utils
 
 # OpenTelemetry resource-attribute keys the plugin reads back, kept as literals
 # now that the semantic-convention package is gone with the SDK. They match the
@@ -54,11 +54,31 @@ class MergifyCIInsights:
         default_factory=lambda: random.getrandbits(64).to_bytes(8, "big").hex(),
     )
 
+    # The server's answer for this repository, held raw so both mechanisms can
+    # be built from it -- and so the fetch happens once whether or not either
+    # ends up running.
+    run_context_dict: typing.Optional[typing.Dict[str, typing.Any]] = dataclasses.field(
+        init=False,
+        default=None,
+    )
+
     flaky_detector: typing.Optional[flaky_detection.FlakyDetector] = dataclasses.field(
         init=False,
         default=None,
     )
     flaky_detector_error_message: typing.Optional[str] = dataclasses.field(
+        init=False,
+        default=None,
+    )
+
+    test_retrier: typing.Optional[test_retry.TestRetrier] = dataclasses.field(
+        init=False,
+        default=None,
+    )
+    # Its own, rather than flaky detection's: a repository may have opted into
+    # retry alone, and being told a mechanism it never enabled is broken says
+    # nothing about the one that is.
+    test_retrier_error_message: typing.Optional[str] = dataclasses.field(
         init=False,
         default=None,
     )
@@ -136,12 +156,16 @@ class MergifyCIInsights:
                     self.api_url, self.token, owner, repo, utils.get_version()
                 )
 
-        self._load_flaky_detector(
+        self._load_run_context()
+
+        self._build_flaky_detector(
             # A base branch indicates a PR context. Use `new` mode for PRs to
             # detect newly flaky tests, `unhealthy` for push/scheduled runs to
             # focus on known problematic tests.
             mode="new" if resource_attributes.get(_VCS_REF_BASE_NAME) else "unhealthy",
         )
+
+        self._build_test_retrier()
 
         self._load_quarantine()
 
@@ -266,55 +290,103 @@ class MergifyCIInsights:
                 tests=fetched["tests"],
             )
 
-    def _load_flaky_detector(
-        self,
-        mode: typing.Literal["new", "unhealthy"],
-    ) -> None:
+    def _load_run_context(self) -> None:
+        """Fetch the context once, for whichever mechanisms it turns out to enable.
+
+        Kept apart from building them: the fetch answers for a repository that
+        opted into flaky detection, into test retry, or into both, and a reason
+        to skip one of them is not a reason to go without the answer.
+        """
         if (
             self.api_client is None
-            # On xdist workers the detector is loaded from the controller-
-            # provided context, so skip the redundant per-worker API call.
+            # On xdist workers the context arrives from the controller, so skip
+            # the redundant per-worker API call.
             or os.environ.get("PYTEST_XDIST_WORKER") is not None
         ):
             return
 
         try:
-            context_dict = self.api_client.fetch_flaky_context()
+            # `None` is dormant: the repository opted into neither mechanism.
+            self.run_context_dict = self.api_client.fetch_flaky_context()
         except RuntimeError as exception:
+            # Both mechanisms are built from this one answer, so both are off.
             self.flaky_detector_error_message = (
                 f"Could not load flaky detector: {str(exception)}"
             )
-            return
+            self.test_retrier_error_message = (
+                f"Could not load test retry: {str(exception)}"
+            )
 
-        # `None` is dormant: the repository has not opted into flaky detection.
-        # Without a baseline, `new` mode would treat every test as new and rerun
-        # the whole suite. Both are expected; skip without an error.
-        if context_dict is None or (
-            mode == "new" and not context_dict["existing_test_names"]
+    def _build_flaky_detector(
+        self,
+        mode: typing.Literal["new", "unhealthy"],
+    ) -> None:
+        context = self.run_context_dict or {}
+        # A repository that never opted into flaky detection is served both
+        # lists empty: the server computes them from a detection config it does
+        # not have. Building anyway would rerun the whole suite in `new` mode,
+        # where every test looks new without a baseline, and in `unhealthy`
+        # mode would write a "🐛 Flaky detection" block for a mechanism nobody
+        # enabled. A repository that did opt in keeps its block even with
+        # nothing unhealthy today, because its baseline is not empty.
+        if not context.get("existing_test_names") and not (
+            mode == "unhealthy" and context.get("unhealthy_test_names")
         ):
             return
 
+        assert self.run_context_dict is not None
+
         self.flaky_detector = flaky_detection.FlakyDetector.from_context_dict(
-            context_dict,
+            self.run_context_dict,
             mode,
             is_xdist=False,
         )
 
-    def load_flaky_detector_from_context(
+    def _build_test_retrier(self, is_xdist: bool = False) -> None:
+        # An empty eligible set is the quiet case: either the repository did not
+        # opt into retry, or it did and Mergify currently knows of no flaky test
+        # to retry. Neither is worth a terminal block.
+        if not (self.run_context_dict or {}).get("flaky_test_names"):
+            return
+
+        assert self.run_context_dict is not None
+        self.test_retrier = test_retry.TestRetrier.from_context_dict(
+            self.run_context_dict,
+            is_xdist=is_xdist,
+        )
+
+    def load_mechanisms_from_context(
         self,
         context_dict: typing.Dict[str, typing.Any],
-        mode: typing.Literal["new", "unhealthy"],
+        mode: typing.Optional[typing.Literal["new", "unhealthy"]],
     ) -> None:
-        """Construct FlakyDetector from pre-fetched context (xdist worker path)."""
+        """Build both mechanisms from pre-fetched context (xdist worker path).
+
+        `mode` is `None` when the controller had no flaky detection to run, in
+        which case retry may still have work: the two opt-ins are independent.
+        """
+        self.run_context_dict = context_dict
+
+        # One `try` each: the mechanisms are independent opt-ins, so one of
+        # them failing to build is not a reason for the worker to go without
+        # the other.
+        if mode is not None:
+            try:
+                self.flaky_detector = flaky_detection.FlakyDetector.from_context_dict(
+                    context_dict,
+                    mode,
+                    is_xdist=True,
+                )
+            except Exception as exception:
+                self.flaky_detector_error_message = (
+                    f"Could not load flaky detector: {str(exception)}"
+                )
+
         try:
-            self.flaky_detector = flaky_detection.FlakyDetector.from_context_dict(
-                context_dict,
-                mode,
-                is_xdist=True,
-            )
+            self._build_test_retrier(is_xdist=True)
         except Exception as exception:
-            self.flaky_detector_error_message = (
-                f"Could not load flaky detector: {str(exception)}"
+            self.test_retrier_error_message = (
+                f"Could not load test retry: {str(exception)}"
             )
 
     def mark_test_as_quarantined_if_needed(self, item: _pytest.nodes.Item) -> bool:
