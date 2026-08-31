@@ -1,6 +1,8 @@
 import dataclasses
 import typing
 
+import pytest
+
 from pytest_mergify import test_selection
 
 
@@ -92,3 +94,19 @@ def test_subset_without_tests_normalises_to_full() -> None:
 
     assert selection.selection == "full"
     assert selection.tests == []
+
+
+@pytest.mark.parametrize("served", ["empty", "a-variant-this-client-predates"])
+def test_an_unrecognised_selection_runs_everything(served: str) -> None:
+    # The server may answer with a `selection` this client predates -- `empty`
+    # ("run no test, the predecessor already ran them and they passed") is the
+    # first one. Anything the client cannot reason about must become "run the
+    # full suite", never "run nothing": skipping tests on a value we do not
+    # understand is the one outcome that loses coverage, and it would do so
+    # silently, on a run that reports green.
+    #
+    # The annotation is a `Literal`, but the value crosses the wire as a plain
+    # string (the binding hands over a `Dict[str, Any]`), so this is the shape
+    # an out-of-date client actually receives.
+    selection = test_selection.TestSelection(selection=served, reason="whatever")  # type: ignore[arg-type]
+    assert selection.selection == "full"
