@@ -7,8 +7,12 @@
 //!
 //! Two layers: [`detect`] produces a typed, OTel-agnostic [`CiContext`];
 //! [`otel_attributes`] maps that to OpenTelemetry resource attributes.
+//!
+//! Alongside detection, the crate also holds the recipes every client has to
+//! compute identically -- today [`test_collection_fingerprint`].
 
 mod context;
+mod fingerprint;
 mod git;
 mod otel;
 mod providers;
@@ -20,6 +24,7 @@ use std::path::Path;
 use providers::CiProvider;
 
 pub use context::{AttrValue, CiContext, Pipeline, Provider, Refs, Repository};
+pub use fingerprint::test_collection_fingerprint;
 pub use otel::{CiResourceAttributes, attributes as otel_attributes};
 
 /// Detect CI context from an explicit environment map and working directory.

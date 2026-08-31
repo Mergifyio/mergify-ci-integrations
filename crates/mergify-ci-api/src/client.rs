@@ -164,22 +164,35 @@ impl Client {
     /// any other non-success → failed, as is a `subset` answer missing its
     /// `tests` list (a protocol break). The `full`/`subset` normalisation is
     /// left to the caller, which alone can match a subset against the collection.
+    ///
+    /// `collection_fingerprint` is `mergify_ci_core::test_collection_fingerprint`
+    /// over what this run collected: it lets the server tell a rerun that
+    /// collects the same tests as its predecessor from one that does not, and
+    /// so requires the caller to have collected already. A client that has not
+    /// implemented it yet passes `None` and the parameter is omitted, rather
+    /// than sending a value the server would have to guess the meaning of.
     pub async fn fetch_test_selection(
         &self,
         branch: &str,
         head_sha: &str,
         pipeline_name: &str,
         job_name: &str,
+        collection_fingerprint: Option<&str>,
     ) -> Outcome<TestSelection> {
+        let mut query = vec![
+            ("branch", branch),
+            ("head_sha", head_sha),
+            ("pipeline_name", pipeline_name),
+            ("job_name", job_name),
+        ];
+        if let Some(fingerprint) = collection_fingerprint {
+            query.push(("collection_fingerprint", fingerprint));
+        }
+
         let response = match self
             .http
             .get(self.endpoint("test-selection"))
-            .query(&[
-                ("branch", branch),
-                ("head_sha", head_sha),
-                ("pipeline_name", pipeline_name),
-                ("job_name", job_name),
-            ])
+            .query(&query)
             .bearer_auth(&self.config.token)
             .send()
             .await
@@ -335,7 +348,7 @@ fn describe_error(error: &reqwest::Error) -> String {
 mod tests {
     use super::*;
     use crate::trace::SpanStatus;
-    use wiremock::matchers::{header, method, path, query_param};
+    use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn config(uri: &str) -> ApiConfig {
@@ -502,6 +515,9 @@ mod tests {
             .and(query_param("head_sha", "cafe"))
             .and(query_param("pipeline_name", "CI"))
             .and(query_param("job_name", "unit"))
+            // The mock only answers when the fingerprint is on the query, so
+            // dropping it turns this test red rather than passing unnoticed.
+            .and(query_param("collection_fingerprint", "f1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "selection": "subset",
                 "reason": "queue_rerun",
@@ -511,12 +527,36 @@ mod tests {
             .await;
         let client = build_client(&server.uri());
         let selection = client
-            .fetch_test_selection("queue/main", "cafe", "CI", "unit")
+            .fetch_test_selection("queue/main", "cafe", "CI", "unit", Some("f1"))
             .await
             .into_ready()
             .expect("ready");
         assert_eq!(selection.selection, "subset");
         assert_eq!(selection.tests.unwrap(), ["t::a", "t::b"]);
+    }
+
+    #[tokio::test]
+    async fn test_selection_omits_an_absent_collection_fingerprint() {
+        // A client that has not implemented the fingerprint yet sends no
+        // parameter at all -- not an empty one, which the server would have to
+        // tell apart from "a collection whose fingerprint is the empty string".
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/ci/o/repositories/r/test-selection"))
+            .and(query_param_is_missing("collection_fingerprint"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "selection": "full",
+                "reason": "no_predecessor",
+            })))
+            .mount(&server)
+            .await;
+        let client = build_client(&server.uri());
+        let selection = client
+            .fetch_test_selection("queue/main", "cafe", "CI", "unit", None)
+            .await
+            .into_ready()
+            .expect("ready");
+        assert_eq!(selection.selection, "full");
     }
 
     #[tokio::test]
@@ -533,7 +573,7 @@ mod tests {
         let client = build_client(&server.uri());
         // A subset with no `tests` list is a protocol break: surfaced, not run
         // as a silent full suite.
-        let outcome = client.fetch_test_selection("queue/main", "cafe", "CI", "unit").await;
+        let outcome = client.fetch_test_selection("queue/main", "cafe", "CI", "unit", Some("f1")).await;
         assert!(outcome.failure().is_some());
     }
 
@@ -553,7 +593,7 @@ mod tests {
         // A *present* empty list is legitimate (subset matched nothing), left
         // for the caller to normalise — not a contract error.
         let selection = client
-            .fetch_test_selection("queue/main", "cafe", "CI", "unit")
+            .fetch_test_selection("queue/main", "cafe", "CI", "unit", Some("f1"))
             .await
             .into_ready()
             .expect("ready");
@@ -571,7 +611,7 @@ mod tests {
         let client = build_client(&server.uri());
         assert!(
             client
-                .fetch_test_selection("main", "cafe", "CI", "unit")
+                .fetch_test_selection("main", "cafe", "CI", "unit", Some("f1"))
                 .await
                 .is_dormant()
         );

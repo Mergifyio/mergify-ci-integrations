@@ -282,7 +282,17 @@ class PytestMergify:
         items: typing.List[_pytest.nodes.Item],
     ) -> None:
         # trylast so user filters (-k, -m, --deselect) apply first; the
-        # reduced-rerun subset then only ever narrows what remains.
+        # fingerprint then identifies the set this run intends to execute, and
+        # the reduced-rerun subset only ever narrows what remains.
+        #
+        # This is also where the selection is asked for: the request carries the
+        # fingerprint of the collection, so it cannot happen before there is
+        # one. Under xdist that means it does not happen at all — the controller
+        # never collects, and workers are excluded from the fetch — which is
+        # what it already amounted to, the filtering hook having never run on
+        # the controller either.
+        self.mergify_ci.on_tests_collected([item.nodeid for item in items])
+
         if self.mergify_ci.test_selection:
             self.mergify_ci.test_selection.filter_items(config, items)
 

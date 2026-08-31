@@ -20,6 +20,10 @@ _CICD_PIPELINE_NAME = "cicd.pipeline.name"
 _CICD_PIPELINE_TASK_NAME = "cicd.pipeline.task.name"
 _MERGIFY_TEST_JOB_NAME = "mergify.test.job.name"
 
+# Resource attribute carrying the identity of the tests this run collected --
+# reported with the spans so the engine can persist it on the run.
+_TEST_COLLECTION_FINGERPRINT = "test.collection.fingerprint"
+
 # How the built spans leave the session.
 TraceMode = typing.Literal["capture", "upload", "debug"]
 
@@ -169,7 +173,9 @@ class MergifyCIInsights:
 
         self._load_quarantine()
 
-        self._load_test_selection()
+        # Test selection is NOT loaded here: it is asked for once the tests are
+        # collected, so the request can carry their fingerprint. See
+        # `on_tests_collected`.
 
     def export_spans(
         self, spans: typing.List[tracing.Span]
@@ -231,7 +237,49 @@ class MergifyCIInsights:
             init_error_msg=init_error_msg,
         )
 
-    def _load_test_selection(self) -> None:
+    def on_tests_collected(self, collected_test_ids: typing.List[str]) -> None:
+        """Take the identity of what this run collected, and act on it.
+
+        Called from the collection hook, once user filters (`-k`, `-m`,
+        `--deselect`) have run: the fingerprint then describes the set this run
+        actually intends to execute. It does two independent things — reports
+        the fingerprint with the run's spans, and asks Mergify whether a subset
+        of that collection is enough — so a run that never asks (no
+        subscription, no job coordinates, the kill switch) still reports it.
+        """
+        if self.resource_attributes is None:
+            # No resource means no spans and no API client: nothing to report
+            # the fingerprint on, and nobody to ask.
+            return
+
+        if os.environ.get("PYTEST_XDIST_WORKER") is not None:
+            # Every worker of a run collects the whole suite, so all of them
+            # would report ONE identity while each holds a fraction of the
+            # results -- measured: `pytest -n 2` over three tests uploads two
+            # sessions, both claiming the three-test fingerprint. That breaks
+            # the design's degradation rule, which is that a session whose
+            # results never arrive matches no fingerprint and only that session
+            # pays: here a worker that died before uploading leaves its
+            # siblings carrying the same identity, failure-free, for a suite
+            # part of which never ran.
+            #
+            # (A reduced rerun also collects more than it executes, but there
+            # the identity belongs to one session and the server chose the
+            # reduction, so it stays attributable. What cannot be attributed is
+            # a set of sibling sessions sharing an identity.)
+            #
+            # Selection is off under `-n` anyway (MRGFY-8632), so reporting
+            # nothing costs nothing.
+            return
+
+        fingerprint = _mergify_ci.compute_test_collection_fingerprint(
+            collected_test_ids
+        )
+        self.resource_attributes[_TEST_COLLECTION_FINGERPRINT] = fingerprint
+
+        self._load_test_selection(fingerprint)
+
+    def _load_test_selection(self, collection_fingerprint: str) -> None:
         try:
             disabled = utils.strtobool(
                 os.environ.get("MERGIFY_TEST_SELECTION_DISABLE", "false")
@@ -241,19 +289,15 @@ class MergifyCIInsights:
             # cannot parse reads as an attempt to disable.
             disabled = True
 
-        if (
-            self.api_client is None
-            or self.resource_attributes is None
-            or disabled
-            # On xdist workers the controller already filtered the collection.
-            or os.environ.get("PYTEST_XDIST_WORKER") is not None
-        ):
+        if self.api_client is None or self.resource_attributes is None or disabled:
             return
 
         # The selection is keyed on the run's OWN identity: the head branch
         # and head revision (a merge-queue draft branch on reruns) plus the
         # job coordinates — the exact values this plugin reports with each
-        # uploaded test, so the server can match its records.
+        # uploaded test, so the server can match its records. The collection
+        # fingerprint travels with them: a subset is only safe to serve when
+        # this run collects the same tests the previous attempt did.
         head_branch = self.resource_attributes.get(_VCS_REF_HEAD_NAME)
         head_sha = self.resource_attributes.get(_VCS_REF_HEAD_REVISION)
         pipeline_name = self.resource_attributes.get(_CICD_PIPELINE_NAME)
@@ -270,6 +314,7 @@ class MergifyCIInsights:
                 str(head_sha),
                 str(pipeline_name),
                 str(job_name),
+                collection_fingerprint,
             )
         except RuntimeError as exception:
             init_error_msg = (

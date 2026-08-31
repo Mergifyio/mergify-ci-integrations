@@ -12,7 +12,10 @@ class TestSelection:
     A merge-queue rerun (a `max_checks_retries` attempt or a bisection step)
     only needs to replay the tests that failed on the previous attempt.
     Mergify resolves that server-side from the run's own identity (queue
-    branch + head SHA + job); the bundled binding
+    branch + head SHA + job) AND from the fingerprint of what this run
+    collected -- a subset is only safe to serve to a run that collects the same
+    tests the previous attempt did, so the request cannot be made before the
+    collection is known. The bundled binding
     (`CiApiClient.fetch_test_selection`) fetches the answer and it is injected
     here. Every error, timeout, or unknown situation degrades to running the
     full suite — this feature can only remove work, never correctness.
