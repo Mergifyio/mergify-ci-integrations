@@ -333,6 +333,12 @@ class MergifyCIInsights:
                 selection=fetched["selection"],
                 reason=fetched["reason"],
                 tests=fetched["tests"],
+                # `.get`, unlike the keys above, even though the binding sets
+                # this key on every answer: the plugin already holds a wording
+                # for a refusal that arrives without one, so a binding that
+                # stopped setting it should reach the user as that fallback
+                # rather than as a `KeyError` crashing their pytest session.
+                message=fetched.get("message"),
             )
 
     def _load_run_context(self) -> None:

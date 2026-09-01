@@ -76,7 +76,10 @@ pub struct FlakyDetectionContext {
 /// to the collected items it compares against.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct TestSelection {
-    /// `"full"` (run everything) or `"subset"` (run only `tests`).
+    /// Which kind of answer this is — `"full"` (run everything), `"subset"`
+    /// (run only `tests`), or any value a client may not know: see the
+    /// forward-compatibility test below for why this is a `String` and not an
+    /// enum.
     pub selection: String,
     /// Why the server chose this selection — surfaced in the plugin report.
     pub reason: String,
@@ -85,6 +88,12 @@ pub struct TestSelection {
     /// variant this client predates included; a protocol break for `"subset"`.
     /// An `Option<T>` field is optional to serde, so a missing key is `None`.
     pub tests: Option<Vec<String>>,
+    /// A human-readable explanation to show the CI user, when the answer has
+    /// one — today only a refusal does. The copy is the server's on purpose:
+    /// it can be corrected without publishing a client, so a client that shows
+    /// it verbatim keeps being right about answers written after it shipped.
+    /// `None` for every answer carrying none.
+    pub message: Option<String>,
 }
 
 #[cfg(test)]
@@ -142,6 +151,28 @@ mod tests {
     }
 
     #[test]
+    fn deserializes_a_refusal_carrying_the_servers_message() {
+        let json = r#"{"selection":"refused","reason":"ambiguous_test_sessions","message":"several test sessions reported the same tests"}"#;
+        let selection: TestSelection = serde_json::from_str(json).unwrap();
+        assert_eq!(selection.selection, "refused");
+        assert_eq!(
+            selection.message.unwrap(),
+            "several test sessions reported the same tests"
+        );
+        // A refusal carries no subset: there is nothing for the caller to run.
+        assert_eq!(selection.tests, None);
+    }
+
+    #[test]
+    fn deserializes_an_answer_without_a_message() {
+        // Every `full` and `subset` answer, and any older server: a missing
+        // `message` is `None`, never a decode failure.
+        let json = r#"{"selection":"full","reason":"no_predecessor"}"#;
+        let selection: TestSelection = serde_json::from_str(json).unwrap();
+        assert!(selection.message.is_none());
+    }
+
+    #[test]
     fn deserializes_subset_test_selection() {
         let json = r#"{"selection":"subset","reason":"queue_rerun","tests":["t::a","t::b"]}"#;
         let selection: TestSelection = serde_json::from_str(json).unwrap();
@@ -159,20 +190,24 @@ mod tests {
         assert!(selection.tests.is_none());
     }
 
-    // A published client is older than the server it talks to: the server may
-    // answer with a `selection` variant that did not exist when the client was
-    // built (`empty` -- run nothing, the predecessor already ran them -- is the
-    // first one). Decoding must still succeed, so that the client's own
-    // normalisation can fall back to running the full suite. Keeping
-    // `selection` a plain `String` rather than a closed enum is what makes that
-    // true: an enum would reject the payload outright and every already-shipped
-    // client would stop selecting -- or worse, fail its run -- the day the
-    // server ships a new variant.
+    // A published client is older than the server it talks to, and this is the
+    // property that lets the server grow answers without breaking it: decoding
+    // must succeed on a `selection` the client has never heard of, so that the
+    // client's own normalisation can fall back to running the full suite.
+    // Keeping `selection` a plain `String` rather than a closed enum is what
+    // makes that true -- an enum would reject the payload outright and every
+    // already-shipped client would stop selecting, or worse fail its run, the
+    // day the server ships a new variant.
+    //
+    // The payload is a value nothing implements, deliberately: `empty` and
+    // `refused` both reached published clients through this property and are
+    // now understood by pytest-mergify, so either of them would leave this test
+    // green while no longer testing what it is named after.
     #[test]
     fn deserializes_a_selection_variant_this_client_predates() {
-        let json = r#"{"selection":"empty","reason":"predecessor_job_succeeded"}"#;
+        let json = r#"{"selection":"a-variant-this-client-predates","reason":"whatever"}"#;
         let selection: TestSelection = serde_json::from_str(json).unwrap();
-        assert_eq!(selection.selection, "empty");
+        assert_eq!(selection.selection, "a-variant-this-client-predates");
         assert_eq!(selection.tests, None);
     }
 }

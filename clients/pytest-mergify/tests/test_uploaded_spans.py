@@ -6,26 +6,12 @@ import pytest
 from tests import conftest
 
 
-def _configure_upload(
-    monkeypatch: pytest.MonkeyPatch,
-    collector: conftest.OTLPCollector,
-) -> None:
-    monkeypatch.setenv("CI", "true")
-    monkeypatch.setenv("GITHUB_ACTIONS", "true")
-    monkeypatch.setenv("GITHUB_REPOSITORY", "Mergifyio/pytest-mergify")
-    monkeypatch.setenv("MERGIFY_TOKEN", "token")
-    monkeypatch.setenv("MERGIFY_API_URL", collector.url)
-    # Both of these swap the exporter for one that uploads nothing.
-    monkeypatch.delenv("_PYTEST_MERGIFY_TEST", raising=False)
-    monkeypatch.delenv("PYTEST_MERGIFY_DEBUG", raising=False)
-
-
 def test_a_run_uploads_its_spans(
     pytester: _pytest.pytester.Pytester,
     monkeypatch: pytest.MonkeyPatch,
     otlp_collector: conftest.OTLPCollector,
 ) -> None:
-    _configure_upload(monkeypatch, otlp_collector)
+    conftest.configure_upload(monkeypatch, otlp_collector)
     pytester.makepyfile("def test_pass(): pass")
 
     result = pytester.runpytest_subprocess()
@@ -45,7 +31,7 @@ def test_an_uploaded_span_carries_its_attributes(
 ) -> None:
     # Asserting on the decoded payload rather than on terminal text: a run can
     # print a run id and still have uploaded nothing.
-    _configure_upload(monkeypatch, otlp_collector)
+    conftest.configure_upload(monkeypatch, otlp_collector)
     pytester.makepyfile("def test_pass(): pass")
 
     result = pytester.runpytest_subprocess()
@@ -79,7 +65,7 @@ def test_the_uploaded_fingerprint_describes_the_uploaded_tests(
     # catches them drifting apart -- the failure mode of MRGFY-8695, where a
     # runner built one name and its reporter uploaded another, and quarantine
     # silently matched nothing ever after.
-    _configure_upload(monkeypatch, otlp_collector)
+    conftest.configure_upload(monkeypatch, otlp_collector)
     pytester.makepyfile(
         """
         import pytest
@@ -125,7 +111,7 @@ def test_no_session_of_a_distributed_run_claims_a_fingerprint(
     # keeping collection out of the controller, which is a third-party detail
     # this repo pins nowhere else; this runs the real thing rather than
     # simulating a worker with an environment variable.
-    _configure_upload(monkeypatch, otlp_collector)
+    conftest.configure_upload(monkeypatch, otlp_collector)
     pytester.makepyfile(
         """
         def test_one(): pass

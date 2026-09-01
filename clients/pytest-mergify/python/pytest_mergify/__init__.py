@@ -294,7 +294,16 @@ class PytestMergify:
         self.mergify_ci.on_tests_collected([item.nodeid for item in items])
 
         if self.mergify_ci.test_selection:
-            self.mergify_ci.test_selection.filter_items(config, items)
+            try:
+                self.mergify_ci.test_selection.filter_items(config, items)
+            except pytest.UsageError:
+                # A refusal ends the run here, before any test span exists. The
+                # session is still uploaded (from `pytest_sessionfinish`), and
+                # without this it would reach Mergify as a finished, error-free
+                # session holding no test — the exact shape of a run that was
+                # legitimately told to execute nothing.
+                self.has_error = True
+                raise
 
     def pytest_collection_finish(self, session: _pytest.main.Session) -> None:
         detector = self.mergify_ci.flaky_detector
@@ -321,6 +330,7 @@ class PytestMergify:
     def pytest_sessionfinish(
         self,
         session: _pytest.main.Session,
+        exitstatus: int,
     ) -> typing.Generator[None, None, None]:
         # xdist worker: export metrics via workeroutput (independent of tracer).
         if _is_xdist_worker(session.config):
@@ -335,16 +345,44 @@ class PytestMergify:
                         self.mergify_ci.test_retrier.to_serializable_metrics()
                     )
 
-        if not self._traces_enabled or self._session_span is None:
-            yield
-            return
-
         yield
 
         # Export here rather than in the terminal summary: the summary's token
         # checks return early on a run with nothing to upload, but the capture
         # path (tests) and the debug path have spans to hand off regardless.
+        # Called unconditionally -- it holds the "traces off / already exported"
+        # guard itself, and stating it twice is how the two drift apart.
         self._finalize_and_export()
+
+        self._green_a_run_told_to_execute_nothing(session, exitstatus)
+
+    def _green_a_run_told_to_execute_nothing(
+        self,
+        session: _pytest.main.Session,
+        exitstatus: int,
+    ) -> None:
+        """Turn "no tests ran" into a pass when Mergify asked for exactly that.
+
+        An `empty` selection deselects the whole collection, which pytest
+        reports as exit code 5 — the code that means "you thought you were
+        running tests and you were not". Here the run did precisely what it was
+        told, so it exits 0.
+
+        Outside the export above rather than inside it, because the verdict a
+        job reports does not depend on whether this run had traces to upload:
+        `PYTEST_MERGIFY_DEBUG`, or a token the plugin never got, must not turn a
+        deliberately empty run red.
+        """
+        selection = self.mergify_ci.test_selection
+        if (
+            exitstatus == pytest.ExitCode.NO_TESTS_COLLECTED
+            and selection is not None
+            and selection.selection == "empty"
+            # A run that collected nothing to begin with is not a run Mergify
+            # emptied, and its exit code 5 is the real answer.
+            and selection.deselected_count > 0
+        ):
+            session.exitstatus = pytest.ExitCode.OK
 
     def _finalize_and_export(self) -> None:
         """Close the session span and export every collected span, exactly once.
