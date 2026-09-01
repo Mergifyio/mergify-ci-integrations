@@ -1,0 +1,1 @@
+isolate GITHUB_EVENT_NAME/PATH in tests: the host PR's real head sha was overriding the test's GITHUB_SHA
