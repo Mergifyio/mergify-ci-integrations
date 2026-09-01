@@ -1,1 +1,1 @@
-show the engine's own refusal message (real contract from monorepo#39711) instead of a hard-coded string
+correct four comments the message-key delta made false (lens pass)
