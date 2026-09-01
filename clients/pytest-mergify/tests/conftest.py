@@ -1,5 +1,6 @@
 import dataclasses
 import gzip
+import hashlib
 import http.server
 import socketserver
 import threading
@@ -72,6 +73,21 @@ def make_flaky_context(
     }
 
 
+def collection_fingerprint(test_ids: typing.Iterable[str]) -> str:
+    """The collection fingerprint, recomputed here from its specification.
+
+    Deliberately *not* `_mergify_ci.compute_test_collection_fingerprint`: a test
+    that asks the code under test to predict its own answer cannot tell a
+    correct fingerprint from a consistent mistake. Re-deriving it with `hashlib`
+    -- SHA-256 each identifier, sort the digests, SHA-256 their concatenation --
+    makes the Rust recipe and this one have to agree.
+    """
+    digests = sorted(
+        hashlib.sha256(test_id.encode("utf-8")).digest() for test_id in test_ids
+    )
+    return hashlib.sha256(b"".join(digests)).hexdigest()
+
+
 def install_fake_api_client(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -81,6 +97,7 @@ def install_fake_api_client(
     quarantine_error: typing.Optional[str] = None,
     flaky_error: typing.Optional[str] = None,
     test_selection_error: typing.Optional[str] = None,
+    test_selection_calls: typing.Optional[typing.List[typing.Dict[str, str]]] = None,
 ) -> None:
     """Replace the binding's `CiApiClient` with a fake returning injected data.
 
@@ -119,7 +136,18 @@ def install_fake_api_client(
             head_sha: str,
             pipeline_name: str,
             job_name: str,
+            collection_fingerprint: str,
         ) -> typing.Optional[typing.Dict[str, typing.Any]]:
+            if test_selection_calls is not None:
+                test_selection_calls.append(
+                    {
+                        "branch": branch,
+                        "head_sha": head_sha,
+                        "pipeline_name": pipeline_name,
+                        "job_name": job_name,
+                        "collection_fingerprint": collection_fingerprint,
+                    }
+                )
             if test_selection_error is not None:
                 raise RuntimeError(test_selection_error)
             return test_selection
@@ -140,7 +168,22 @@ def isolate_ci_provider_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # A host CI (e.g. GitHub Actions running this very suite) sets provider vars
     # the Rust core would otherwise detect, leaking into tests. Clear them so
     # each test starts clean and opts into a provider explicitly.
-    for var in ("GITHUB_ACTIONS", "CIRCLECI", "JENKINS_URL", "BUILDKITE"):
+    #
+    # `GITHUB_EVENT_NAME`/`GITHUB_EVENT_PATH` belong here even though they name
+    # no provider: on a `pull_request` event the core deliberately reads the head
+    # sha out of the event payload rather than `GITHUB_SHA`, which there is the
+    # merge commit (`providers/github_actions.rs`, `head_sha`). Left alone, a test
+    # setting `GITHUB_SHA` is silently overridden by the real sha of whatever pull
+    # request is running this suite — green locally, red in CI, and only for the
+    # tests that assert a sha.
+    for var in (
+        "GITHUB_ACTIONS",
+        "CIRCLECI",
+        "JENKINS_URL",
+        "BUILDKITE",
+        "GITHUB_EVENT_NAME",
+        "GITHUB_EVENT_PATH",
+    ):
         monkeypatch.delenv(var, raising=False)
 
 

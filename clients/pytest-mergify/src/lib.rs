@@ -116,6 +116,10 @@ impl CiApiClient {
 
     /// The test selection as a dict (`selection`, `reason`, `tests`), or `None`
     /// when test selection is not enabled for the repository.
+    ///
+    /// `collection_fingerprint` is what [`compute_test_collection_fingerprint`]
+    /// returned for the tests this run collected — which is why the plugin asks
+    /// after collection rather than at configure time.
     fn fetch_test_selection(
         &self,
         py: Python<'_>,
@@ -123,6 +127,7 @@ impl CiApiClient {
         head_sha: &str,
         pipeline_name: &str,
         job_name: &str,
+        collection_fingerprint: &str,
     ) -> PyResult<Option<Py<PyDict>>> {
         let outcome = py.detach(|| {
             self.runtime.block_on(self.client.fetch_test_selection(
@@ -130,6 +135,7 @@ impl CiApiClient {
                 head_sha,
                 pipeline_name,
                 job_name,
+                Some(collection_fingerprint),
             ))
         });
         match outcome {
@@ -203,6 +209,18 @@ fn test_selection_dict(py: Python<'_>, selection: &TestSelection) -> PyResult<Py
     // everything.
     dict.set_item("tests", selection.tests.clone().unwrap_or_default())?;
     Ok(dict.into())
+}
+
+/// The fingerprint of the tests this run collected, as lowercase hex SHA-256.
+///
+/// Order-independent, so a rerun that collects the same tests in a different
+/// order agrees with its predecessor. The recipe lives in `mergify-ci-core` so
+/// every client computes the same value for the same collection.
+// pyo3 extracts the id list by value; the recipe only borrows it.
+#[allow(clippy::needless_pass_by_value)]
+#[pyfunction]
+fn compute_test_collection_fingerprint(test_ids: Vec<String>) -> String {
+    mergify_ci_core::test_collection_fingerprint(&test_ids)
 }
 
 /// Select the tests to rerun and compute the session's rerun budget.
@@ -369,6 +387,7 @@ fn _mergify_ci(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(detect_repository_name, m)?)?;
     m.add_function(wrap_pyfunction!(detect_attributes, m)?)?;
     m.add_function(wrap_pyfunction!(compute_budget, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_test_collection_fingerprint, m)?)?;
     m.add_function(wrap_pyfunction!(should_run, m)?)?;
     m.add_function(wrap_pyfunction!(static_share_ms, m)?)?;
     m.add_function(wrap_pyfunction!(dynamic_share_ms, m)?)?;

@@ -280,7 +280,15 @@ impl CiApiClient {
     ) -> Result<Option<TestSelection>> {
         match self
             .client
-            .fetch_test_selection(&branch, &head_sha, &pipeline_name, &job_name)
+            // No fingerprint from here. Vitest collects inside its workers in
+            // batches (`onCollected` sees one worker's files, never the run's
+            // whole collection) and Playwright's `preprocess` hook runs before
+            // `onBegin`, where the full suite becomes available -- so neither
+            // runner holds its own collection at the moment it asks. Sending
+            // none is what makes the server answer for a run it cannot
+            // identify; sending an empty value would claim a collection.
+            // Resolving that ordering is open work, not tracked work.
+            .fetch_test_selection(&branch, &head_sha, &pipeline_name, &job_name, None)
             .await
         {
             Outcome::Ready(selection) => Ok(Some(selection.into())),
