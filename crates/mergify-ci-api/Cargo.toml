@@ -12,7 +12,7 @@ description = "Shared Mergify backend API client + trace export for test-client 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 # Async HTTP: rustls (no system OpenSSL) so the wheels/gems stay portable.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-tls"] }
 # OTLP trace export by hand — the prost messages only, no tonic/grpc transport
 # and no opentelemetry-otlp SDK (matches mergify-cli's uploader).
 opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic-messages", "trace"] }
