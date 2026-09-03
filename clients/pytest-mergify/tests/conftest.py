@@ -2,6 +2,7 @@ import dataclasses
 import gzip
 import hashlib
 import http.server
+import json
 import socketserver
 import threading
 import typing
@@ -305,10 +306,15 @@ def _decode_attributes(key_values: typing.Any) -> typing.Dict[str, typing.Any]:
     return {kv.key: _decode_any_value(kv.value) for kv in key_values}
 
 
+# OTLP's `Status.code` enum, as the names this plugin hands the binding.
+_UPLOADED_STATUS = {0: "unset", 1: "ok", 2: "error"}
+
+
 @dataclasses.dataclass
 class UploadedSpan:
     name: str
     attributes: typing.Dict[str, typing.Any]
+    status: str = "unset"
 
 
 @dataclasses.dataclass
@@ -341,6 +347,7 @@ class _OTLPServer(socketserver.TCPServer):
 
     def __init__(self, *args: typing.Any, **kwargs: typing.Any) -> None:
         self.bodies: typing.List[bytes] = []
+        self.test_selection: typing.Optional[typing.Dict[str, typing.Any]] = None
         super().__init__(*args, **kwargs)
 
 
@@ -359,7 +366,21 @@ class _OTLPRequestHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         # Quarantine and test selection share this base URL. Answering 404 keeps
-        # them out of the way without pretending they were served.
+        # them out of the way without pretending they were served -- unless the
+        # test asked for a selection to be served, which is the only way a run
+        # in a *subprocess* can be given one (the in-process fake client never
+        # reaches it).
+        if self.path.split("?")[0].endswith("/test-selection") and (
+            self.server.test_selection is not None
+        ):
+            payload = json.dumps(self.server.test_selection).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
         self.send_response(404)
         self.end_headers()
 
@@ -380,6 +401,10 @@ class OTLPCollector:
     url: str
     _server: _OTLPServer
 
+    def serve_test_selection(self, payload: typing.Dict[str, typing.Any]) -> None:
+        """Answer the test-selection endpoint with `payload` from now on."""
+        self._server.test_selection = payload
+
     @property
     def batches(self) -> typing.List[UploadedBatch]:
         batches = []
@@ -393,6 +418,7 @@ class OTLPCollector:
                     UploadedSpan(
                         name=span.name,
                         attributes=_decode_attributes(span.attributes),
+                        status=_UPLOADED_STATUS[span.status.code],
                     )
                     for scope_spans in resource_spans.scope_spans
                     for span in scope_spans.spans
@@ -411,6 +437,26 @@ class OTLPCollector:
     @property
     def span_names(self) -> typing.Set[str]:
         return {span.name for batch in self.batches for span in batch.spans}
+
+
+def configure_upload(
+    monkeypatch: pytest.MonkeyPatch,
+    collector: OTLPCollector,
+) -> None:
+    """A CI whose traces and fetches both go to `collector`, over real HTTP.
+
+    For a run in a *subprocess*, which is the only kind that actually puts a
+    payload on the wire -- and the only kind `install_fake_api_client` cannot
+    reach, since it patches this process.
+    """
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "Mergifyio/pytest-mergify")
+    monkeypatch.setenv("MERGIFY_TOKEN", "token")
+    monkeypatch.setenv("MERGIFY_API_URL", collector.url)
+    # Both of these swap the exporter for one that uploads nothing.
+    monkeypatch.delenv("_PYTEST_MERGIFY_TEST", raising=False)
+    monkeypatch.delenv("PYTEST_MERGIFY_DEBUG", raising=False)
 
 
 @pytest.fixture

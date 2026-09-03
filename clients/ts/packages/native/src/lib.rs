@@ -166,6 +166,17 @@ pub struct TestSelection {
     pub tests: Option<Vec<String>>,
 }
 
+// A plain comment, not a doc one: `napi` copies `///` into the generated
+// `index.d.ts`, and this says nothing a caller of that interface needs.
+//
+// `ApiTestSelection` also carries `message` -- the server's own explanation of
+// a `refused` answer -- and it is deliberately NOT mirrored here. These clients
+// collapse anything that is not a `subset` to a full run and never show the
+// user a reason, so the field would be dead weight on the interface. Whoever
+// wires the refusal path here (test selection is off for vitest and playwright
+// during the pilot, MRGFY-8906) should carry it over rather than write the
+// wording client-side: the copy is the server's so it can be corrected without
+// publishing a client.
 impl From<ApiTestSelection> for TestSelection {
     fn from(selection: ApiTestSelection) -> Self {
         Self {

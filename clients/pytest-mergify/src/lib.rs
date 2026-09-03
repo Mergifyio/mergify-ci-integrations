@@ -114,8 +114,8 @@ impl CiApiClient {
         }
     }
 
-    /// The test selection as a dict (`selection`, `reason`, `tests`), or `None`
-    /// when test selection is not enabled for the repository.
+    /// The test selection as a dict (`selection`, `reason`, `tests`, `message`),
+    /// or `None` when test selection is not enabled for the repository.
     ///
     /// `collection_fingerprint` is what [`compute_test_collection_fingerprint`]
     /// returned for the tests this run collected — which is why the plugin asks
@@ -201,13 +201,19 @@ fn test_selection_dict(py: Python<'_>, selection: &TestSelection) -> PyResult<Py
     let dict = PyDict::new(py);
     dict.set_item("selection", &selection.selection)?;
     dict.set_item("reason", &selection.reason)?;
-    // `tests` is `None` for any answer that carries no subset -- `full`, and
-    // any variant this client predates -- since a `subset` without it is
-    // rejected upstream. An empty list is the right value for the plugin: it
-    // keeps the key present, so `TestSelection(**dict)` never raises, and the
-    // Python-side normalisation reads it as "nothing to select" and runs
-    // everything.
+    // `tests` is `None` for every answer that carries no subset -- `full`,
+    // `empty`, `refused`, and any variant this client predates -- since a
+    // `subset` without it is rejected upstream. An empty list is the right
+    // value for the plugin: it keeps the key present, so `TestSelection(**dict)`
+    // never raises, and what the answer then means is decided on the Python
+    // side from `selection` alone, never from the emptiness of this list.
     dict.set_item("tests", selection.tests.clone().unwrap_or_default())?;
+    // Unlike `tests`, this one is handed over as-is rather than defaulted: the
+    // dict then mirrors the wire, where the key is simply absent from every
+    // answer carrying no copy. Nothing downstream distinguishes `None` from an
+    // empty string -- both fall to the plugin's own wording -- so this is about
+    // the dict describing the answer honestly, not about a signal being read.
+    dict.set_item("message", selection.message.clone())?;
     Ok(dict.into())
 }
 

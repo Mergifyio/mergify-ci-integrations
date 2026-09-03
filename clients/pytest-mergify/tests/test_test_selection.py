@@ -27,6 +27,14 @@ class FakeHook:
         self.deselected.extend(items)
 
 
+# Stands in for the engine's own copy, which is required on a refusal
+# (`web/api/ci_insights/test_selection/types.py`, `AMBIGUOUS_TEST_SESSIONS_MESSAGE`).
+# Deliberately not a copy of that text: the plugin shows whatever arrives,
+# verbatim, and never reads it -- so a fixture quoting the real wording would
+# only give this diff a second wording to keep in step with the server's.
+_SERVED_REFUSAL_MESSAGE = "<the explanation the engine wrote, whatever it says>"
+
+
 @dataclasses.dataclass
 class FakeConfig:
     hook: FakeHook = dataclasses.field(default_factory=FakeHook)
@@ -99,20 +107,101 @@ def test_subset_without_tests_normalises_to_full() -> None:
     assert selection.tests == []
 
 
-@pytest.mark.parametrize("served", ["empty", "a-variant-this-client-predates"])
+@pytest.mark.parametrize(
+    "served", ["a-variant-this-client-predates", "partial", "none", ""]
+)
 def test_an_unrecognised_selection_runs_everything(served: str) -> None:
-    # The server may answer with a `selection` this client predates -- `empty`
-    # ("run no test, the predecessor already ran them and they passed") is the
-    # first one. Anything the client cannot reason about must become "run the
-    # full suite", never "run nothing": skipping tests on a value we do not
-    # understand is the one outcome that loses coverage, and it would do so
-    # silently, on a run that reports green.
+    # The server may answer with a `selection` this client predates. Anything
+    # the client cannot reason about must become "run the full suite", never
+    # "run nothing" and never a failure: acting on a value we do not understand
+    # is what loses coverage, and it would do so silently, on a run that reports
+    # green. This is the property that lets the engine grow new answers without
+    # breaking the clients already published -- `empty` and `refused` below were
+    # both served through it before this client knew them.
     #
     # The annotation is a `Literal`, but the value crosses the wire as a plain
     # string (the binding hands over a `Dict[str, Any]`), so this is the shape
     # an out-of-date client actually receives.
     selection = test_selection.TestSelection(selection=served, reason="whatever")  # type: ignore[arg-type]
     assert selection.selection == "full"
+
+
+def test_an_empty_selection_deselects_the_whole_collection() -> None:
+    selection = test_selection.TestSelection(
+        selection="empty", reason="predecessor_job_succeeded"
+    )
+    # Not normalised away: "run nothing" is an answer, unlike a `subset` that
+    # arrived without its tests.
+    assert selection.selection == "empty"
+
+    items = [FakeItem("tests/a.py::test_one"), FakeItem("tests/b.py::test_two")]
+    config = FakeConfig()
+    selection.filter_items(config, items)  # type: ignore[arg-type]
+
+    assert items == []
+    # Through pytest's own deselection hook, so the run reports two deselected
+    # tests rather than a collection that mysteriously came up empty.
+    assert [item.nodeid for item in config.hook.deselected] == [
+        "tests/a.py::test_one",
+        "tests/b.py::test_two",
+    ]
+    assert selection.deselected_count == 2
+    assert "executing no test" in selection.report()
+    assert "all 2 selected test(s)" in selection.report()
+
+
+def test_a_refusal_raises_rather_than_degrading() -> None:
+    # The one answer that is not allowed to fall back to a full run: Mergify is
+    # saying one job name stands for several runs, which stays wrong for every
+    # future attempt until someone changes the configuration.
+    selection = test_selection.TestSelection(
+        selection="refused",
+        reason="ambiguous_test_sessions",
+        message=_SERVED_REFUSAL_MESSAGE,
+    )
+    assert selection.selection == "refused"
+
+    items = [FakeItem("tests/a.py::test_one")]
+    config = FakeConfig()
+    with pytest.raises(pytest.UsageError) as raised:
+        selection.filter_items(config, items)  # type: ignore[arg-type]
+
+    # The server's wording, verbatim. Not a paraphrase and not a client-side
+    # string: the server names the job and can be corrected without publishing
+    # a plugin, so a client that rewords it goes stale the day it is improved.
+    assert str(raised.value) == _SERVED_REFUSAL_MESSAGE
+    # And the collection is untouched, so nothing half-applied the answer.
+    assert [item.nodeid for item in items] == ["tests/a.py::test_one"]
+
+
+def test_a_refusal_without_a_message_still_explains_itself() -> None:
+    # Not an engine we can point at: `refused` was born carrying a required
+    # `message`, so no deployed version serves one without. The branch guards a
+    # regression on THIS side -- a `set_item` dropped from the marshalling,
+    # exactly the failure the binding's own docstring warns about, which does
+    # not break a build and does not fail a test. The run must still fail with
+    # something a reader can act on rather than a bare exit code.
+    selection = test_selection.TestSelection(
+        selection="refused", reason="ambiguous_test_sessions"
+    )
+
+    items = [FakeItem("tests/a.py::test_one")]
+    config = FakeConfig()
+    with pytest.raises(pytest.UsageError) as raised:
+        selection.filter_items(config, items)  # type: ignore[arg-type]
+
+    message = str(raised.value)
+    assert message == test_selection.FALLBACK_REFUSAL_MESSAGE
+    # Says up front that the run was stopped -- the reader's own situation, not
+    # a justification of ours -- then the remedy with the page documenting it,
+    # then a way out for the cases a rename does not fix, because several runs
+    # under one job name is an observation and not a diagnosis of a matrix.
+    assert message.startswith("Mergify Test Selection stopped this run.")
+    assert "MERGIFY_TEST_JOB_NAME" in message
+    # A link that rots or was invented is worse than none: this is the page the
+    # repository points at everywhere else, and it documents the variable.
+    assert "https://docs.mergify.com/ci-insights/test-frameworks/pytest/" in message
+    assert "support" in message
 
 
 # The lifecycle above is unit-level. What follows runs the plugin over a real
@@ -347,3 +436,165 @@ def test_an_xdist_worker_reports_no_fingerprint(
     resource = plugin.mergify_ci.resource_attributes
     assert resource is not None
     assert "test.collection.fingerprint" not in resource
+
+
+def test_an_empty_selection_runs_nothing_and_exits_green(
+    pytester: _pytest.pytester.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The whole point of the answer: the job is red-or-green like any other, and
+    # a run that legitimately executed nothing has to be green. pytest's own
+    # verdict on an empty collection is exit code 5, so this is the assertion
+    # that matters -- `assert_outcomes` alone would pass on a red run.
+    result, plugin, calls = _run_with_selection(
+        pytester,
+        monkeypatch,
+        _TWO_TESTS,
+        served={
+            "selection": "empty",
+            "reason": "predecessor_job_succeeded",
+            "tests": [],
+        },
+    )
+
+    assert result.ret == pytest.ExitCode.OK
+    result.assert_outcomes(passed=0, failed=0, deselected=2)
+    assert len(calls) == 1
+    assert plugin.mergify_ci.test_selection is not None
+    assert plugin.mergify_ci.test_selection.selection == "empty"
+    result.stdout.fnmatch_lines(["*executing no test*all 2 selected test(s)*"])
+
+
+def test_an_empty_selection_still_uploads_its_session(
+    pytester: _pytest.pytester.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+    otlp_collector: conftest.OTLPCollector,
+) -> None:
+    # The half that disappears in silence if it is forgotten. Running no test is
+    # the most visible thing this feature does, so a job that legitimately ran
+    # nothing must still show up in Mergify -- otherwise it is the only one
+    # missing from the reporting, and it is the one a developer comes asking
+    # about. Asserted on the decoded payload rather than on the plugin's own
+    # state, because a run can hold a finished session span and have uploaded
+    # nothing.
+    conftest.configure_upload(monkeypatch, otlp_collector)
+    # The coordinates the answer is keyed on, as `_run_with_selection` sets them
+    # for the in-process runs above.
+    monkeypatch.setenv("GITHUB_HEAD_REF", "queue/main/42")
+    monkeypatch.setenv("GITHUB_SHA", "cafecafe")
+    monkeypatch.setenv("GITHUB_WORKFLOW", "CI")
+    monkeypatch.setenv("GITHUB_JOB", "unit")
+    otlp_collector.serve_test_selection(
+        {"selection": "empty", "reason": "predecessor_job_succeeded"}
+    )
+    pytester.makepyfile(_TWO_TESTS)
+
+    result = pytester.runpytest_subprocess()
+
+    assert result.ret == pytest.ExitCode.OK
+    result.assert_outcomes(passed=0, deselected=2)
+    (batch,) = otlp_collector.batches
+    # The session, and only the session: zero test executed is zero test span.
+    assert [span.name for span in batch.spans] == ["pytest session start"]
+    # And it carries the collection it was answered on, which is what lets
+    # Mergify answer the attempt after this one.
+    assert batch.resource_attributes[
+        "test.collection.fingerprint"
+    ] == conftest.collection_fingerprint(
+        [
+            "test_an_empty_selection_still_uploads_its_session.py::test_kept",
+            "test_an_empty_selection_still_uploads_its_session.py::test_filtered_out",
+        ]
+    )
+
+
+def test_a_refusal_fails_the_run(
+    pytester: _pytest.pytester.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The other answer that must not degrade. A full run here would be the
+    # comfortable outcome and the wrong one: nobody would ever learn that this
+    # job's name covers several runs, and the reduced reruns would stay off
+    # forever with no symptom.
+    result, _, calls = _run_with_selection(
+        pytester,
+        monkeypatch,
+        _TWO_TESTS,
+        served={
+            "selection": "refused",
+            "reason": "ambiguous_test_sessions",
+            "tests": [],
+            "message": _SERVED_REFUSAL_MESSAGE,
+        },
+    )
+
+    # `USAGE_ERROR`, specifically: the run stops on something the user has to
+    # change, which is what pytest's own exit codes call this, and it tells a
+    # deliberate refusal apart from the plugin having crashed (`INTERNAL_ERROR`).
+    assert result.ret == pytest.ExitCode.USAGE_ERROR
+    result.assert_outcomes(passed=0, failed=0)
+    assert len(calls) == 1
+    assert _SERVED_REFUSAL_MESSAGE in result.stderr.str() + result.stdout.str()
+
+
+def test_an_empty_selection_over_an_empty_collection_stays_an_error(
+    pytester: _pytest.pytester.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `-k` leaves nothing to run, so pytest's exit code 5 is the honest answer
+    # and not something this plugin emptied. Greening it would hide a mistyped
+    # filter behind a Mergify answer -- exactly the "green run that tested
+    # nothing" the whole feature is built to avoid.
+    result, plugin, _ = _run_with_selection(
+        pytester,
+        monkeypatch,
+        _TWO_TESTS,
+        "-k",
+        "matches-no-test",
+        served={
+            "selection": "empty",
+            "reason": "predecessor_job_succeeded",
+            "tests": [],
+        },
+    )
+
+    assert result.ret == pytest.ExitCode.NO_TESTS_COLLECTED
+    assert plugin.mergify_ci.test_selection is not None
+    assert plugin.mergify_ci.test_selection.deselected_count == 0
+    # And the Mergify section says nothing about a skip: announcing that a
+    # previous attempt ran and passed "all 0 selected test(s)" would send whoever
+    # is debugging that red job to look at Mergify instead of at their filter.
+    assert "Skipped rerun" not in result.stdout.str()
+
+
+def test_a_refused_run_uploads_a_session_marked_failed(
+    pytester: _pytest.pytester.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+    otlp_collector: conftest.OTLPCollector,
+) -> None:
+    # A refusal produces the same payload shape as an `empty` answer -- one
+    # session span, no test span -- and the exit code that tells them apart
+    # never leaves the machine. Without a status on the session, Mergify is
+    # handed a clean, complete-looking run of a job that in fact refused to run,
+    # for a job name it has just said is ambiguous.
+    conftest.configure_upload(monkeypatch, otlp_collector)
+    monkeypatch.setenv("GITHUB_HEAD_REF", "queue/main/42")
+    monkeypatch.setenv("GITHUB_SHA", "cafecafe")
+    monkeypatch.setenv("GITHUB_WORKFLOW", "CI")
+    monkeypatch.setenv("GITHUB_JOB", "unit")
+    otlp_collector.serve_test_selection(
+        {
+            "selection": "refused",
+            "reason": "ambiguous_test_sessions",
+            "message": _SERVED_REFUSAL_MESSAGE,
+        }
+    )
+    pytester.makepyfile(_TWO_TESTS)
+
+    result = pytester.runpytest_subprocess()
+
+    assert result.ret == pytest.ExitCode.USAGE_ERROR
+    (batch,) = otlp_collector.batches
+    (span,) = batch.spans
+    assert span.name == "pytest session start"
+    assert span.status == "error"
