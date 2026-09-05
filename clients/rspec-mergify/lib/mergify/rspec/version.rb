@@ -2,17 +2,12 @@
 
 module Mergify
   module RSpec
-    VERSION = begin
-      v = `git describe --tags 2>/dev/null`.strip.delete_prefix('v')
-      if v.empty?
-        '0.0.0.dev'
-      elsif v.include?('-')
-        # e.g. "0.1.0-3-gabc123" -> "0.1.0.dev3"
-        parts = v.split('-')
-        "#{parts[0]}.dev#{parts[1]}"
-      else
-        v
-      end
-    end
+    # Placeholder: the release workflow stamps the real version from the git tag
+    # at build time, as it does for pytest-mergify's pyproject.toml and the TS
+    # packages' package.json. This used to shell out to `git describe --tags`,
+    # which resolved against whatever repository happened to be the working
+    # directory at load time -- the monorepo's namespaced tags here, the user's
+    # own tags once the gem was installed.
+    VERSION = '0.0.0'
   end
 end

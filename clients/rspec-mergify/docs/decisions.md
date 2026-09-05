@@ -143,9 +143,20 @@ The reference implementation is [pytest-mergify](https://github.com/Mergifyio/py
 
 **Decision: A (GPL-3.0-only)** — consistency with pytest-mergify.
 
+**Superseded on the move into `mergify-ci-integrations`:** the gem is now
+Apache-2.0, under the single LICENSE at the monorepo root. pytest-mergify — the
+reason GPL was picked here — was itself relicensed to Apache-2.0 first, so the
+consistency argument now points the other way.
+
 ## Version Management
 
 Gem version is derived from git tags via `git describe --tags`. Falls back to `0.0.0.dev` when no tags exist. Dev builds produce versions like `0.1.0.dev3` (valid RubyGems format). The `v` prefix is stripped automatically.
+
+**Superseded on the move into `mergify-ci-integrations`:** `VERSION` is a literal
+`0.0.0` that the release workflow stamps at build time. `git describe` only ever
+answered correctly inside a checkout of the standalone repo — the monorepo's tags
+are namespaced per client, and an installed gem read whatever repository the
+user's suite was running in.
 
 ## Release Pipeline
 

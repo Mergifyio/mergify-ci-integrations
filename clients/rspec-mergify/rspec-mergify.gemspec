@@ -12,13 +12,15 @@ Gem::Specification.new do |spec|
   spec.description = 'RSpec integration for Mergify CI Insights: OpenTelemetry tracing, ' \
                      'flaky test detection, and test quarantine.'
   spec.homepage = 'https://github.com/Mergifyio/rspec-mergify'
-  spec.license = 'GPL-3.0-only'
+  spec.license = 'Apache-2.0'
   spec.required_ruby_version = '>= 3.1'
 
   spec.metadata['homepage_uri'] = spec.homepage
   spec.metadata['source_code_uri'] = spec.homepage
   spec.metadata['rubygems_mfa_required'] = 'true'
 
+  # LICENSE lives at the monorepo root, not here; the release workflow stages a
+  # copy alongside the gem before `gem build` so the published gem still ships it.
   spec.files = Dir['lib/**/*.rb', 'LICENSE', 'README.md']
   spec.require_paths = ['lib']
 
