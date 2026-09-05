@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { MergifyApiClient } from '@mergifyio/ci-core';
+import type { FlakyDetectionContext, MergifyApiClient } from '@mergifyio/ci-core';
 import type { FullConfig } from '@playwright/test';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runGlobalSetup } from '../src/global-setup.js';
@@ -11,13 +11,17 @@ function fakeConfig(rootDir: string): FullConfig {
   return { rootDir } as unknown as FullConfig;
 }
 
-function flakyContextPayload() {
+/** Typed so it cannot drift from the shape the client actually returns. */
+function flakyContextPayload(): FlakyDetectionContext {
   return {
     budget_ratio_for_new_tests: 0.5,
     budget_ratio_for_unhealthy_tests: 0.5,
     existing_test_names: ['existing-1'],
     existing_tests_mean_duration_ms: 100,
     unhealthy_test_names: [],
+    budget_ratio_for_test_retries: 0,
+    flaky_test_names: [],
+    broken_test_names: [],
     max_test_execution_count: 5,
     max_test_name_length: 200,
     min_budget_duration_ms: 1_000,
