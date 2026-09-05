@@ -124,6 +124,16 @@ pub struct FlakyDetectionContext {
     pub existing_tests_mean_duration_ms: i64,
     #[napi(js_name = "unhealthy_test_names")]
     pub unhealthy_test_names: Vec<String>,
+    // The retry-a-known-flaky inputs. Only pytest-mergify acts on them today,
+    // but they are projected anyway: this object is meant to mirror the wire
+    // contract, and a field the server sends that stops here is invisible to
+    // whoever wires the feature up next.
+    #[napi(js_name = "budget_ratio_for_test_retries")]
+    pub budget_ratio_for_test_retries: f64,
+    #[napi(js_name = "flaky_test_names")]
+    pub flaky_test_names: Vec<String>,
+    #[napi(js_name = "broken_test_names")]
+    pub broken_test_names: Vec<String>,
     #[napi(js_name = "max_test_execution_count")]
     pub max_test_execution_count: i64,
     #[napi(js_name = "max_test_name_length")]
@@ -142,6 +152,9 @@ impl From<mergify_ci_api::FlakyDetectionContext> for FlakyDetectionContext {
             existing_test_names: context.existing_test_names,
             existing_tests_mean_duration_ms: context.existing_tests_mean_duration_ms,
             unhealthy_test_names: context.unhealthy_test_names,
+            budget_ratio_for_test_retries: context.budget_ratio_for_test_retries,
+            flaky_test_names: context.flaky_test_names,
+            broken_test_names: context.broken_test_names,
             max_test_execution_count: context.max_test_execution_count,
             max_test_name_length: context.max_test_name_length,
             min_budget_duration_ms: context.min_budget_duration_ms,

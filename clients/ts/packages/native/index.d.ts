@@ -118,6 +118,9 @@ export interface FlakyDetectionContext {
   existing_test_names: Array<string>
   existing_tests_mean_duration_ms: number
   unhealthy_test_names: Array<string>
+  budget_ratio_for_test_retries: number
+  flaky_test_names: Array<string>
+  broken_test_names: Array<string>
   max_test_execution_count: number
   max_test_name_length: number
   min_budget_duration_ms: number
