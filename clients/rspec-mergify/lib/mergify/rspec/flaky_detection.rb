@@ -15,7 +15,7 @@ module Mergify
     class FlakyDetectionDisabledError < StandardError; end
 
     # Manages intelligent test rerunning with budget constraints for flaky detection.
-    # rubocop:disable Metrics/ClassLength
+    # rubocop:disable-next Metrics/ClassLength
     class FlakyDetector
       # Per-test tracking metrics.
       class TestMetrics
@@ -78,7 +78,7 @@ module Mergify
         validate!
       end
 
-      # rubocop:disable Metrics/MethodLength,Metrics/AbcSize
+      # rubocop:disable-next Metrics/MethodLength,Metrics/AbcSize
       def prepare_for_session(test_ids)
         existing = Set.new(@context[:existing_test_names])
         unhealthy = Set.new(@context[:unhealthy_test_names])
@@ -103,9 +103,8 @@ module Mergify
         ratio_budget = budget_ratio * mean_duration_s * existing_count
         @budget = [ratio_budget, min_budget_s].max
       end
-      # rubocop:enable Metrics/MethodLength,Metrics/AbcSize
 
-      # rubocop:disable Metrics/MethodLength
+      # rubocop:disable-next Metrics/MethodLength
       def fill_metrics_from_report(test_id, phase, duration, status)
         if status == :skipped
           @metrics.delete(test_id)
@@ -125,7 +124,6 @@ module Mergify
         @metrics[test_id] ||= TestMetrics.new
         @metrics[test_id].fill_from_report(phase, duration, status)
       end
-      # rubocop:enable Metrics/MethodLength
 
       def rerunning_test?(test_id)
         @metrics.key?(test_id) && @metrics[test_id].rerun_count >= 1
@@ -170,7 +168,7 @@ module Mergify
         @metrics[test_id]
       end
 
-      # rubocop:disable Metrics/MethodLength,Metrics/AbcSize
+      # rubocop:disable-next Metrics/MethodLength,Metrics/AbcSize
       def make_report
         lines = []
         lines << 'Mergify Flaky Detection Report'
@@ -195,11 +193,10 @@ module Mergify
 
         lines.join("\n")
       end
-      # rubocop:enable Metrics/MethodLength,Metrics/AbcSize
 
       private
 
-      # rubocop:disable Metrics/AbcSize,Metrics/MethodLength
+      # rubocop:disable-next Metrics/AbcSize,Metrics/MethodLength
       def fetch_context
         owner, repo = Utils.split_full_repo_name(@full_repository_name)
         uri = URI("#{@url}/v1/ci/#{owner}/repositories/#{repo}/flaky-detection-context")
@@ -224,9 +221,8 @@ module Mergify
           raise "Mergify API returned HTTP #{response.code}"
         end
       end
-      # rubocop:enable Metrics/AbcSize,Metrics/MethodLength
 
-      # rubocop:disable Metrics/MethodLength,Metrics/AbcSize
+      # rubocop:disable-next Metrics/MethodLength,Metrics/AbcSize
       def parse_context(body)
         data = JSON.parse(body, symbolize_names: true)
         @context = {
@@ -241,7 +237,6 @@ module Mergify
           min_test_execution_count: data[:min_test_execution_count].to_i
         }
       end
-      # rubocop:enable Metrics/MethodLength,Metrics/AbcSize
 
       def validate!
         return unless @mode == 'new' && @context[:existing_test_names].empty?
@@ -264,6 +259,5 @@ module Mergify
         @tests_to_process.count { |id| !@metrics.key?(id) || @metrics[id].deadline.nil? }
       end
     end
-    # rubocop:enable Metrics/ClassLength
   end
 end

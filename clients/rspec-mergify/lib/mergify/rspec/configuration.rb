@@ -10,7 +10,7 @@ module Mergify
       module_function
 
       # rubocop:disable Metrics/MethodLength,Metrics/BlockLength,Metrics/AbcSize
-      # rubocop:disable Metrics/CyclomaticComplexity,Metrics/PerceivedComplexity
+      # rubocop:disable-next Metrics/CyclomaticComplexity,Metrics/PerceivedComplexity
       def setup!
         ::RSpec.configure do |config|
           # Add formatter when in CI
@@ -111,7 +111,6 @@ module Mergify
           end
         end
       end
-      # rubocop:enable Metrics/CyclomaticComplexity,Metrics/PerceivedComplexity
       # rubocop:enable Metrics/MethodLength,Metrics/BlockLength,Metrics/AbcSize
     end
   end

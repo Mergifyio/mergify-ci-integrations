@@ -16,14 +16,14 @@ module Mergify
   module RSpec
     # Central orchestrator for Mergify Test Insights: sets up OpenTelemetry tracing,
     # manages the tracer provider, and coordinates flaky detection and quarantine.
-    # rubocop:disable Metrics/ClassLength
+    # rubocop:disable-next Metrics/ClassLength
     class CIInsights
       attr_reader :token, :repo_name, :api_url, :test_run_id,
                   :tracer_provider, :tracer, :exporter,
                   :branch_name,
                   :flaky_detector, :flaky_detector_error_message, :quarantined_tests
 
-      # rubocop:disable Metrics/MethodLength
+      # rubocop:disable-next Metrics/MethodLength
       def initialize
         @token = ENV.fetch('MERGIFY_TOKEN', nil)
         @repo_name = Utils.repository_name
@@ -39,7 +39,6 @@ module Mergify
 
         setup_tracing if Utils.in_ci?
       end
-      # rubocop:enable Metrics/MethodLength
 
       def mark_test_as_quarantined_if_needed(example_id) # rubocop:disable Naming/PredicateMethod
         return false unless @quarantined_tests&.include?(example_id)
@@ -96,7 +95,7 @@ module Mergify
         [processor, exp]
       end
 
-      # rubocop:disable Metrics/MethodLength
+      # rubocop:disable-next Metrics/MethodLength
       def build_resource
         resources = [
           Resources::CI.detect,
@@ -113,7 +112,6 @@ module Mergify
         run_id_resource = OpenTelemetry::SDK::Resources::Resource.create('test.run.id' => @test_run_id)
         base.merge(run_id_resource)
       end
-      # rubocop:enable Metrics/MethodLength
 
       def extract_branch_name(resource)
         attrs = resource.attribute_enumerator.to_h
@@ -121,7 +119,7 @@ module Mergify
         @base_branch_name || attrs['vcs.ref.head.name']
       end
 
-      # rubocop:disable Metrics/MethodLength
+      # rubocop:disable-next Metrics/MethodLength
       def create_otlp_exporter(endpoint)
         require 'opentelemetry-exporter-otlp'
         original_env = ENV.fetch('OTEL_EXPORTER_OTLP_TRACES_ENDPOINT', nil)
@@ -140,9 +138,8 @@ module Mergify
           end
         end
       end
-      # rubocop:enable Metrics/MethodLength
 
-      # rubocop:disable Metrics/MethodLength
+      # rubocop:disable-next Metrics/MethodLength
       def load_flaky_detector
         return unless @token && @repo_name
 
@@ -161,7 +158,6 @@ module Mergify
       rescue StandardError => e
         @flaky_detector_error_message = "Could not load flaky detector: #{e.message}"
       end
-      # rubocop:enable Metrics/MethodLength
 
       def load_quarantine
         return unless @token && @repo_name && @branch_name
@@ -175,6 +171,5 @@ module Mergify
         )
       end
     end
-    # rubocop:enable Metrics/ClassLength
   end
 end

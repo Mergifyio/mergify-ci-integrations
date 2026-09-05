@@ -3,7 +3,7 @@
 require 'spec_helper'
 require 'mergify/rspec/flaky_detection'
 
-# rubocop:disable RSpec/SpecFilePathFormat
+# rubocop:disable-next RSpec/SpecFilePathFormat
 RSpec.describe Mergify::RSpec::FlakyDetector do
   let(:token) { 'test-token' }
   let(:url) { 'https://api.mergify.com' }
@@ -429,4 +429,3 @@ RSpec.describe Mergify::RSpec::FlakyDetector do
     end
   end
 end
-# rubocop:enable RSpec/SpecFilePathFormat

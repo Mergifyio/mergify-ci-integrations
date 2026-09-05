@@ -8,7 +8,7 @@ module Mergify
     # RSpec formatter that creates OpenTelemetry spans for Mergify Test Insights and
     # prints a terminal report. It is purely observational and does not modify
     # test execution.
-    # rubocop:disable Metrics/ClassLength
+    # rubocop:disable-next Metrics/ClassLength
     class Formatter < ::RSpec::Core::Formatters::BaseFormatter
       ::RSpec::Core::Formatters.register self,
                                          :start,
@@ -17,7 +17,7 @@ module Mergify
                                          :example_pending,
                                          :stop
 
-      # rubocop:disable Metrics/MethodLength
+      # rubocop:disable-next Metrics/MethodLength
       def start(notification)
         super
 
@@ -34,7 +34,6 @@ module Mergify
         @has_error = false
         @example_spans = {}
       end
-      # rubocop:enable Metrics/MethodLength
 
       def example_started(notification)
         return unless @ci_insights&.tracer && @session_span
@@ -51,7 +50,7 @@ module Mergify
         @example_spans[example.id] = span
       end
 
-      # rubocop:disable Metrics/MethodLength
+      # rubocop:disable-next Metrics/MethodLength
       def example_finished(notification)
         return unless @example_spans
 
@@ -73,7 +72,6 @@ module Mergify
 
         span.finish
       end
-      # rubocop:enable Metrics/MethodLength
 
       def example_pending(notification)
         return unless @example_spans
@@ -149,7 +147,7 @@ module Mergify
         @session_span.finish
       end
 
-      # rubocop:disable Metrics/MethodLength
+      # rubocop:disable-next Metrics/MethodLength
       def print_report
         output.puts ''
         output.puts '--- Mergify CI ---'
@@ -165,7 +163,6 @@ module Mergify
         output.puts "MERGIFY_TEST_RUN_ID=#{@ci_insights.test_run_id}"
         output.puts '------------------'
       end
-      # rubocop:enable Metrics/MethodLength
 
       def print_configuration_warnings
         output.puts 'WARNING: MERGIFY_TOKEN is not set. Traces will not be sent to Mergify.' unless @ci_insights.token
@@ -217,6 +214,5 @@ module Mergify
         output.puts 'Documentation: https://docs.mergify.com/ci-insights/test-frameworks/'
       end
     end
-    # rubocop:enable Metrics/ClassLength
   end
 end

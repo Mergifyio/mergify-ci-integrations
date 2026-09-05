@@ -45,7 +45,7 @@ module Mergify
       end
 
       # Evaluates whether a CI environment variable should be considered enabled.
-      # rubocop:disable Metrics/MethodLength
+      # rubocop:disable-next Metrics/MethodLength
       def ci_provider
         SUPPORTED_CIS.each do |envvar, name|
           next unless ENV.key?(envvar)
@@ -61,7 +61,6 @@ module Mergify
         end
         nil
       end
-      # rubocop:enable Metrics/MethodLength
 
       # Parse a git remote URL (SSH or HTTPS) into "owner/repo" form.
       # Returns nil when the URL cannot be recognised.
@@ -113,7 +112,7 @@ module Mergify
 
       # Detect the repository name using CI environment variables or a git
       # remote fallback.
-      # rubocop:disable Metrics/MethodLength,Metrics/CyclomaticComplexity
+      # rubocop:disable-next Metrics/MethodLength,Metrics/CyclomaticComplexity
       def repository_name
         provider = ci_provider
 
@@ -136,7 +135,6 @@ module Mergify
         url = git('config', '--get', 'remote.origin.url')
         repository_name_from_url(url) if url
       end
-      # rubocop:enable Metrics/MethodLength,Metrics/CyclomaticComplexity
     end
   end
 end

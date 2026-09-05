@@ -33,7 +33,7 @@ module Mergify
         @used_tests.add(example_id)
       end
 
-      # rubocop:disable Metrics/MethodLength,Metrics/AbcSize
+      # rubocop:disable-next Metrics/MethodLength,Metrics/AbcSize
       def report
         used, unused = @quarantined_tests.partition { |t| @used_tests.include?(t) }
 
@@ -50,7 +50,6 @@ module Mergify
         unused.each { |t| lines << "    - #{t}" }
         lines.join("\n")
       end
-      # rubocop:enable Metrics/MethodLength,Metrics/AbcSize
 
       private
 
@@ -68,7 +67,7 @@ module Mergify
       # Follows the RFC 5988 `next` link until exhausted. Returns the full list
       # on success, or `nil` when the run was aborted (subscription missing or
       # an error already recorded in @init_error_msg).
-      # rubocop:disable Metrics/MethodLength,Metrics/AbcSize
+      # rubocop:disable-next Metrics/MethodLength,Metrics/AbcSize
       def walk_paginated_quarantines(uri, token)
         collected = []
         # Guard against a server returning a `next` link that loops back to a
@@ -97,7 +96,6 @@ module Mergify
         end
         collected
       end
-      # rubocop:enable Metrics/MethodLength,Metrics/AbcSize
 
       def perform_request(uri, token)
         http = Net::HTTP.new(uri.host, uri.port)
