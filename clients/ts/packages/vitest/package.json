@@ -46,7 +46,7 @@
   "devDependencies": {
     "@opentelemetry/sdk-trace-base": "^2.10.0",
     "@vitest/runner": "^4.1.10",
-    "vitest": "^4.1.10"
+    "vitest": "^5.0.0"
   },
   "scripts": {
     "build": "tsdown",
