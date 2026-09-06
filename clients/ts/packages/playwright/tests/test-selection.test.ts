@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { InMemorySpanExporter } from '@opentelemetry/sdk-trace-base';
+import { InMemorySpanSink } from '@mergifyio/ci-core';
 import type { FullConfig, Suite, TestCase } from '@playwright/test/reporter';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MergifyReporter } from '../src/reporter.js';
@@ -132,7 +132,7 @@ function seedRawState(testSelection: unknown): void {
 }
 
 function reporter(): MergifyReporter {
-  return new MergifyReporter({ exporter: new InMemorySpanExporter() });
+  return new MergifyReporter({ sink: new InMemorySpanSink() });
 }
 
 describe('preprocess — reducing the run to the served subset', () => {

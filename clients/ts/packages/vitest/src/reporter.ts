@@ -4,6 +4,7 @@ import type {
   FlakyDetectionContext,
   FlakyDetectionMode,
   MergifyApiClient,
+  SessionSpan,
   TestCaseResult,
   TestRunSession,
   TestSelection,
@@ -28,7 +29,6 @@ import {
   startSessionSpan,
   toTestSelection,
 } from '@mergifyio/ci-core';
-import type { Span } from '@opentelemetry/api';
 import type { Reporter, TestCase, TestModule, Vitest } from 'vitest/node';
 import * as vitestResource from './resources/vitest.js';
 import type { MergifyReporterOptions } from './types.js';
@@ -68,7 +68,7 @@ export class MergifyReporter implements Reporter {
   private vitest: Vitest | undefined;
   private session: TestRunSession | undefined;
   private tracing: TracingContext | null = null;
-  private sessionSpan: Span | undefined;
+  private sessionSpan: SessionSpan | undefined;
   private options: MergifyReporterOptions;
   private _testRunId: string | undefined;
   private quarantineList: Set<string> = new Set();
@@ -102,7 +102,7 @@ export class MergifyReporter implements Reporter {
     const repoName = getRepoName();
 
     const enabled =
-      isInCI() || envToBool(process.env.VITEST_MERGIFY_ENABLE, false) || !!this.options.exporter;
+      isInCI() || envToBool(process.env.VITEST_MERGIFY_ENABLE, false) || !!this.options.sink;
 
     // One client for the whole run: quarantine, flaky detection, test selection
     // and the trace upload all go through it. Null without a token, a detected
@@ -125,8 +125,7 @@ export class MergifyReporter implements Reporter {
         apiClient,
         testRunId,
         frameworkAttributes: vitestResource.detect(vitest.version),
-        tracerName: '@mergifyio/vitest',
-        exporter: this.options.exporter,
+        sink: this.options.sink,
       });
     }
 
@@ -149,7 +148,7 @@ export class MergifyReporter implements Reporter {
       this.quarantineList = new Set(this.options.quarantineList);
       this._configureRunner(vitest);
     } else if (this.tracing && apiClient) {
-      const branch = resolveBranchFromAttributes(this.tracing.resource.attributes);
+      const branch = resolveBranchFromAttributes(this.tracing.resourceAttributes);
       if (branch) {
         this._initQuarantine(vitest, apiClient, branch);
       }
@@ -177,7 +176,7 @@ export class MergifyReporter implements Reporter {
       // the server opt the repository in (200) or out (404). The mode mirrors
       // the pytest/rspec clients — a PR base ref means "new", otherwise
       // "unhealthy".
-      const baseRef = this.tracing.resource.attributes['vcs.ref.base.name'];
+      const baseRef = this.tracing.resourceAttributes['vcs.ref.base.name'];
       const mode: FlakyDetectionMode =
         typeof baseRef === 'string' && baseRef.length > 0 ? 'new' : 'unhealthy';
       this.flakyMode = mode;
@@ -207,7 +206,7 @@ export class MergifyReporter implements Reporter {
     // revision (a merge-queue draft branch on reruns) plus the job coordinates,
     // the exact values reported with each uploaded test. Without all four there
     // is nothing the server can match, so the full suite runs.
-    const coordinates = resolveSelectionCoordinates(this.tracing!.resource.attributes);
+    const coordinates = resolveSelectionCoordinates(this.tracing!.resourceAttributes);
     if (!coordinates) return;
 
     const log = (msg: string) => vitest.logger.log(`[@mergifyio/vitest] ${msg}`);
@@ -387,7 +386,7 @@ export class MergifyReporter implements Reporter {
 
     // Create OTel span for this test case
     if (this.tracing && this.sessionSpan) {
-      emitTestCaseSpan(this.tracing.tracer, this.sessionSpan, testCaseResult);
+      emitTestCaseSpan(this.tracing, this.sessionSpan, testCaseResult);
     }
   }
 
@@ -536,7 +535,7 @@ export class MergifyReporter implements Reporter {
     };
   }
 
-  getExporter() {
-    return this.tracing?.exporter;
+  getSink() {
+    return this.tracing?.sink;
   }
 }

@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import { InMemorySpanExporter } from '@opentelemetry/sdk-trace-base';
+import { InMemorySpanSink } from '@mergifyio/ci-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { startVitest } from 'vitest/node';
 import { MergifyReporter } from '../src/reporter.js';
@@ -7,8 +7,8 @@ import { MergifyReporter } from '../src/reporter.js';
 const fixturesDir = resolve(import.meta.dirname, 'fixtures');
 
 async function runFixture(file: string, quarantineList: string[]) {
-  const exporter = new InMemorySpanExporter();
-  const reporter = new MergifyReporter({ exporter, quarantineList });
+  const sink = new InMemorySpanSink();
+  const reporter = new MergifyReporter({ sink, quarantineList });
 
   const vitest = await startVitest('test', [], {
     root: fixturesDir,
@@ -18,9 +18,7 @@ async function runFixture(file: string, quarantineList: string[]) {
   });
   await vitest?.close();
 
-  const caseSpans = exporter
-    .getFinishedSpans()
-    .filter((s) => s.attributes['test.scope'] === 'case');
+  const caseSpans = sink.getFinishedSpans().filter((s) => s.attributes['test.scope'] === 'case');
 
   return {
     status: reporter.getSession()!.status,

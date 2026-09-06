@@ -14,9 +14,10 @@ import {
   type MergifyApiClient,
   resolveBranchFromAttributes,
   resolveSelectionCoordinates,
+  type SpanAttributes,
   type TestSelection,
 } from '@mergifyio/ci-core';
-import type { Attributes } from '@opentelemetry/api';
+
 import type { FullConfig } from '@playwright/test';
 import { type SharedState, stateFilePath, writeStateFile } from './state-file.js';
 import { readPluginVersion } from './version.js';
@@ -59,7 +60,7 @@ export async function runGlobalSetup(config: FullConfig, deps: RunGlobalSetupDep
   // `vcs.ref.base.name` (PR base) over `vcs.ref.head.name` (push branch / PR
   // head); flaky-detection mode is derived from the same split — a non-empty
   // base ref means PR-like context → "new" mode, otherwise "unhealthy".
-  const attrs = detectResources({}, testRunId).attributes;
+  const attrs = detectResources({}, testRunId);
   const branch = resolveBranchFromAttributes(attrs);
   const baseRefAttr = attrs['vcs.ref.base.name'];
   const isPullRequest = typeof baseRefAttr === 'string' && baseRefAttr.length > 0;
@@ -139,7 +140,7 @@ export async function runGlobalSetup(config: FullConfig, deps: RunGlobalSetupDep
  */
 async function loadTestSelection(
   client: MergifyApiClient,
-  attrs: Attributes,
+  attrs: SpanAttributes,
   log: (msg: string) => void
 ): Promise<TestSelection | undefined> {
   if (isTestSelectionDisabled()) return undefined;

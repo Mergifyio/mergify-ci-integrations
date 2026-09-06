@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { emitTestCaseSpan } from '../src/spans.js';
+import { emitTestCaseSpan, endSessionSpan, startSessionSpan } from '../src/spans.js';
 import { buildTestIdentifier, TEST_NAME_SEPARATOR } from '../src/test-identifier.js';
+import { createTracing, InMemorySpanSink, type TracingContext } from '../src/tracing.js';
 import type { TestCaseResult } from '../src/types.js';
 
 describe('buildTestIdentifier', () => {
@@ -24,19 +25,16 @@ describe('buildTestIdentifier', () => {
 });
 
 describe('the uploaded span name goes through buildTestIdentifier', () => {
-  function spanNameFor(namespace: string, fn: string): string {
-    const names: string[] = [];
-    const tracer = {
-      startSpan(name: string) {
-        names.push(name);
-        return {
-          setAttributes: () => {},
-          setStatus: () => {},
-          end: () => {},
-          spanContext: () => ({ traceId: '0'.repeat(32), spanId: '0'.repeat(16) }),
-        };
-      },
-    };
+  /** The name actually handed to the sink, read back off the emitted span. */
+  async function spanNameFor(namespace: string, fn: string): Promise<string> {
+    const sink = new InMemorySpanSink();
+    const tracing = createTracing({
+      apiClient: null,
+      testRunId: 'run-1',
+      frameworkAttributes: {},
+      sink,
+    }) as TracingContext;
+
     const result: TestCaseResult = {
       filepath: 'a.test.ts',
       absoluteFilepath: '/a.test.ts',
@@ -50,15 +48,20 @@ describe('the uploaded span name goes through buildTestIdentifier', () => {
       retryCount: 0,
       flaky: false,
     };
-    // biome-ignore lint/suspicious/noExplicitAny: a tracer stub, not a real one
-    emitTestCaseSpan(tracer as any, { spanContext: () => ({}) } as any, result);
-    return names[0];
+
+    const session = startSessionSpan(tracing, 'session');
+    emitTestCaseSpan(tracing, session, result);
+    // Spans only reach the sink when the session ends.
+    await endSessionSpan(tracing, session, 'passed');
+
+    const testCase = sink.getFinishedSpans().find((s) => s.attributes['test.scope'] === 'case');
+    return testCase!.name;
   }
 
-  it('uploads exactly what the runner will match against', () => {
-    expect(spanNameFor('outer > inner', 'passes')).toBe(
+  it('uploads exactly what the runner will match against', async () => {
+    expect(await spanNameFor('outer > inner', 'passes')).toBe(
       buildTestIdentifier('outer > inner', 'passes')
     );
-    expect(spanNameFor('', 'standalone')).toBe(buildTestIdentifier('', 'standalone'));
+    expect(await spanNameFor('', 'standalone')).toBe(buildTestIdentifier('', 'standalone'));
   });
 });

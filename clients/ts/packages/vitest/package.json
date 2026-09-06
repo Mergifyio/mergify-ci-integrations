@@ -36,15 +36,12 @@
     "node": ">=22.0.0"
   },
   "dependencies": {
-    "@mergifyio/ci-core": "workspace:*",
-    "@opentelemetry/api": "^1.9.0",
-    "@opentelemetry/core": "^2.10.0"
+    "@mergifyio/ci-core": "workspace:*"
   },
   "peerDependencies": {
     "vitest": ">=3.0.0"
   },
   "devDependencies": {
-    "@opentelemetry/sdk-trace-base": "^2.10.0",
     "@vitest/runner": "^4.1.10",
     "vitest": "^4.1.10"
   },

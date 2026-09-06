@@ -1,6 +1,6 @@
-import type { Attributes } from '@opentelemetry/api';
+import type { SpanAttributes } from '@mergifyio/ci-core';
 
-export function detect(vitestVersion: string): Attributes {
+export function detect(vitestVersion: string): SpanAttributes {
   return {
     'test.framework': 'vitest',
     'test.framework.version': vitestVersion,
