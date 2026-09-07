@@ -209,6 +209,46 @@ jobs:
       - name: Run Semgrep
         run: semgrep --config=auto --error --timeout=15 clients/ts
 
+  rspec-tests:
+    name: rspec-mergify tests (ruby ${{ matrix.ruby }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby: ["3.1", "3.2", "3.3", "3.4", "4.0"]
+    defaults:
+      run:
+        working-directory: clients/rspec-mergify
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The matrix drives the version, not the gem's .ruby-version: that file
+      # is the local dev Ruby, while the gemspec promises >= 3.1. Testing the
+      # whole declared range is what keeps that promise honest -- pointing this
+      # at .ruby-version instead would only ever exercise the newest one.
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+          working-directory: clients/rspec-mergify
+      - run: bundle exec rspec
+
+  rspec-rubocop:
+    name: rspec-mergify rubocop
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/rspec-mergify
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Lint once, on the gem's own dev Ruby -- rubocop's findings are driven by
+      # .rubocop.yml's TargetRubyVersion, not by the interpreter running it.
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          ruby-version-file: clients/rspec-mergify/.ruby-version
+          bundler-cache: true
+          working-directory: clients/rspec-mergify
+      - run: bundle exec rubocop
+
   ci-gate:
     if: ${{ !cancelled() }}
     needs:
@@ -222,6 +262,8 @@ jobs:
       - ts-tests
       - ts-codespell
       - ts-semgrep
+      - rspec-tests
+      - rspec-rubocop
     runs-on: ubuntu-latest
     steps:
       - name: Verify all jobs succeeded
