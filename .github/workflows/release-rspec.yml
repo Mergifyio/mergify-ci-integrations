@@ -1,0 +1,154 @@
+name: Release rspec-mergify
+
+# Two-step release, matching pytest-mergify's and the TS workspace's. There is
+# no cross-compilation here -- the gem is pure Ruby -- but the repo uses
+# immutable releases, so a published release and its tag are frozen and cannot
+# be retried. Building the gem in step 1 and attaching it to the draft means the
+# artifact is proven, and reviewable, before anything reaches RubyGems.
+#
+# Step 1 -- prepare the draft (`workflow_dispatch`):
+#   Resolve the release tag -- validating a supplied one, or bumping the patch
+#   of the highest existing rspec-mergify-v* tag when none is given -- stamp and
+#   build the gem from the current commit, and create a DRAFT GitHub Release
+#   with the .gem attached + generated notes. GitHub fires no release events on
+#   draft saves, so this stage is dispatch-driven.
+#
+# Step 2 -- publish (`release: published`):
+#   The maintainer reviews the draft and publishes it; that fires this stage,
+#   which rebuilds from the now-created tag and pushes to RubyGems via Trusted
+#   Publishing (OIDC, no API key). RubyGems binds that trust to this repository,
+#   THIS workflow filename, and the `release` environment -- all three have to
+#   match the publisher configured on the gem or the token exchange fails, so
+#   renaming this file is a breaking change.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag rspec-mergify-v<SemVer> (e.g. rspec-mergify-v0.1.4). Leave empty to auto-bump the patch of the latest rspec-mergify-v* tag."
+        type: string
+        required: false
+        default: ""
+  release:
+    types: [published]
+
+permissions: {}
+
+# Serialize runs that could collide on a tag. Empty-tag dispatches share the
+# `auto` key so two near-simultaneous runs can't resolve the same version and
+# then 422 on a duplicate; explicit-tag and publish runs key off the tag itself.
+concurrency:
+  group: release-rspec-${{ github.event_name }}-${{ inputs.tag || github.event.release.tag_name || 'auto' }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------- Step 1: prepare the draft (workflow_dispatch) ----------------
+  resolve-tag:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # checkout + read the tag list
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The full tag list is needed to find the highest rspec-mergify-v* tag.
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Resolve the release tag
+        id: resolve
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "${TAG}" ]; then
+            echo "Using explicit tag: ${TAG}"
+          else
+            # The gem continues the standalone repo's SemVer line. Its tags were
+            # bare (0.1.3, no prefix) and don't exist here, so that last release
+            # seeds the bump until an rspec-mergify-v* tag exists. Auto only
+            # bumps the patch -- pass an explicit tag for a minor or major.
+            last="$(git tag -l 'rspec-mergify-v*' \
+              | { grep -E '^rspec-mergify-v[0-9]+\.[0-9]+\.[0-9]+$' || true; } \
+              | sort -V \
+              | tail -1)"
+            base="${last:-rspec-mergify-v0.1.3}"
+            IFS=. read -r major minor patch <<<"${base#rspec-mergify-v}"
+            TAG="rspec-mergify-v${major}.${minor}.$((patch + 1))"
+            echo "Auto-computed tag: ${TAG}"
+          fi
+          # Final shape check for both paths -- `gh release create` would accept
+          # any string, so validation lives here.
+          if ! [[ "${TAG}" =~ ^rspec-mergify-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag '${TAG}' must be rspec-mergify-v<major.minor.patch>"
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+
+  create-draft:
+    if: github.event_name == 'workflow_dispatch'
+    needs: resolve-tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the draft release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          ruby-version-file: clients/rspec-mergify/.ruby-version
+          bundler-cache: true
+          working-directory: clients/rspec-mergify
+      - name: Stage the release inputs
+        env:
+          TAG: ${{ needs.resolve-tag.outputs.tag }}
+        run: .github/scripts/stage-rspec-release.sh "${TAG}"
+      - name: Build the gem
+        working-directory: clients/rspec-mergify
+        run: bundle exec rake build
+      - name: Create the draft release with the gem attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ needs.resolve-tag.outputs.tag }}
+          SHA: ${{ github.sha }}
+        run: |
+          gh release create "${TAG}" \
+            --repo "${REPO}" \
+            --target "${SHA}" \
+            --draft \
+            --title "rspec-mergify ${TAG#rspec-mergify-v}" \
+            --generate-notes \
+            clients/rspec-mergify/pkg/*.gem
+
+  # ---------------- Step 2: publish (release: published) ----------------
+  publish:
+    # A GitHub Release in this monorepo isn't client-scoped, so only act on
+    # rspec-mergify's tags; the other clients have their own release workflows.
+    if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'rspec-mergify-v')
+    runs-on: ubuntu-latest
+    # The `release` environment carries the RubyGems Trusted Publishing identity.
+    environment: release
+    permissions:
+      contents: read # checkout the tag
+      id-token: write # RubyGems Trusted Publishing (OIDC)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          ruby-version-file: clients/rspec-mergify/.ruby-version
+          bundler-cache: true
+          working-directory: clients/rspec-mergify
+      - name: Stage the release inputs
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: .github/scripts/stage-rspec-release.sh "${TAG}"
+      # Runs `bundle exec rake release`, which builds and pushes. The Rakefile
+      # clears `release:guard_clean` -- staging above dirties the tree on
+      # purpose -- and `release:source_control_push`, since the tag already
+      # exists: this run was triggered by publishing it.
+      - uses: rubygems/release-gem@7f9650160c1a4e7989fdc9855807bdbd421d8b6b # v1.4.1
+        with:
+          working-directory: clients/rspec-mergify
