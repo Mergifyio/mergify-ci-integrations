@@ -249,6 +249,38 @@ jobs:
           working-directory: clients/rspec-mergify
       - run: bundle exec rubocop
 
+  rspec-codespell:
+    name: rspec-mergify codespell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      # Same pinned codespell as the other two clients. The skips cover a
+      # developer checkout's build output (bundler's vendor/, rake's pkg/) so
+      # the command behaves the same locally as on CI's fresh clone.
+      - name: Run codespell
+        run: uvx codespell==2.4.3 --skip='*/vendor,*/pkg,*/.bundle,*/coverage' clients/rspec-mergify
+
+  rspec-semgrep:
+    name: rspec-mergify semgrep
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep:1.176.1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # avoid-raw is a Rails view rule and cannot apply here: the gem has no
+      # Rails dependency, no views and renders no HTML. It fires on the local
+      # variable `raw` in resources/jenkins.rb, which holds a branch name read
+      # from the environment, mistaking it for Rails' raw() helper. Excluded by
+      # rule id rather than a nosemgrep comment so the imported library code
+      # stays as upstream wrote it, and so a future `raw` local doesn't reopen
+      # this.
+      - name: Run Semgrep
+        run: |
+          semgrep --config=auto --error --timeout=15 \
+            --exclude-rule=ruby.rails.security.audit.xss.avoid-raw.avoid-raw \
+            clients/rspec-mergify
+
   rspec-gem:
     name: rspec-mergify gem build
     runs-on: ubuntu-latest
@@ -297,6 +329,8 @@ jobs:
       - ts-semgrep
       - rspec-tests
       - rspec-rubocop
+      - rspec-codespell
+      - rspec-semgrep
       - rspec-gem
     runs-on: ubuntu-latest
     steps:
