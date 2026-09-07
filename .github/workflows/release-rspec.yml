@@ -1,10 +1,12 @@
 name: Release rspec-mergify
 
-# Two-step release, matching pytest-mergify's and the TS workspace's. There is
-# no cross-compilation here -- the gem is pure Ruby -- but the repo uses
-# immutable releases, so a published release and its tag are frozen and cannot
-# be retried. Building the gem in step 1 and attaching it to the draft means the
-# artifact is proven, and reviewable, before anything reaches RubyGems.
+# Two-step release, matching pytest-mergify's and the TS workspace's. The gem
+# carries a native extension now, so step 1 cross-compiles a fat platform gem
+# per target -- one extension per supported Ruby, since Ruby has no stable ABI
+# -- plus a plain `ruby` gem for everywhere else. Releases here are immutable,
+# so a published release and its tag are frozen and cannot be retried; building
+# in step 1 and attaching to the draft means every artifact is proven, and
+# reviewable, before anything reaches RubyGems.
 #
 # Step 1 -- prepare the draft (`workflow_dispatch`):
 #   Resolve the release tag -- validating a supplied one, or bumping the patch
@@ -88,39 +90,112 @@ jobs:
           fi
           echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
 
-  create-draft:
+  # Nothing here ships Rust sources or compiles on install: the extension
+  # path-depends on crates/mergify-ci-core, which only resolves in a full
+  # checkout, so the gems are built here exactly as the wheels and the napi
+  # packages are. A platform we do not build for falls back to the `ruby` gem,
+  # whose loader reports the extension missing and lets detection degrade
+  # rather than failing to install.
+  build-gems:
     if: github.event_name == 'workflow_dispatch'
     needs: resolve-tag
     runs-on: ubuntu-latest
     permissions:
-      contents: write # create the draft release
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - x86_64-linux
+          - x86_64-linux-musl
+          - aarch64-linux
+          - aarch64-linux-musl
+          - x86_64-darwin
+          - arm64-darwin
+          - x64-mingw-ucrt
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
         with:
-          bundler-cache: true
           working-directory: clients/rspec-mergify
+          bundler-cache: true
       - name: Stage the release inputs
         env:
           TAG: ${{ needs.resolve-tag.outputs.tag }}
         run: .github/scripts/stage-rspec-release.sh "${TAG}"
-      - name: Build the gem
+      - uses: oxidize-rb/actions/cross-gem@e5f9a49a7812a078584072f6e3f657ad247c8771 # v1.4.4
+        id: cross-gem
+        with:
+          platform: ${{ matrix.platform }}
+          ruby-versions: "3.1,3.2,3.3,3.4,4.0"
+          working-directory: clients/rspec-mergify
+        env:
+          # rake-compiler-dock mounts one directory and works in it, both
+          # defaulting to the current one. That default is wrong for a
+          # monorepo: the crate path-depends on ../../../../crates, which would
+          # be outside a mount of the gem directory and vanish inside the
+          # container. Mount the repository, work in the gem.
+          RCD_MOUNTDIR: ${{ github.workspace }}
+          RCD_WORKDIR: ${{ github.workspace }}/clients/rspec-mergify
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: gem-${{ matrix.platform }}
+          path: ${{ steps.cross-gem.outputs.gem-path }}
+          if-no-files-found: error
+
+  build-ruby-gem:
+    if: github.event_name == 'workflow_dispatch'
+    needs: resolve-tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          working-directory: clients/rspec-mergify
+          bundler-cache: true
+      - name: Stage the release inputs
+        env:
+          TAG: ${{ needs.resolve-tag.outputs.tag }}
+        run: .github/scripts/stage-rspec-release.sh "${TAG}"
+      - name: Build the platform-independent gem
         working-directory: clients/rspec-mergify
         run: bundle exec rake build
-      - name: Create the draft release with the gem attached
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: gem-ruby
+          path: clients/rspec-mergify/pkg/*.gem
+          if-no-files-found: error
+
+  create-draft:
+    if: github.event_name == 'workflow_dispatch'
+    needs: [resolve-tag, build-gems, build-ruby-gem]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the draft release
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: dist
+          pattern: gem-*
+          merge-multiple: true
+      - name: Create the draft release with every gem attached
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           TAG: ${{ needs.resolve-tag.outputs.tag }}
           SHA: ${{ github.sha }}
         run: |
+          set -euo pipefail
+          ls -1 dist/*.gem
           gh release create "${TAG}" \
             --repo "${REPO}" \
             --target "${SHA}" \
             --draft \
             --title "rspec-mergify ${TAG#rspec-mergify-v}" \
             --generate-notes \
-            clients/rspec-mergify/pkg/*.gem
+            dist/*.gem
 
   # ---------------- Step 2: publish (release: published) ----------------
   publish:
@@ -143,34 +218,52 @@ jobs:
       - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
         with:
           working-directory: clients/rspec-mergify
-      - name: Download the gem the draft built
+      - name: Download the gems the draft built
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           TAG: ${{ github.event.release.tag_name }}
         run: |
+          set -euo pipefail
           gh release download "${TAG}" --repo "${REPO}" --dir pkg --pattern '*.gem'
 
-          # Release assets are mutable in a way the tag is not, so the gem is
-          # checked against the version the tag names before it is pushed. The
-          # gemspec builds `rspec-mergify-<version>.gem`, and exactly one of
-          # them belongs on a release.
-          expected="rspec-mergify-${TAG#rspec-mergify-v}.gem"
+          # Release assets are mutable in a way the tag is not, so every gem is
+          # checked against the version the tag names before any of them is
+          # pushed. A release now carries a set -- the platform-independent gem
+          # plus one per platform -- so the check is that they all belong to
+          # this version and the plain one is among them, rather than a count:
+          # a platform that failed to build never reaches the draft, since
+          # create-draft needs its artifact.
+          version="${TAG#rspec-mergify-v}"
           shopt -s nullglob
           gems=(pkg/*.gem)
-          if [ "${#gems[@]}" -ne 1 ] || [ "${gems[0]##*/}" != "${expected}" ]; then
-            echo "::error::expected exactly ${expected} on ${TAG}, found: ${gems[*]:-nothing}"
+          if [ "${#gems[@]}" -eq 0 ]; then
+            echo "::error::no gems attached to ${TAG}"
             exit 1
           fi
-          echo "verified ${expected}"
+          for gem in "${gems[@]}"; do
+            case "${gem##*/}" in
+              "rspec-mergify-${version}.gem"|"rspec-mergify-${version}-"*.gem) ;;
+              *) echo "::error::${gem##*/} is not a ${version} gem"; exit 1 ;;
+            esac
+          done
+          if [ ! -f "pkg/rspec-mergify-${version}.gem" ]; then
+            echo "::error::the platform-independent rspec-mergify-${version}.gem is missing"
+            exit 1
+          fi
+          echo "verified ${#gems[@]} gems for ${version}"
       # Replaces rubygems/release-gem, which runs `rake release` and so builds
-      # the gem it pushes. This one only performs the OIDC exchange and writes
-      # the credentials, leaving `gem push` below to send the reviewed file.
-      # The trust is bound to the workflow identity, not to whichever action
-      # performs the exchange, so the publisher configured on the gem is
-      # unaffected by the swap.
+      # the gem it pushes -- and could only ever push one. This performs the
+      # OIDC exchange and writes the credentials, leaving `gem push` below to
+      # send the reviewed files. The trust is bound to the workflow identity,
+      # not to whichever action performs the exchange, so the publisher
+      # configured on the gem is unaffected by the swap.
       - uses: rubygems/configure-rubygems-credentials@dc5a8d8553e6ee01fc26761a49e99e733d17954a # v2.1.0
-      - name: Push the gem
-        env:
-          TAG: ${{ github.event.release.tag_name }}
-        run: gem push "pkg/rspec-mergify-${TAG#rspec-mergify-v}.gem"
+      - name: Push every gem
+        run: |
+          set -euo pipefail
+          for gem in pkg/*.gem; do
+            echo "::group::gem push ${gem}"
+            gem push "${gem}"
+            echo "::endgroup::"
+          done
