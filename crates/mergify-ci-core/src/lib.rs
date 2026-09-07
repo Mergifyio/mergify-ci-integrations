@@ -100,6 +100,7 @@ mod tests {
         assert_eq!(detected(&[("JENKINS_URL", "https://ci/")]), Some(Provider::Jenkins));
         assert_eq!(detected(&[("BUILDKITE", "true")]), Some(Provider::Buildkite));
         assert_eq!(detected(&[("_PYTEST_MERGIFY_TEST", "yes")]), Some(Provider::PytestSuite));
+        assert_eq!(detected(&[("_RSPEC_MERGIFY_TEST", "yes")]), Some(Provider::RspecSuite));
         assert_eq!(detected(&[("GITHUB_ACTIONS", "false")]), None);
         // First enabled in registry order wins; a falsy earlier one is skipped.
         assert_eq!(
@@ -128,6 +129,10 @@ mod tests {
         assert_eq!(
             name(&[("_PYTEST_MERGIFY_TEST", "1")]).as_deref(),
             Some("Mergifyio/pytest-mergify"),
+        );
+        assert_eq!(
+            name(&[("_RSPEC_MERGIFY_TEST", "1")]).as_deref(),
+            Some("Mergifyio/rspec-mergify"),
         );
     }
 
