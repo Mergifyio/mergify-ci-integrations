@@ -48,9 +48,10 @@ workspace, two-step draft-then-publish like pytest-mergify).
 The RSpec gem under `clients/rspec-mergify/` (imported from
 [rspec-mergify](https://github.com/Mergifyio/rspec-mergify) with its git
 history) is not yet on the core at all — it still carries its own Ruby
-detection, API calls, and OpenTelemetry SDK export. It also still *releases*
-from the standalone repo; monorepo CI, RubyGems publishing, and the magnus
-binding all land in later steps.
+detection, API calls, and OpenTelemetry SDK export; the magnus binding lands in
+a later step. It releases from this repo via `rspec-mergify-v<SemVer>` tags,
+two-step draft-then-publish like the others, to RubyGems over Trusted
+Publishing.
 
 ## Develop
 
@@ -63,5 +64,6 @@ pnpm -C clients/ts install && pnpm -C clients/ts run build && pnpm -C clients/ts
 ```
 
 CI runs the workspace tests, builds + imports the `pytest-mergify` wheel on
-Linux, macOS, and Windows, and runs the TS workspace's lint + test matrix
-(node 22/24). It does not yet run the RSpec gem's suite.
+Linux, macOS, and Windows, runs the TS workspace's lint + test matrix (node
+22/24), and runs the gem's suite over Ruby 3.1–3.4 and 4.0 plus the packaging
+check that builds it the way a release does.
