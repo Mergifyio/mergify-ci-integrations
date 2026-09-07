@@ -2,8 +2,27 @@
 
 require 'bundler/gem_tasks'
 require 'rspec/core/rake_task'
+require 'rb_sys/extensiontask'
+
+GEMSPEC = Gem::Specification.load('rspec-mergify.gemspec')
+
+# Cross-compilation targets match the other clients' release matrices and the
+# set every Rust gem in the ecosystem publishes.
+RbSys::ExtensionTask.new('mergify_ci', GEMSPEC) do |ext|
+  ext.lib_dir = 'lib/mergify/rspec'
+  ext.cross_compile = true
+  ext.cross_platform = %w[
+    x86_64-linux x86_64-linux-musl
+    aarch64-linux aarch64-linux-musl
+    x86_64-darwin arm64-darwin
+    x64-mingw-ucrt
+  ]
+end
 
 RSpec::Core::RakeTask.new(:spec)
+
+# The suite exercises the extension, so it has to exist first.
+task spec: :compile
 
 task default: :spec
 

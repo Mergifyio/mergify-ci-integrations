@@ -8,3 +8,8 @@
 /tmp/
 Gemfile.lock
 .claude/
+
+# Built extension (rake compile drops it beside the loader shim)
+/lib/mergify/rspec/*.bundle
+/lib/mergify/rspec/*.so
+/lib/mergify/rspec/*.dll
