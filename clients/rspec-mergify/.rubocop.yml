@@ -1,0 +1,52 @@
+plugins:
+  - rubocop-rspec
+
+AllCops:
+  TargetRubyVersion: 3.1
+  NewCops: enable
+  SuggestExtensions: false
+
+Style/Documentation:
+  Enabled: false
+
+Metrics/BlockLength:
+  Exclude:
+    - "spec/**/*"
+
+RSpec/ExampleLength:
+  Enabled: false
+
+RSpec/MultipleExpectations:
+  Enabled: false
+
+RSpec/NestedGroups:
+  Max: 4
+
+RSpec/SpecFilePathFormat:
+  CustomTransform:
+    GitHubActions: github_actions
+
+RSpec/MultipleMemoizedHelpers:
+  Max: 7
+
+# Integration tests use intentionally trivial examples (expect(true).to be(true))
+# inside sandboxed RSpec runs — these cops are false positives there.
+RSpec/ExpectActual:
+  Exclude:
+    - "spec/integration/**/*"
+
+RSpec/IdenticalEqualityAssertion:
+  Exclude:
+    - "spec/integration/**/*"
+
+RSpec/VerifiedDoubles:
+  Exclude:
+    - "spec/integration/**/*"
+
+Metrics/MethodLength:
+  Exclude:
+    - "spec/**/*"
+
+Metrics/AbcSize:
+  Exclude:
+    - "spec/**/*"
