@@ -54,6 +54,16 @@ impl Client {
             // Every request — fetches and trace uploads alike — carries it, so
             // the backend can count who runs which version of which client.
             .user_agent(client_info.to_string())
+            // Merge, not replace. reqwest 0.13 verifies against the platform
+            // store alone, which is empty on a slim image that never installed
+            // ca-certificates -- and this ships inside other people's CI, where
+            // a musllinux wheel on Alpine is an ordinary place to land. Handing
+            // the verifier the Mozilla roots as *extra* roots keeps a floor
+            // under it: `rustls-platform-verifier` only errors out when the
+            // store ends up empty, and it never does now. `tls_certs_only`
+            // would also fix Alpine, but by discarding the platform store, and
+            // with it the corporate CA that a proxy-inspected CI depends on.
+            .tls_certs_merge(webpki_roots()?)
             .build()?;
         Ok(Self { config, http, retry: RetryPolicy::default() })
     }
@@ -334,6 +344,14 @@ fn parse_next_link(header: &str) -> Option<String> {
 
 fn http_status_message(status: StatusCode) -> String {
     format!("Mergify API returned HTTP {}", status.as_u16())
+}
+
+/// The bundled Mozilla roots, as `reqwest` certificates.
+fn webpki_roots() -> reqwest::Result<Vec<reqwest::Certificate>> {
+    webpki_root_certs::TLS_SERVER_ROOT_CERTS
+        .iter()
+        .map(|der| reqwest::Certificate::from_der(der))
+        .collect()
 }
 
 fn describe_error(error: &reqwest::Error) -> String {

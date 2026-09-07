@@ -12,7 +12,11 @@ description = "Shared Mergify backend API client + trace export for test-client 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 # Async HTTP: rustls (no system OpenSSL) so the wheels/gems stay portable.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# `query` is a feature of its own since 0.13; the URL builder needs it.
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
+# The Mozilla roots, merged into the platform verifier in `Client::new` so a
+# host with no CA store of its own still has something to trust. See there.
+webpki-root-certs = "1"
 # OTLP trace export by hand — the prost messages only, no tonic/grpc transport
 # and no opentelemetry-otlp SDK (matches mergify-cli's uploader).
 opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic-messages", "trace"] }
