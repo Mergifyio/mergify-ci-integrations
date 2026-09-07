@@ -22,6 +22,8 @@ pub enum Provider {
     Buildkite,
     #[serde(rename = "pytest_mergify_suite")]
     PytestSuite,
+    #[serde(rename = "rspec_mergify_suite")]
+    RspecSuite,
 }
 
 impl Provider {
@@ -34,6 +36,7 @@ impl Provider {
             Provider::Jenkins => "jenkins",
             Provider::Buildkite => "buildkite",
             Provider::PytestSuite => "pytest_mergify_suite",
+            Provider::RspecSuite => "rspec_mergify_suite",
         }
     }
 }
