@@ -1,5 +1,4 @@
 import type { Attributes, Tracer } from '@opentelemetry/api';
-import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
 import type { Resource } from '@opentelemetry/resources';
 import {
   BasicTracerProvider,
@@ -9,17 +8,22 @@ import {
   type SpanExporter,
   type SpanProcessor,
 } from '@opentelemetry/sdk-trace-base';
+import type { MergifyApiClient } from './api.js';
+import { NativeTraceExporter } from './native-exporter.js';
 import { detectResources } from './resources/index.js';
-import { envToBool, splitRepoName } from './utils.js';
+import { envToBool } from './utils.js';
 
 export interface TracingConfig {
-  token: string | undefined;
-  repoName: string | undefined;
-  apiUrl: string;
+  /**
+   * Client the spans are uploaded through; null when there is no token, no
+   * detected repository, or no binding for this platform — in which case
+   * tracing stays off.
+   */
+  apiClient: MergifyApiClient | null;
   testRunId: string;
   frameworkAttributes: Attributes;
   tracerName: string;
-  /** Injected exporter — bypasses CI and token checks. */
+  /** Injected exporter — bypasses the client entirely. */
   exporter?: SpanExporter;
 }
 
@@ -68,17 +72,11 @@ function createExporter(config: TracingConfig): SpanExporter | null {
     return new ConsoleSpanExporter();
   }
 
-  if (!config.token || !config.repoName) {
+  if (!config.apiClient) {
     return null;
   }
 
-  const { owner, repo } = splitRepoName(config.repoName);
-
-  return new OTLPTraceExporter({
-    url: `${config.apiUrl}/v1/ci/${owner}/repositories/${repo}/traces`,
-    headers: { Authorization: `Bearer ${config.token}` },
-    compression: 'gzip' as never,
-  });
+  return new NativeTraceExporter(config.apiClient);
 }
 
 export function createTracing(config: TracingConfig): TracingContext | null {

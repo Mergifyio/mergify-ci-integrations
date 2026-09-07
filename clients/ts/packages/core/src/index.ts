@@ -48,6 +48,5 @@ export {
   getRepoName,
   isInCI,
   resolveBranchFromAttributes,
-  splitRepoName,
   strtobool,
 } from './utils.js';
