@@ -1,65 +1,59 @@
-import { context, type Span, SpanStatusCode, type Tracer, trace } from '@opentelemetry/api';
-import { W3CTraceContextPropagator } from '@opentelemetry/core';
+import type { Span } from '@mergifyio/ci-native';
 import { buildTestIdentifier } from './test-identifier.js';
-import type { TracingContext } from './tracing.js';
-import type { TestCaseResult } from './types.js';
+import { msToUnixNano, newSpanId } from './trace-context.js';
+import { type TracingContext, toAttributeList } from './tracing.js';
+import type { SpanAttributes, TestCaseResult } from './types.js';
 
-export function startSessionSpan(tracing: TracingContext, name: string): Span {
-  let parentContext = context.active();
-
-  const traceparent = process.env.MERGIFY_TRACEPARENT;
-  if (traceparent) {
-    const carrier = { traceparent };
-    const propagator = new W3CTraceContextPropagator();
-    parentContext = propagator.extract(context.active(), carrier, {
-      get(c: Record<string, string>, key: string) {
-        return c[key];
-      },
-      keys(c: Record<string, string>) {
-        return Object.keys(c);
-      },
-    });
-  }
-
-  return tracing.tracer.startSpan(name, { attributes: { 'test.scope': 'session' } }, parentContext);
+/** The run's root span, open until the session ends. */
+export interface SessionSpan {
+  traceId: string;
+  spanId: string;
+  name: string;
+  startUnixNano: bigint;
 }
 
+export function startSessionSpan(tracing: TracingContext, name: string): SessionSpan {
+  return {
+    traceId: tracing.traceId,
+    spanId: newSpanId(),
+    name,
+    startUnixNano: msToUnixNano(Date.now()),
+  };
+}
+
+/**
+ * Close the session span and upload the run's trace.
+ *
+ * The upload is the last thing a run does, so a failure is surfaced rather
+ * than swallowed — the reporters decide how loudly to report it.
+ */
 export async function endSessionSpan(
   tracing: TracingContext,
-  sessionSpan: Span,
+  sessionSpan: SessionSpan,
   reason: 'passed' | 'failed' | 'interrupted'
 ): Promise<void> {
-  sessionSpan.setStatus({
-    code: reason === 'failed' ? SpanStatusCode.ERROR : SpanStatusCode.OK,
+  tracing.finished.push({
+    name: sessionSpan.name,
+    traceId: sessionSpan.traceId,
+    spanId: sessionSpan.spanId,
+    parentSpanId: tracing.remoteParentSpanId,
+    startUnixNano: sessionSpan.startUnixNano,
+    endUnixNano: msToUnixNano(Date.now()),
+    attributes: toAttributeList({ 'test.scope': 'session' }),
+    status: reason === 'failed' ? 'error' : 'ok',
   });
-  sessionSpan.end();
 
-  let flushError: unknown;
-  try {
-    await tracing.tracerProvider.forceFlush();
-  } catch (err) {
-    flushError = err;
-  }
-
-  if (tracing.ownsExporter) {
-    try {
-      await tracing.tracerProvider.shutdown();
-    } catch {
-      // ignore shutdown errors
-    }
-  }
-
-  if (flushError !== undefined) {
-    throw flushError;
-  }
+  const spans = tracing.finished;
+  tracing.finished = [];
+  await tracing.sink.export(toAttributeList(tracing.resourceAttributes), spans);
 }
 
-export function emitTestCaseSpan(tracer: Tracer, sessionSpan: Span, result: TestCaseResult): void {
-  const parentCtx = trace.setSpan(context.active(), sessionSpan);
-  const startTimeMs = result.startTime;
-  const endTimeMs = startTimeMs + result.duration;
-
-  const attributes: Record<string, string | number | boolean> = {
+export function emitTestCaseSpan(
+  tracing: TracingContext,
+  sessionSpan: SessionSpan,
+  result: TestCaseResult
+): void {
+  const attributes: SpanAttributes = {
     'code.filepath': result.filepath,
     'code.function': result.function,
     'code.lineno': result.lineno,
@@ -86,22 +80,22 @@ export function emitTestCaseSpan(tracer: Tracer, sessionSpan: Span, result: Test
     attributes['cicd.test.rerun_count'] = result.flakyDetection.rerunCount;
   }
 
-  const spanName =
-    (result.namePrefix ?? '') + buildTestIdentifier(result.namespace, result.function);
-
-  const span = tracer.startSpan(spanName, { attributes, startTime: startTimeMs }, parentCtx);
-
   if (result.error) {
-    span.setAttributes({
-      'exception.type': result.error.type,
-      'exception.message': result.error.message,
-      'exception.stacktrace': result.error.stacktrace,
-    });
+    attributes['exception.type'] = result.error.type;
+    attributes['exception.message'] = result.error.message;
+    attributes['exception.stacktrace'] = result.error.stacktrace;
   }
 
-  span.setStatus({
-    code: result.status === 'failed' ? SpanStatusCode.ERROR : SpanStatusCode.OK,
-  });
+  const span: Span = {
+    name: (result.namePrefix ?? '') + buildTestIdentifier(result.namespace, result.function),
+    traceId: sessionSpan.traceId,
+    spanId: newSpanId(),
+    parentSpanId: sessionSpan.spanId,
+    startUnixNano: msToUnixNano(result.startTime),
+    endUnixNano: msToUnixNano(result.startTime + result.duration),
+    attributes: toAttributeList(attributes),
+    status: result.status === 'failed' ? 'error' : 'ok',
+  };
 
-  span.end(endTimeMs);
+  tracing.finished.push(span);
 }

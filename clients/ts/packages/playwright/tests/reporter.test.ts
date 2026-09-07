@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { InMemorySpanExporter } from '@opentelemetry/sdk-trace-base';
+import { InMemorySpanSink } from '@mergifyio/ci-core';
 import type { FullConfig, Suite, TestCase, TestResult } from '@playwright/test/reporter';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MergifyReporter } from '../src/reporter.js';
@@ -65,21 +65,21 @@ describe('MergifyReporter session lifecycle', () => {
   });
 
   it('starts a session span with test.scope=session and name "playwright session start"', async () => {
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({ exporter });
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({ sink });
 
     reporter.onBegin(fakeConfig(), fakeSuite());
     await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
 
-    const spans = exporter.getFinishedSpans();
+    const spans = sink.getFinishedSpans();
     const session = spans.find((s) => s.attributes['test.scope'] === 'session');
     expect(session).toBeDefined();
     expect(session!.name).toBe('playwright session start');
   });
 
   it('getSession() exposes a session with 16-char hex testRunId', async () => {
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({ exporter });
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({ sink });
 
     reporter.onBegin(fakeConfig(), fakeSuite());
     await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
@@ -94,8 +94,8 @@ describe('MergifyReporter session lifecycle', () => {
   });
 
   it('sets session.status to failed when onEnd result status is failed', async () => {
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({ exporter });
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({ sink });
     reporter.onBegin(fakeConfig(), fakeSuite());
     await reporter.onEnd({ status: 'failed', startTime: new Date(), duration: 1 });
 
@@ -114,8 +114,8 @@ describe('onTestEnd — passing test', () => {
   });
 
   it('emits a test case span with code.* attributes', async () => {
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({ exporter });
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({ sink });
 
     reporter.onBegin(fakeConfig(), fakeSuite());
     const test = fakeTest({
@@ -126,7 +126,7 @@ describe('onTestEnd — passing test', () => {
     reporter.onTestEnd(test, fakeResult({ status: 'passed', duration: 5 }));
     await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
 
-    const spans = exporter.getFinishedSpans();
+    const spans = sink.getFinishedSpans();
     const testSpan = spans.find((s) => s.attributes['test.scope'] === 'case');
     expect(testSpan).toBeDefined();
     expect(testSpan!.attributes['code.function']).toBe('adds numbers');
@@ -139,8 +139,8 @@ describe('onTestEnd — passing test', () => {
   });
 
   it('pushes a TestCaseResult to the session', async () => {
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({ exporter });
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({ sink });
 
     reporter.onBegin(fakeConfig(), fakeSuite());
     reporter.onTestEnd(fakeTest(), fakeResult());
@@ -153,17 +153,17 @@ describe('onTestEnd — passing test', () => {
   });
 
   it('makes the test case span a child of the session span', async () => {
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({ exporter });
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({ sink });
 
     reporter.onBegin(fakeConfig(), fakeSuite());
     reporter.onTestEnd(fakeTest(), fakeResult());
     await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
 
-    const spans = exporter.getFinishedSpans();
+    const spans = sink.getFinishedSpans();
     const session = spans.find((s) => s.attributes['test.scope'] === 'session')!;
     const testSpan = spans.find((s) => s.attributes['test.scope'] === 'case')!;
-    expect(testSpan.parentSpanContext?.spanId).toBe(session.spanContext().spanId);
+    expect(testSpan.parentSpanId).toBe(session.spanId);
   });
 });
 
@@ -178,8 +178,8 @@ describe('onTestEnd — failing test', () => {
   });
 
   it('sets exception.* attributes and ERROR status when the test fails', async () => {
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({ exporter });
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({ sink });
 
     reporter.onBegin(fakeConfig(), fakeSuite());
     const test = fakeTest({ outcome: () => 'unexpected' });
@@ -198,7 +198,7 @@ describe('onTestEnd — failing test', () => {
     );
     await reporter.onEnd({ status: 'failed', startTime: new Date(), duration: 1 });
 
-    const spans = exporter.getFinishedSpans();
+    const spans = sink.getFinishedSpans();
     const testSpan = spans.find((s) => s.attributes['test.scope'] === 'case')!;
     expect(testSpan.attributes['test.case.result.status']).toBe('failed');
     expect(testSpan.attributes['exception.type']).toBe('Error');
@@ -207,8 +207,8 @@ describe('onTestEnd — failing test', () => {
   });
 
   it('treats timedOut as failed', async () => {
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({ exporter });
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({ sink });
 
     reporter.onBegin(fakeConfig(), fakeSuite());
     reporter.onTestEnd(fakeTest(), fakeResult({ status: 'timedOut' }));
@@ -230,8 +230,8 @@ describe('onTestEnd — skipped test', () => {
   });
 
   it('emits status=skipped with no exception attributes', async () => {
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({ exporter });
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({ sink });
 
     reporter.onBegin(fakeConfig(), fakeSuite());
     reporter.onTestEnd(
@@ -240,7 +240,7 @@ describe('onTestEnd — skipped test', () => {
     );
     await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
 
-    const spans = exporter.getFinishedSpans();
+    const spans = sink.getFinishedSpans();
     const tc = spans.find((s) => s.attributes['test.scope'] === 'case')!;
     expect(tc.attributes['test.case.result.status']).toBe('skipped');
     expect(tc.attributes['exception.type']).toBeUndefined();
@@ -258,22 +258,22 @@ describe('onTestEnd — retries', () => {
   });
 
   it('ignores a non-final failed attempt when more retries remain', async () => {
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({ exporter });
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({ sink });
 
     reporter.onBegin(fakeConfig(), fakeSuite());
     const test = fakeTest({ retries: 2 });
     reporter.onTestEnd(test, fakeResult({ status: 'failed', retry: 0, errors: [] }));
     await reporter.onEnd({ status: 'failed', startTime: new Date(), duration: 1 });
 
-    const spans = exporter.getFinishedSpans();
+    const spans = sink.getFinishedSpans();
     const testSpans = spans.filter((s) => s.attributes['test.scope'] === 'case');
     expect(testSpans).toHaveLength(0);
   });
 
   it('emits a single span when the final retry passes (flaky)', async () => {
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({ exporter });
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({ sink });
 
     reporter.onBegin(fakeConfig(), fakeSuite());
     const test = fakeTest({ retries: 2, outcome: () => 'flaky' });
@@ -281,7 +281,7 @@ describe('onTestEnd — retries', () => {
     reporter.onTestEnd(test, fakeResult({ status: 'passed', retry: 1 }));
     await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
 
-    const spans = exporter.getFinishedSpans();
+    const spans = sink.getFinishedSpans();
     const testSpans = spans.filter((s) => s.attributes['test.scope'] === 'case');
     expect(testSpans).toHaveLength(1);
     expect(testSpans[0].attributes['test.case.result.status']).toBe('passed');
@@ -292,8 +292,8 @@ describe('onTestEnd — retries', () => {
   });
 
   it('emits a single span when retries are exhausted and test still fails', async () => {
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({ exporter });
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({ sink });
 
     reporter.onBegin(fakeConfig(), fakeSuite());
     const test = fakeTest({ retries: 2, outcome: () => 'unexpected' });
@@ -302,7 +302,7 @@ describe('onTestEnd — retries', () => {
     reporter.onTestEnd(test, fakeResult({ status: 'failed', retry: 2, errors: [] }));
     await reporter.onEnd({ status: 'failed', startTime: new Date(), duration: 1 });
 
-    const spans = exporter.getFinishedSpans();
+    const spans = sink.getFinishedSpans();
     const testSpans = spans.filter((s) => s.attributes['test.scope'] === 'case');
     expect(testSpans).toHaveLength(1);
     expect(testSpans[0].attributes['test.case.result.status']).toBe('failed');
@@ -321,8 +321,8 @@ describe('onTestEnd — multi-project', () => {
   });
 
   it('emits one span per project with cicd.test.project set', async () => {
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({ exporter });
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({ sink });
 
     reporter.onBegin(fakeConfig(), fakeSuite());
 
@@ -339,14 +339,14 @@ describe('onTestEnd — multi-project', () => {
     reporter.onTestEnd(firefox, fakeResult());
     await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
 
-    const spans = exporter.getFinishedSpans().filter((s) => s.attributes['test.scope'] === 'case');
+    const spans = sink.getFinishedSpans().filter((s) => s.attributes['test.scope'] === 'case');
     const projects = spans.map((s) => s.attributes['cicd.test.project']).sort();
     expect(projects).toEqual(['chromium', 'firefox']);
   });
 
   it('omits cicd.test.project when titlePath has empty project (ungrouped test)', async () => {
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({ exporter });
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({ sink });
 
     reporter.onBegin(fakeConfig(), fakeSuite());
     const test = fakeTest({
@@ -355,13 +355,13 @@ describe('onTestEnd — multi-project', () => {
     reporter.onTestEnd(test, fakeResult());
     await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
 
-    const tc = exporter.getFinishedSpans().find((s) => s.attributes['test.scope'] === 'case')!;
+    const tc = sink.getFinishedSpans().find((s) => s.attributes['test.scope'] === 'case')!;
     expect(tc.attributes['cicd.test.project']).toBeUndefined();
   });
 
   it('does not prefix by default — same-named tests collide across projects', async () => {
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({ exporter });
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({ sink });
     reporter.onBegin(fakeConfig(), fakeSuite());
 
     const chromium = fakeTest({
@@ -376,7 +376,7 @@ describe('onTestEnd — multi-project', () => {
     reporter.onTestEnd(firefox, fakeResult());
     await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
 
-    const names = exporter
+    const names = sink
       .getFinishedSpans()
       .filter((s) => s.attributes['test.scope'] === 'case')
       .map((s) => s.name);
@@ -386,8 +386,8 @@ describe('onTestEnd — multi-project', () => {
 
   it('prefixes and keeps names distinct per project when enabled', async () => {
     vi.stubEnv('PLAYWRIGHT_MERGIFY_INCLUDE_PROJECT_IN_TEST_NAME', 'true');
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({ exporter });
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({ sink });
     reporter.onBegin(fakeConfig(), fakeSuite());
 
     const chromium = fakeTest({
@@ -402,7 +402,7 @@ describe('onTestEnd — multi-project', () => {
     reporter.onTestEnd(firefox, fakeResult());
     await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
 
-    const names = exporter
+    const names = sink
       .getFinishedSpans()
       .filter((s) => s.attributes['test.scope'] === 'case')
       .map((s) => s.name)
@@ -415,15 +415,15 @@ describe('onTestEnd — multi-project', () => {
 
   it('omits the prefix for a test with no project name even when enabled', async () => {
     vi.stubEnv('PLAYWRIGHT_MERGIFY_INCLUDE_PROJECT_IN_TEST_NAME', 'true');
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({ exporter });
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({ sink });
     reporter.onBegin(fakeConfig(), fakeSuite());
 
     const test = fakeTest({ titlePath: ['', '/root/tests/x.spec.ts', 'my test'] });
     reporter.onTestEnd(test, fakeResult());
     await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
 
-    const cs = exporter.getFinishedSpans().find((s) => s.attributes['test.scope'] === 'case')!;
+    const cs = sink.getFinishedSpans().find((s) => s.attributes['test.scope'] === 'case')!;
     expect(cs.name).toBe('tests/x.spec.ts > my test');
     expect(reporter.getSession()!.testCases[0].namePrefix).toBeUndefined();
   });
@@ -441,17 +441,15 @@ describe('MERGIFY_TRACEPARENT propagation', () => {
 
   it('makes the session span a child of the provided traceparent', async () => {
     vi.stubEnv('MERGIFY_TRACEPARENT', '00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01');
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({ exporter });
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({ sink });
 
     reporter.onBegin(fakeConfig(), fakeSuite());
     await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
 
-    const session = exporter
-      .getFinishedSpans()
-      .find((s) => s.attributes['test.scope'] === 'session')!;
-    expect(session.parentSpanContext?.traceId).toBe('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
-    expect(session.parentSpanContext?.spanId).toBe('bbbbbbbbbbbbbbbb');
+    const session = sink.getFinishedSpans().find((s) => s.attributes['test.scope'] === 'session')!;
+    expect(session.traceId).toBe('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+    expect(session.parentSpanId).toBe('bbbbbbbbbbbbbbbb');
   });
 });
 
@@ -460,7 +458,7 @@ describe('enablement rules', () => {
     vi.unstubAllEnvs();
   });
 
-  it('does not emit spans when outside CI without exporter or enable flag', async () => {
+  it('does not emit spans when outside CI without a sink or enable flag', async () => {
     vi.stubEnv('CI', '');
     vi.stubEnv('GITHUB_ACTIONS', '');
     vi.stubEnv('CIRCLECI', '');
@@ -474,7 +472,7 @@ describe('enablement rules', () => {
     reporter.onTestEnd(fakeTest(), fakeResult());
     await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
 
-    expect(reporter.getExporter()).toBeUndefined();
+    expect(reporter.getSink()).toBeUndefined();
     expect(reporter.getSession()!.testCases).toHaveLength(1);
   });
 
@@ -483,16 +481,14 @@ describe('enablement rules', () => {
     vi.stubEnv('GITHUB_ACTIONS', '');
     vi.stubEnv('PLAYWRIGHT_MERGIFY_ENABLE', 'true');
 
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({ exporter });
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({ sink });
 
     reporter.onBegin(fakeConfig(), fakeSuite());
     reporter.onTestEnd(fakeTest(), fakeResult());
     await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
 
-    const testSpans = exporter
-      .getFinishedSpans()
-      .filter((s) => s.attributes['test.scope'] === 'case');
+    const testSpans = sink.getFinishedSpans().filter((s) => s.attributes['test.scope'] === 'case');
     expect(testSpans).toHaveLength(1);
   });
 });
@@ -508,15 +504,15 @@ describe('resource attributes', () => {
   });
 
   it('attaches test framework + run id + ci provider + repo attrs on the resource', async () => {
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({ exporter });
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({ sink });
 
     reporter.onBegin(fakeConfig(), fakeSuite());
     reporter.onTestEnd(fakeTest(), fakeResult());
     await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
 
-    const span = exporter.getFinishedSpans()[0];
-    const attrs = span.resource.attributes;
+    const span = sink.getFinishedSpans()[0];
+    const attrs = span.resourceAttributes;
     expect(attrs['test.framework']).toBe('playwright');
     expect(attrs['test.framework.version']).toBeTruthy();
     expect(attrs['test.run.id']).toMatch(/^[0-9a-f]{16}$/);
@@ -559,16 +555,16 @@ describe('MergifyReporter V2 — quarantine', () => {
   });
 
   it('uses testRunId from MERGIFY_TEST_RUN_ID when set', async () => {
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({ exporter });
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({ sink });
     reporter.onBegin(fakeConfig(), fakeSuite());
     await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
     expect(reporter.getSession()!.testRunId).toBe('abc123def456');
   });
 
   it('marks TestCaseResult.quarantined when the annotation is present', async () => {
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({ exporter });
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({ sink });
     reporter.onBegin(fakeConfig(), fakeSuite());
 
     // Attach the annotation the fixture would have pushed.
@@ -583,14 +579,14 @@ describe('MergifyReporter V2 — quarantine', () => {
 
     const session = reporter.getSession()!;
     expect(session.testCases[0].quarantined).toBe(true);
-    const testSpan = exporter.getFinishedSpans().find((s) => s.attributes['test.scope'] === 'case');
+    const testSpan = sink.getFinishedSpans().find((s) => s.attributes['test.scope'] === 'case');
     expect(testSpan!.attributes['cicd.test.quarantined']).toBe(true);
   });
 
   it('prints "fetched / caught / unused" summary in onEnd when fetched > 0', async () => {
     const log = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({ exporter });
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({ sink });
     reporter.onBegin(fakeConfig(), fakeSuite());
 
     const test = fakeTest({
@@ -611,8 +607,8 @@ describe('MergifyReporter V2 — quarantine', () => {
 
   it('counts an absorbed quarantined test as caught and emits one span when retries > 0 (MRGFY-7767)', async () => {
     const log = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({ exporter });
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({ sink });
     reporter.onBegin(fakeConfig(), fakeSuite());
 
     // A quarantine-absorbed failing test: the fixture flipped expectedStatus so
@@ -633,9 +629,7 @@ describe('MergifyReporter V2 — quarantine', () => {
     );
     await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
 
-    const testSpans = exporter
-      .getFinishedSpans()
-      .filter((s) => s.attributes['test.scope'] === 'case');
+    const testSpans = sink.getFinishedSpans().filter((s) => s.attributes['test.scope'] === 'case');
     expect(testSpans).toHaveLength(1);
     expect(testSpans[0].attributes['cicd.test.quarantined']).toBe(true);
 
@@ -648,8 +642,8 @@ describe('MergifyReporter V2 — quarantine', () => {
     delete process.env.MERGIFY_TEST_RUN_ID;
     delete process.env.MERGIFY_STATE_FILE;
     const log = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({ exporter });
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({ sink });
     reporter.onBegin(fakeConfig(), fakeSuite());
     await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
     const output = log.mock.calls.map((c) => String(c[0])).join('');
@@ -692,7 +686,7 @@ describe('MergifyReporter — quarantine caught dedup (multi-project, default of
 
   it('counts one fetched entry once across projects (caught: 1, unused: 0)', async () => {
     const log = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-    const reporter = new MergifyReporter({ exporter: new InMemorySpanExporter() });
+    const reporter = new MergifyReporter({ sink: new InMemorySpanSink() });
     reporter.onBegin(fakeConfig(), fakeSuite());
 
     const annotations = [{ type: 'mergify:quarantined' }];
@@ -779,7 +773,7 @@ describe('MergifyReporter — flaky-detection onBegin candidate computation', ()
       flakyMode: 'new',
     });
 
-    const reporter = new MergifyReporter({ exporter: new InMemorySpanExporter() });
+    const reporter = new MergifyReporter({ sink: new InMemorySpanSink() });
     const tests = [
       fakeTest({
         title: 'existing-test',
@@ -809,7 +803,7 @@ describe('MergifyReporter — flaky-detection onBegin candidate computation', ()
 
   it('returns no candidates when flakyContext or flakyMode is absent', () => {
     seedState({});
-    const reporter = new MergifyReporter({ exporter: new InMemorySpanExporter() });
+    const reporter = new MergifyReporter({ sink: new InMemorySpanSink() });
     reporter.onBegin(fakeConfig(), suiteWithTests([]));
 
     expect(reporter.getFlakyCandidates()).toBeUndefined();
@@ -868,8 +862,8 @@ describe('MergifyReporter — flaky-detection summary block', () => {
   it('prints the summary header when flakyMode is set, even with no candidates', async () => {
     seedFlakyState();
     const log = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({ exporter });
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({ sink });
     reporter.onBegin(fakeConfig(), fakeSuite());
 
     const test = fakeTest({
@@ -914,8 +908,8 @@ describe('MergifyReporter — flaky-detection summary block', () => {
       location: { file: '/root/tests/sample.spec.ts', line: 1, column: 1 },
     });
 
-    const exporter = new InMemorySpanExporter();
-    const reporter = new MergifyReporter({ exporter });
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({ sink });
     reporter.onBegin(fakeConfig(), { allTests: () => [test] } as unknown as Suite);
     reporter.onTestEnd(test, fakeResult({ status: 'skipped' }));
     await reporter.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
@@ -923,7 +917,7 @@ describe('MergifyReporter — flaky-detection summary block', () => {
     const tc = reporter.getSession()?.testCases[0];
     expect(tc?.flakyDetection).toBeUndefined();
 
-    const span = exporter.getFinishedSpans().find((s) => s.attributes['test.scope'] === 'case');
+    const span = sink.getFinishedSpans().find((s) => s.attributes['test.scope'] === 'case');
     expect(span?.attributes['cicd.test.flaky_detection']).toBeUndefined();
     expect(span?.attributes['cicd.test.flaky']).toBeUndefined();
     expect(span?.attributes['cicd.test.rerun_count']).toBeUndefined();
