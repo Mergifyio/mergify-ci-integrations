@@ -2,5 +2,27 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended"
+  ],
+  "packageRules": [
+    {
+      "description": "Mirror the 7-day soak pnpm enforces in clients/ts/pnpm-workspace.yaml (minimumReleaseAge: 10080). Without it Renovate proposes versions pnpm refuses to resolve, so it cannot regenerate pnpm-lock.yaml and CI fails on ERR_PNPM_OUTDATED_LOCKFILE.",
+      "matchManagers": [
+        "npm"
+      ],
+      "minimumReleaseAge": "7 days"
+    },
+    {
+      "description": "typescript-eslint hard-errors on a TypeScript major it does not support yet, so such a bump cannot pass CI however long it waits. Park it on the dependency dashboard and approve it once typescript-eslint catches up.",
+      "matchManagers": [
+        "npm"
+      ],
+      "matchPackageNames": [
+        "typescript"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "dependencyDashboardApproval": true
+    }
   ]
 }
