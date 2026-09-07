@@ -281,6 +281,39 @@ jobs:
             --exclude-rule=ruby.rails.security.audit.xss.avoid-raw.avoid-raw \
             clients/rspec-mergify
 
+  rspec-gem:
+    name: rspec-mergify gem build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          ruby-version-file: clients/rspec-mergify/.ruby-version
+          bundler-cache: true
+          working-directory: clients/rspec-mergify
+      # Build the way a release does -- staged, with a throwaway version -- not
+      # straight from the working tree. `spec.files` is a glob, so a plain
+      # `gem build` here would cheerfully emit a gem with no LICENSE in it and
+      # exit 0: the repo keeps its licence at the root, and only the staging
+      # step copies it next to the gemspec. Releases are immutable, so a
+      # packaging regression has to be caught on the PR, not at the tag.
+      - name: Stage the release inputs
+        run: .github/scripts/stage-rspec-release.sh rspec-mergify-v0.0.1
+      - name: Build and inspect the package
+        working-directory: clients/rspec-mergify
+        run: |
+          bundle exec rake build
+          bundle exec ruby -rrubygems/package -e '
+            spec = Gem::Package.new(ARGV[0]).spec
+            errs = []
+            errs << "version is #{spec.version}, expected 0.0.1" unless spec.version.to_s == "0.0.1"
+            errs << "licenses are #{spec.licenses.inspect}, expected Apache-2.0" unless spec.licenses == ["Apache-2.0"]
+            errs << "LICENSE is not packaged" unless spec.files.include?("LICENSE")
+            errs << "README.md is not packaged" unless spec.files.include?("README.md")
+            abort "::error::built gem is wrong: #{errs.join("; ")}" unless errs.empty?
+            puts "ok: #{spec.name} #{spec.version}, #{spec.licenses.join(", ")}, #{spec.files.size} files packaged"
+          ' pkg/rspec-mergify-0.0.1.gem
+
   ci-gate:
     if: ${{ !cancelled() }}
     needs:
@@ -298,6 +331,7 @@ jobs:
       - rspec-rubocop
       - rspec-codespell
       - rspec-semgrep
+      - rspec-gem
     runs-on: ubuntu-latest
     steps:
       - name: Verify all jobs succeeded
