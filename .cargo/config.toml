@@ -1,0 +1,14 @@
+# A Python or Ruby extension is loaded into an already-running interpreter, so
+# the interpreter's own symbols -- PyBytes_AsString, rb_define_module -- resolve
+# at load time, not link time. ELF lets a shared object carry undefined symbols;
+# Mach-O does not, so linking one fails on macOS while succeeding on Linux.
+#
+# Why this is not caught anywhere: maturin passes these flags itself, so the
+# wheel builds regardless, and neither `cargo test` nor clippy links a cdylib at
+# all -- `cargo test` builds the lib as an rlib. CI runs exactly those two, on
+# Linux. What breaks is a plain `cargo build` on a developer's Mac.
+#
+# The napi binding needs nothing here; napi-build emits the flags in its own
+# build script.
+[target.'cfg(target_os = "macos")']
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
