@@ -1,9 +1,24 @@
+import re
+
 import anys
 
 import pytest
 
 import pytest_mergify
 from tests import conftest
+
+# CPython underlines the failing expression with PEP 657 caret anchors from
+# 3.11 on, and pytest reproduces them in the traceback it renders from 9.0 on.
+# They restate the line the expectation already spells out in full, so dropping
+# anchor-only lines lets one expected traceback cover every interpreter in the
+# matrix instead of one per rendering.
+_CARET_ANCHOR_LINE = re.compile(r" *\^+ *$")
+
+
+def _without_caret_anchors(stacktrace: str) -> str:
+    return "\n".join(
+        line for line in stacktrace.splitlines() if not _CARET_ANCHOR_LINE.match(line)
+    )
 
 
 def test_span(
@@ -85,7 +100,11 @@ def test_test_failure(
     assert spans is not None
     session_span = spans["pytest session start"]
 
-    assert spans["test_test_failure.py::test_error"]["attributes"] == {
+    attributes = dict(spans["test_test_failure.py::test_error"]["attributes"])
+    stacktrace = attributes.pop("exception.stacktrace")
+    assert isinstance(stacktrace, str)
+
+    assert attributes == {
         "test.case.result.status": "failed",
         "test.scope": "case",
         "code.function": "test_error",
@@ -94,15 +113,18 @@ def test_test_failure(
         "code.namespace": "",
         "exception.type": "AssertionError",
         "exception.message": "foobar\nassert False",
-        "exception.stacktrace": """>   def test_error(): assert False, 'foobar'
-E   AssertionError: foobar
-E   assert False
-
-test_test_failure.py:1: AssertionError""",
         "code.file.path": anys.ANY_STR,
         "code.line.number": 0,
         "cicd.test.quarantined": False,
     }
+    assert (
+        _without_caret_anchors(stacktrace)
+        == """>   def test_error(): assert False, 'foobar'
+E   AssertionError: foobar
+E   assert False
+
+test_test_failure.py:1: AssertionError"""
+    )
     assert spans["test_test_failure.py::test_error"]["status"] == "error"
     assert (
         spans["test_test_failure.py::test_error"]["status_message"]
