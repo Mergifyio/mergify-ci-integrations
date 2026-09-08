@@ -10,14 +10,15 @@ require 'opentelemetry-sdk'
 # quarantine, and flaky detection behaviour end-to-end.
 module SandboxHelper
   # Build a CIInsights instance in test mode with an InMemorySpanExporter.
-  # Stubs all resource detectors so we get a clean, predictable resource.
+  # Stubs detection so we get a clean, predictable resource.
   def build_test_ci_insights(quarantined_tests: nil)
     ENV['_RSPEC_MERGIFY_TEST'] = 'true'
     ENV.delete('RSPEC_MERGIFY_DEBUG')
 
-    allow(Mergify::RSpec::Utils).to receive_messages(
-      in_ci?: true,
-      repository_name: 'owner/repo'
+    allow(Mergify::RSpec::Utils).to receive(:in_ci?).and_return(true)
+    allow(Mergify::RSpec::Native).to receive_messages(
+      detect_repository_name: 'owner/repo',
+      detect_attributes: {}
     )
 
     # The gem's own suite has no repository opted into flaky detection; a 404
@@ -25,15 +26,11 @@ module SandboxHelper
     stub_request(:get, 'https://api.mergify.com/v1/ci/owner/repositories/repo/flaky-detection-context')
       .to_return(status: 404)
 
+    # A clean, predictable resource: the CI attributes now arrive as one hash
+    # from the binding, stubbed empty above, leaving only the framework
+    # detector to silence.
     empty_resource = OpenTelemetry::SDK::Resources::Resource.create({})
-    [
-      Mergify::RSpec::Resources::CI,
-      Mergify::RSpec::Resources::Git,
-      Mergify::RSpec::Resources::GitHubActions,
-      Mergify::RSpec::Resources::Jenkins,
-      Mergify::RSpec::Resources::Mergify,
-      Mergify::RSpec::Resources::RSpec
-    ].each { |r| allow(r).to receive(:detect).and_return(empty_resource) }
+    allow(Mergify::RSpec::Resources::RSpec).to receive(:detect).and_return(empty_resource)
 
     insights = Mergify::RSpec::CIInsights.new
 

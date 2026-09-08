@@ -36,3 +36,28 @@ rescue LoadError
     Mergify::RSpec::Native.load_error = e
   end
 end
+
+unless Mergify::RSpec::Native.available?
+  # Stand in for the extension so callers can just ask, and get the same answer
+  # they would get from a machine that is not in CI. Branching on availability
+  # at every call site would only spread the same nil back through the caller.
+  module Mergify
+    module RSpec
+      module Native
+        class << self
+          def detect_provider
+            nil
+          end
+
+          def detect_repository_name
+            nil
+          end
+
+          def detect_attributes
+            {}
+          end
+        end
+      end
+    end
+  end
+end

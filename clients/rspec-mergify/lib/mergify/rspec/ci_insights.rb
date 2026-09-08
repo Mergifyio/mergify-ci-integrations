@@ -3,13 +3,8 @@
 require 'securerandom'
 require 'opentelemetry-sdk'
 require_relative 'utils'
+require_relative 'native'
 require_relative 'synchronous_batch_span_processor'
-require_relative 'resources/ci'
-require_relative 'resources/git'
-require_relative 'resources/github_actions'
-require_relative 'resources/jenkins'
-require_relative 'resources/buildkite'
-require_relative 'resources/mergify'
 require_relative 'resources/rspec'
 
 module Mergify
@@ -26,7 +21,7 @@ module Mergify
       # rubocop:disable-next Metrics/MethodLength
       def initialize
         @token = ENV.fetch('MERGIFY_TOKEN', nil)
-        @repo_name = Utils.repository_name
+        @repo_name = Native.detect_repository_name
         @api_url = ENV.fetch('MERGIFY_API_URL', 'https://api.mergify.com')
         @test_run_id = SecureRandom.hex(8)
         @tracer_provider = nil
@@ -95,22 +90,19 @@ module Mergify
         [processor, exp]
       end
 
-      # rubocop:disable-next Metrics/MethodLength
+      # The cicd.* and vcs.* attributes come from the Rust core, which every
+      # Mergify test client shares, so a provider gains them everywhere at once.
+      # What stays here is what only Ruby knows: the test framework, and the id
+      # this run invented for itself.
       def build_resource
         resources = [
-          Resources::CI.detect,
-          Resources::Git.detect,
-          Resources::GitHubActions.detect,
-          Resources::Jenkins.detect,
-          Resources::Buildkite.detect,
-          Resources::Mergify.detect,
-          Resources::RSpec.detect
+          OpenTelemetry::SDK::Resources::Resource.create(Native.detect_attributes),
+          Resources::RSpec.detect,
+          OpenTelemetry::SDK::Resources::Resource.create('test.run.id' => @test_run_id)
         ]
-        base = resources.reduce(OpenTelemetry::SDK::Resources::Resource.create({})) do |merged, r|
+        resources.reduce(OpenTelemetry::SDK::Resources::Resource.create({})) do |merged, r|
           merged.merge(r)
         end
-        run_id_resource = OpenTelemetry::SDK::Resources::Resource.create('test.run.id' => @test_run_id)
-        base.merge(run_id_resource)
       end
 
       def extract_branch_name(resource)

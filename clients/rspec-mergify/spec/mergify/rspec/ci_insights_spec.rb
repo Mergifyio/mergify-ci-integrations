@@ -107,7 +107,8 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
     describe 'when in CI without token' do
       before do
         clear_ci_env
-        allow(Mergify::RSpec::Utils).to receive_messages(in_ci?: true, repository_name: 'owner/repo')
+        allow(Mergify::RSpec::Utils).to receive(:in_ci?).and_return(true)
+        allow(Mergify::RSpec::Native).to receive(:detect_repository_name).and_return('owner/repo')
         ENV.delete('MERGIFY_TOKEN')
         ENV.delete('_RSPEC_MERGIFY_TEST')
       end
@@ -121,17 +122,15 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
     describe 'when in CI with test mode' do
       before do
         clear_ci_env
-        allow(Mergify::RSpec::Utils).to receive_messages(in_ci?: true, repository_name: 'owner/repo')
+        allow(Mergify::RSpec::Utils).to receive(:in_ci?).and_return(true)
+        # Detection is one call now, so one stub replaces the detector list.
+        allow(Mergify::RSpec::Native).to receive_messages(
+          detect_repository_name: 'owner/repo', detect_attributes: {}
+        )
         ENV['MERGIFY_TOKEN'] = 'test-token'
         ENV['_RSPEC_MERGIFY_TEST'] = 'true'
 
-        # Stub all resource detectors to return empty resources
         empty = OpenTelemetry::SDK::Resources::Resource.create({})
-        allow(Mergify::RSpec::Resources::CI).to receive(:detect).and_return(empty)
-        allow(Mergify::RSpec::Resources::Git).to receive(:detect).and_return(empty)
-        allow(Mergify::RSpec::Resources::GitHubActions).to receive(:detect).and_return(empty)
-        allow(Mergify::RSpec::Resources::Jenkins).to receive(:detect).and_return(empty)
-        allow(Mergify::RSpec::Resources::Mergify).to receive(:detect).and_return(empty)
         allow(Mergify::RSpec::Resources::RSpec).to receive(:detect).and_return(empty)
 
         # The repository has not opted into flaky detection, so the server
@@ -180,16 +179,15 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
     describe 'when in CI and the repository opted into flaky detection' do
       before do
         clear_ci_env
-        allow(Mergify::RSpec::Utils).to receive_messages(in_ci?: true, repository_name: 'owner/repo')
+        allow(Mergify::RSpec::Utils).to receive(:in_ci?).and_return(true)
+        # Detection is one call now, so one stub replaces the detector list.
+        allow(Mergify::RSpec::Native).to receive_messages(
+          detect_repository_name: 'owner/repo', detect_attributes: {}
+        )
         ENV['MERGIFY_TOKEN'] = 'test-token'
         ENV['_RSPEC_MERGIFY_TEST'] = 'true'
 
         empty = OpenTelemetry::SDK::Resources::Resource.create({})
-        allow(Mergify::RSpec::Resources::CI).to receive(:detect).and_return(empty)
-        allow(Mergify::RSpec::Resources::Git).to receive(:detect).and_return(empty)
-        allow(Mergify::RSpec::Resources::GitHubActions).to receive(:detect).and_return(empty)
-        allow(Mergify::RSpec::Resources::Jenkins).to receive(:detect).and_return(empty)
-        allow(Mergify::RSpec::Resources::Mergify).to receive(:detect).and_return(empty)
         allow(Mergify::RSpec::Resources::RSpec).to receive(:detect).and_return(empty)
       end
 
@@ -247,17 +245,16 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
     describe 'when in CI with branch_name available' do
       before do
         clear_ci_env
-        allow(Mergify::RSpec::Utils).to receive_messages(in_ci?: true, repository_name: 'owner/repo')
+        allow(Mergify::RSpec::Utils).to receive(:in_ci?).and_return(true)
+        # The branch attribute now arrives from the binding like every other one.
+        allow(Mergify::RSpec::Native).to receive_messages(
+          detect_repository_name: 'owner/repo',
+          detect_attributes: { 'vcs.ref.head.name' => 'main' }
+        )
         ENV['MERGIFY_TOKEN'] = 'test-token'
         ENV['_RSPEC_MERGIFY_TEST'] = 'true'
 
         empty = OpenTelemetry::SDK::Resources::Resource.create({})
-        branch_resource = OpenTelemetry::SDK::Resources::Resource.create('vcs.ref.head.name' => 'main')
-        allow(Mergify::RSpec::Resources::CI).to receive(:detect).and_return(empty)
-        allow(Mergify::RSpec::Resources::Git).to receive(:detect).and_return(branch_resource)
-        allow(Mergify::RSpec::Resources::GitHubActions).to receive(:detect).and_return(empty)
-        allow(Mergify::RSpec::Resources::Jenkins).to receive(:detect).and_return(empty)
-        allow(Mergify::RSpec::Resources::Mergify).to receive(:detect).and_return(empty)
         allow(Mergify::RSpec::Resources::RSpec).to receive(:detect).and_return(empty)
 
         # This block exercises quarantine; the repository has not opted into

@@ -202,7 +202,8 @@ RSpec.describe 'Integration: Tracing' do # rubocop:disable RSpec/DescribeClass
     it 'prints a warning about missing token' do
       ENV.delete('MERGIFY_TOKEN')
       ENV['_RSPEC_MERGIFY_TEST'] = 'true'
-      allow(Mergify::RSpec::Utils).to receive_messages(in_ci?: true, repository_name: 'owner/repo')
+      allow(Mergify::RSpec::Utils).to receive(:in_ci?).and_return(true)
+      allow(Mergify::RSpec::Native).to receive(:detect_repository_name).and_return('owner/repo')
 
       ci = Mergify::RSpec::CIInsights.new
       # No token means no tracer in test mode... actually in test mode the exporter
@@ -249,14 +250,13 @@ RSpec.describe 'Integration: Tracing' do # rubocop:disable RSpec/DescribeClass
     it 'prints a warning about missing repository name' do
       ENV['MERGIFY_TOKEN'] = 'test-token'
       ENV['_RSPEC_MERGIFY_TEST'] = 'true'
-      allow(Mergify::RSpec::Utils).to receive_messages(in_ci?: true, repository_name: nil)
+      allow(Mergify::RSpec::Utils).to receive(:in_ci?).and_return(true)
+      allow(Mergify::RSpec::Native).to receive_messages(
+        detect_repository_name: nil, detect_attributes: {}
+      )
 
       empty_resource = OpenTelemetry::SDK::Resources::Resource.create({})
-      [
-        Mergify::RSpec::Resources::CI, Mergify::RSpec::Resources::Git,
-        Mergify::RSpec::Resources::GitHubActions, Mergify::RSpec::Resources::Jenkins,
-        Mergify::RSpec::Resources::Mergify, Mergify::RSpec::Resources::RSpec
-      ].each { |r| allow(r).to receive(:detect).and_return(empty_resource) }
+      allow(Mergify::RSpec::Resources::RSpec).to receive(:detect).and_return(empty_resource)
 
       ci = Mergify::RSpec::CIInsights.new
       ci.instance_variable_set(:@repo_name, nil)
