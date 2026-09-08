@@ -40,8 +40,7 @@ where
     for digest in &digests {
         hasher.update(digest);
     }
-    // `{:x}` on the digest is `sha2`'s own lowercase-hex rendering, full width.
-    format!("{:x}", hasher.finalize())
+    base16ct::lower::encode_string(&hasher.finalize())
 }
 
 #[cfg(test)]
