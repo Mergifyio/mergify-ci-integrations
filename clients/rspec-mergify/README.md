@@ -41,7 +41,7 @@ For detailed documentation, see the [official guide](https://docs.mergify.com/ci
 
 ### Prerequisites
 
-- Ruby >= 3.1 (`.ruby-version` pins to 3.4.4 — use [rbenv](https://github.com/rbenv/rbenv) or [mise](https://mise.jdx.dev/) to install it)
+- Ruby >= 3.1 (`.ruby-version` pins to 4.0.6 — use [rbenv](https://github.com/rbenv/rbenv) or [mise](https://mise.jdx.dev/) to install it)
 - Bundler
 
 ### Setup
