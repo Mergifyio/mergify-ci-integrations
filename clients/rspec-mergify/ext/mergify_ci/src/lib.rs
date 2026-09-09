@@ -12,7 +12,9 @@ use std::collections::BTreeMap;
 use std::ffi::c_void;
 
 use magnus::{Error, ExceptionClass, RHash, Ruby, function, method, prelude::*};
-use mergify_ci_api::{ApiConfig, Client, ClientInfo, FlakyDetectionContext, Outcome};
+use mergify_ci_api::{
+    ApiConfig, Client, ClientInfo, FlakyDetectionContext, Mode, Outcome, budget,
+};
 use mergify_ci_core::{AttrValue, CiContext};
 
 /// The distribution this binding ships inside, as reported in the `User-Agent`.
@@ -66,6 +68,12 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     client.define_singleton_method("new", function!(ApiClient::new, 5))?;
     client.define_method("fetch_quarantine", method!(ApiClient::fetch_quarantine, 1))?;
     client.define_method("fetch_flaky_context", method!(ApiClient::fetch_flaky_context, 0))?;
+
+    let budget = native.define_module("Budget")?;
+    budget.define_singleton_method("should_run", function!(should_run, 2))?;
+    budget.define_singleton_method("compute", function!(compute_budget, 4))?;
+    budget.define_singleton_method("static_share_ms", function!(static_share_ms, 2))?;
+    budget.define_singleton_method("dynamic_share_ms", function!(dynamic_share_ms, 4))?;
 
     Ok(())
 }
@@ -218,4 +226,118 @@ fn flaky_context_hash(ruby: &Ruby, context: &FlakyDetectionContext) -> Result<RH
     hash.aset("min_budget_duration_ms", context.min_budget_duration_ms)?;
     hash.aset("min_test_execution_count", context.min_test_execution_count)?;
     Ok(hash)
+}
+
+// ---------------------------------------------------------------------------
+// Flaky-detection budget
+//
+// The arithmetic lives in Rust so every client spends its budget the same way.
+// The lifecycle around it stays in Ruby -- the rerun loop, filling metrics from
+// each report, the terminal summary -- because that is RSpec-shaped, not shared.
+//
+// A context crosses as the same Hash `fetch_flaky_context` returns, so a plugin
+// can hold onto one, hand it back, and never learn a native type.
+// ---------------------------------------------------------------------------
+
+fn parse_mode(ruby: &Ruby, mode: &str) -> Result<Mode, Error> {
+    match mode {
+        "new" => Ok(Mode::New),
+        "unhealthy" => Ok(Mode::Unhealthy),
+        other => Err(Error::new(
+            ruby.exception_arg_error(),
+            format!("unknown mode: {other}"),
+        )),
+    }
+}
+
+fn required<T>(ruby: &Ruby, context: RHash, key: &str) -> Result<T, Error>
+where
+    T: magnus::TryConvert,
+{
+    match context.get(key) {
+        Some(value) => T::try_convert(value),
+        None => Err(Error::new(
+            ruby.exception_key_error(),
+            format!("flaky detection context is missing {key}"),
+        )),
+    }
+}
+
+/// Optional, matching the wire model's serde defaults: a context built before
+/// test retry existed is still a valid one to plan from.
+fn optional<T>(context: RHash, key: &str) -> Result<T, Error>
+where
+    T: magnus::TryConvert + Default,
+{
+    match context.get(key) {
+        Some(value) => T::try_convert(value),
+        None => Ok(T::default()),
+    }
+}
+
+fn context_from_hash(ruby: &Ruby, context: RHash) -> Result<FlakyDetectionContext, Error> {
+    Ok(FlakyDetectionContext {
+        budget_ratio_for_new_tests: required(ruby, context, "budget_ratio_for_new_tests")?,
+        budget_ratio_for_unhealthy_tests: required(
+            ruby,
+            context,
+            "budget_ratio_for_unhealthy_tests",
+        )?,
+        existing_test_names: required(ruby, context, "existing_test_names")?,
+        existing_tests_mean_duration_ms: required(ruby, context, "existing_tests_mean_duration_ms")?,
+        unhealthy_test_names: required(ruby, context, "unhealthy_test_names")?,
+        budget_ratio_for_test_retries: optional(context, "budget_ratio_for_test_retries")?,
+        flaky_test_names: optional(context, "flaky_test_names")?,
+        broken_test_names: optional(context, "broken_test_names")?,
+        max_test_execution_count: required(ruby, context, "max_test_execution_count")?,
+        max_test_name_length: required(ruby, context, "max_test_name_length")?,
+        min_budget_duration_ms: required(ruby, context, "min_budget_duration_ms")?,
+        min_test_execution_count: required(ruby, context, "min_test_execution_count")?,
+    })
+}
+
+/// Whether flaky detection has anything to do this session.
+#[allow(clippy::needless_pass_by_value)]
+fn should_run(ruby: &Ruby, context: RHash, mode: String) -> Result<bool, Error> {
+    Ok(budget::should_run(
+        &context_from_hash(ruby, context)?,
+        parse_mode(ruby, &mode)?,
+    ))
+}
+
+/// The session's budget and the tests it covers, as
+/// `{ "available_budget_ms" => Float, "tests_to_process" => [String] }`.
+#[allow(clippy::needless_pass_by_value)]
+fn compute_budget(
+    ruby: &Ruby,
+    context: RHash,
+    mode: String,
+    session_tests: Vec<String>,
+    excluded: Vec<String>,
+) -> Result<RHash, Error> {
+    let plan = budget::plan(
+        &context_from_hash(ruby, context)?,
+        parse_mode(ruby, &mode)?,
+        &session_tests,
+        &excluded,
+    );
+    let result = ruby.hash_new();
+    result.aset("available_budget_ms", plan.available_budget_ms)?;
+    result.aset("tests_to_process", plan.tests_to_process)?;
+    Ok(result)
+}
+
+/// The per-test slice when the budget is split evenly up front.
+fn static_share_ms(available_budget_ms: f64, num_tests: usize) -> f64 {
+    budget::static_share_ms(available_budget_ms, num_tests)
+}
+
+/// The per-test slice recomputed from what is left, as the session progresses.
+fn dynamic_share_ms(
+    available_budget_ms: f64,
+    used_budget_ms: f64,
+    num_tests: usize,
+    processed: usize,
+) -> f64 {
+    budget::dynamic_share_ms(available_budget_ms, used_budget_ms, num_tests, processed)
 }
