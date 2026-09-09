@@ -15,9 +15,10 @@ name: Release pytest-mergify
 #
 # Step 2 -- publish (`release: published`):
 #   The maintainer reviews the draft and publishes it; that fires this stage,
-#   which rebuilds the wheels from the now-created tag and publishes them to PyPI
-#   via Trusted Publishing (PEP 740 attestations on by default). No sdist -- the
-#   binding path-depends on ../../crates, which a standalone sdist can't build.
+#   which downloads the distributions the draft attached and uploads those to
+#   PyPI via Trusted Publishing (PEP 740 attestations on by default). It
+#   deliberately does not rebuild: what was reviewed on the draft is what
+#   reaches the index, byte for byte.
 on:
   workflow_dispatch:
     inputs:
@@ -131,30 +132,50 @@ jobs:
             dist/*.whl dist/*.tar.gz
 
   # ---------------- Step 2: publish (release: published) ----------------
-  build-publish:
+  publish:
     # A GitHub Release in this monorepo isn't client-scoped, so only act on
     # pytest-mergify's tags; other clients get their own release workflows.
     if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'pytest-mergify-v')
-    permissions:
-      contents: read
-    uses: ./.github/workflows/build-pytest-mergify-wheels.yml
-    with:
-      tag: ${{ github.event.release.tag_name }}
-
-  publish:
-    if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'pytest-mergify-v')
-    needs: build-publish
     runs-on: ubuntu-latest
     # The `release` environment carries the PyPI Trusted Publishing identity.
     environment: release
     permissions:
+      contents: read # read the release assets
       id-token: write # PyPI Trusted Publishing (OIDC)
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          path: dist
-          pattern: wheels-*
-          merge-multiple: true
+      # The draft attached these; rebuilding them here would have produced a
+      # second set of wheels from a floating maturin/Rust toolchain, published
+      # under a version number that promises they are the reviewed ones.
+      - name: Download the distributions the draft built
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release download "${TAG}" --repo "${REPO}" --dir dist \
+            --pattern '*.whl' --pattern '*.tar.gz'
+
+          # Release assets are mutable in a way the tag is not, so the file
+          # names are checked against the version the tag names before any of
+          # them is uploaded. PyPI encodes the version in the file name, so
+          # this needs no unpacking.
+          version="${TAG#pytest-mergify-v}"
+          shopt -s nullglob
+          files=(dist/*)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::${TAG} has no distributions attached"
+            exit 1
+          fi
+          for f in "${files[@]}"; do
+            case "${f##*/}" in
+              "pytest_mergify-${version}-"*.whl | "pytest_mergify-${version}.tar.gz") ;;
+              *)
+                echo "::error::${f##*/} does not belong to ${version}"
+                exit 1
+                ;;
+            esac
+          done
+          echo "verified ${#files[@]} distributions for ${version}"
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           packages-dir: dist
