@@ -1,0 +1,40 @@
+# `low risk` stands in for a second approval, so an author who can add it can
+# halve their own review requirement. Strip it back off when the author is the
+# one who added it: the judgement is a reviewer's to make, not the author's.
+name: Low Risk Label Guard
+
+on:
+  pull_request:
+    types: [labeled]
+
+jobs:
+  guard:
+    if: >-
+      github.event.label.name == 'low risk'
+      && github.event.sender.login == github.event.pull_request.user.login
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Remove label if added by PR author
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          script: |
+            await github.rest.issues.removeLabel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              name: 'low risk'
+            });
+            const body = [
+              '⚠️ The `low risk` label was removed',
+              'because it was added by the PR author.',
+              'It stands in for a second approval,',
+              'so it has to come from a reviewer.',
+            ].join(' ');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
