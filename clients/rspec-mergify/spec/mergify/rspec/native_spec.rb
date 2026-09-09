@@ -155,8 +155,10 @@ RSpec.describe Mergify::RSpec::Native do
         end
       end
 
+      # 400 rather than 500 on purpose: the client retries 5xx with backoff, as
+      # OTLP asks, so a server error here would spend half a minute proving it.
       it 'fails loud, unlike a fetch: an unreported run is not a degraded one' do
-        with_stub_api(status: 500, body: '{}') do |url, _paths|
+        with_stub_api(status: 400, body: '{}') do |url, _paths|
           expect { client(url).upload_trace({}, [span]) }
             .to raise_error(Mergify::RSpec::Native::ApiError)
         end
