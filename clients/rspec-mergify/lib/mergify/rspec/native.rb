@@ -13,6 +13,13 @@ module Mergify
     # fail-open posture the napi binding takes when a platform has no prebuilt
     # binary. `load_error` keeps the reason, for callers that want to say so.
     module Native
+      # Raised when a Mergify API call fails outright.
+      #
+      # Distinct from StandardError on purpose: callers degrade on an API
+      # failure, and a bare rescue there would swallow genuine bugs in the
+      # binding as though the backend were down.
+      class ApiError < StandardError; end
+
       class << self
         # The LoadError that prevented the extension loading, or nil.
         attr_accessor :load_error

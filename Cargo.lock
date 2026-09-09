@@ -1000,7 +1000,10 @@ name = "mergify_ci"
 version = "0.0.0"
 dependencies = [
  "magnus",
+ "mergify-ci-api",
  "mergify-ci-core",
+ "rb-sys",
+ "tokio",
 ]
 
 [[package]]

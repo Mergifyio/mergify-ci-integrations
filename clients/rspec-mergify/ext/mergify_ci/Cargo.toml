@@ -15,8 +15,15 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
+mergify-ci-api = { path = "../../../../crates/mergify-ci-api" }
 mergify-ci-core = { path = "../../../../crates/mergify-ci-core" }
 magnus = "0.8"
+# For rb_thread_call_without_gvl, which magnus 0.8 does not wrap. Kept in
+# step with the version magnus itself depends on.
+rb-sys = "0.9"
+# A single-threaded runtime to drive the async client's futures to completion
+# from sync Ruby, as the PyO3 binding does for sync Python.
+tokio = { version = "1", features = ["rt", "net", "time"] }
 
 [lints]
 workspace = true
