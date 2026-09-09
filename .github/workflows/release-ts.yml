@@ -157,6 +157,12 @@ jobs:
             );
             fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
           '
+      # `napi artifacts` populates the platform directories, so the copies have
+      # to land after it. Nothing else here depends on them: npm packs a LICENSE
+      # from the package directory on its own, no `files` entry required.
+      - name: Stage the licenses
+        working-directory: ${{ github.workspace }}
+        run: .github/scripts/stage-ts-licenses.sh
       - name: Pack the packages
         run: |
           pnpm -r pack --pack-destination "${GITHUB_WORKSPACE}/dist"
@@ -246,6 +252,12 @@ jobs:
             );
             fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
           '
+      # `napi artifacts` populates the platform directories, so the copies have
+      # to land after it. Nothing else here depends on them: npm packs a LICENSE
+      # from the package directory on its own, no `files` entry required.
+      - name: Stage the licenses
+        working-directory: ${{ github.workspace }}
+        run: .github/scripts/stage-ts-licenses.sh
       - name: Publish to npm
         run: |
           # Everything here goes through pnpm, including the napi platform
