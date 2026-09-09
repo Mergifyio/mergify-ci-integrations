@@ -61,5 +61,9 @@
     "url": "git+https://github.com/Mergifyio/mergify-ci-integrations.git",
     "directory": "clients/ts/packages/vitest"
   },
+  "homepage": "https://github.com/Mergifyio/mergify-ci-integrations/tree/main/clients/ts/packages/vitest",
+  "bugs": {
+    "url": "https://github.com/Mergifyio/mergify-ci-integrations/issues"
+  },
   "author": "Mergify <hello@mergify.com>"
 }
