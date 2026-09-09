@@ -5,6 +5,7 @@ require 'opentelemetry-sdk'
 require_relative 'utils'
 require_relative 'native'
 require_relative 'synchronous_batch_span_processor'
+require_relative 'rust_trace_exporter'
 require_relative 'resources/rspec'
 
 module Mergify
@@ -82,12 +83,15 @@ module Mergify
         [processor, exp]
       end
 
+      # The endpoint, the gzip, the retries and the size limit belong to the
+      # shared client now; this only has to hand it the spans.
       def build_otlp_processor
+        return [nil, nil] unless Native.available?
+
         owner, repo = Utils.split_full_repo_name(@repo_name)
-        endpoint = "#{@api_url}/v1/ci/#{owner}/repositories/#{repo}/traces"
-        exp = create_otlp_exporter(endpoint)
-        processor = SynchronousBatchSpanProcessor.new(exp)
-        [processor, exp]
+        client = Native::Client.new(@api_url, @token, owner, repo, Mergify::RSpec::VERSION)
+        exp = RustTraceExporter.new(client)
+        [SynchronousBatchSpanProcessor.new(exp), exp]
       end
 
       # The cicd.* and vcs.* attributes come from the Rust core, which every
@@ -112,25 +116,6 @@ module Mergify
       end
 
       # rubocop:disable-next Metrics/MethodLength
-      def create_otlp_exporter(endpoint)
-        require 'opentelemetry-exporter-otlp'
-        original_env = ENV.fetch('OTEL_EXPORTER_OTLP_TRACES_ENDPOINT', nil)
-        ENV['OTEL_EXPORTER_OTLP_TRACES_ENDPOINT'] = endpoint
-        begin
-          OpenTelemetry::Exporter::OTLP::Exporter.new(
-            endpoint: endpoint,
-            headers: { 'Authorization' => "Bearer #{@token}" },
-            compression: 'gzip'
-          )
-        ensure
-          if original_env
-            ENV['OTEL_EXPORTER_OTLP_TRACES_ENDPOINT'] = original_env
-          else
-            ENV.delete('OTEL_EXPORTER_OTLP_TRACES_ENDPOINT')
-          end
-        end
-      end
-
       # rubocop:disable-next Metrics/MethodLength
       def load_flaky_detector
         return unless @token && @repo_name
