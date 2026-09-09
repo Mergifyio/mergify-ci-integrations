@@ -194,6 +194,11 @@ jobs:
     if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'ts-v')
     needs: build-native-publish
     runs-on: ubuntu-latest
+    # A hang, not an error, is this step's characteristic failure: npm's
+    # fetch-timeout is 300s and the retry below can spend it three times per
+    # package. Worth bounding well under the 6h default, since a publish that
+    # has not finished in half an hour is not going to.
+    timeout-minutes: 30
     # The `release` environment carries the npm Trusted Publishing identity.
     environment: release
     permissions:
@@ -243,10 +248,69 @@ jobs:
             fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
           '
       - name: Publish to npm
+        env:
+          # Pin npm's log directory so the upload below can find it regardless
+          # of HOME. That file is the whole diagnosis: npm's OIDC exchange
+          # fails silently by design -- every branch in lib/utils/oidc.js logs
+          # and returns undefined, because trusted publishing is meant to be
+          # optional -- so publish carries on with no credentials and the
+          # registry answers 404, the same 404 an unauthorized publish gets.
+          # The console shows none of that at any loglevel worth running here,
+          # but npm writes every level to its log file regardless, which is why
+          # keeping the file beats turning the console up.
+          NPM_CONFIG_LOGS_DIR: ${{ runner.temp }}/npm-logs
         run: |
+          # Publishing eleven packages is not atomic, and npm refuses to
+          # republish a version: a failure part-way strands the earlier
+          # packages on the registry and leaves the release unfinishable, since
+          # re-running the job would now collide on everything it already did.
+          # ts-v0.3.5 died on the seventh package and cost a version bump.
+          # Skipping what is already published is what turns a re-run into a
+          # recovery.
+          publish_dir() {
+            local dir="$1" name version
+            name="$(jq -r .name "${dir}package.json")"
+            version="$(jq -r .version "${dir}package.json")"
+            if npm view "${name}@${version}" version >/dev/null 2>&1; then
+              echo "${name}@${version} is already published, skipping"
+              return 0
+            fi
+            npm publish "./${dir}" --provenance --access public
+          }
+
+          # The OIDC token exchange reaches two hosts before anything is
+          # uploaded, and a hang on either one burns npm's 300s fetch-timeout
+          # and then degrades to an unauthenticated publish rather than an
+          # error. That is a transient failure wearing a permissions failure's
+          # clothes, so it is worth a retry.
+          retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if "$@"; then
+                return 0
+              fi
+              echo "::warning::attempt ${attempt}/3 failed: $*"
+              sleep $((attempt * 15))
+            done
+            echo "::error::giving up after 3 attempts: $*"
+            return 1
+          }
+
           # Platform packages first, so the loader's optionalDependencies
           # never point at not-yet-published versions.
           for dir in packages/native/npm/*/; do
-            npm publish "./${dir}" --provenance --access public
+            retry publish_dir "${dir}"
           done
-          pnpm -r publish --provenance --access public --no-git-checks
+          # pnpm skips workspace packages already on the registry at the
+          # version being published, so this half is re-runnable as it stands.
+          retry pnpm -r publish --provenance --access public --no-git-checks
+      # npm writes more to its log file than it ever prints, so when a publish
+      # fails for a reason npm swallowed, the answer is in here and nowhere
+      # else.
+      - name: Upload the npm logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: npm-logs
+          path: ${{ runner.temp }}/npm-logs/
+          if-no-files-found: ignore
