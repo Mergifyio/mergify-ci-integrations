@@ -436,6 +436,10 @@ def test_an_xdist_worker_reports_no_fingerprint(
     resource = plugin.mergify_ci.resource_attributes
     assert resource is not None
     assert "test.collection.fingerprint" not in resource
+    # And no count: every worker collects the whole suite while executing a
+    # fraction of it, so a denominator here would describe a set this session
+    # never ran -- the same miscount the fingerprint is withheld to prevent.
+    assert "test.collection.count" not in resource
 
 
 def test_an_empty_selection_runs_nothing_and_exits_green(
@@ -565,6 +569,15 @@ def test_an_empty_selection_over_an_empty_collection_stays_an_error(
     # previous attempt ran and passed "all 0 selected test(s)" would send whoever
     # is debugging that red job to look at Mergify instead of at their filter.
     assert "Skipped rerun" not in result.stdout.str()
+    # Reported all the same, and readable for what it is: the answer arrived,
+    # and the counts say no reduction came of it. Zero executed out of zero
+    # collected is a run with nothing to run; it is the collected count that
+    # keeps it from being read as the reduction the feature just made.
+    resource = plugin.mergify_ci.resource_attributes
+    assert resource is not None
+    assert resource["test.selection.answer"] == "empty"
+    assert resource["test.selection.kept_count"] == 0
+    assert resource["test.collection.count"] == 0
 
 
 def test_a_refused_run_uploads_a_session_marked_failed(
@@ -598,3 +611,261 @@ def test_a_refused_run_uploads_a_session_marked_failed(
     (span,) = batch.spans
     assert span.name == "pytest session start"
     assert span.status == "error"
+    # And on the wire, not just in the plugin: a refusal raises out of the
+    # middle of a collection hook, so it is the path where "the attributes were
+    # set" and "the attributes were uploaded" are least obviously the same
+    # thing.
+    assert batch.resource_attributes["test.selection.answer"] == "refused"
+    assert batch.resource_attributes["test.selection.kept_count"] == 0
+    assert batch.resource_attributes["test.collection.count"] == 2
+
+
+# What the run reports about its own reduction. Mergify computes a selection,
+# serves it, and keeps nothing: the session is the only place the decision and
+# its effect can be read back from, so these assertions are what every reporting
+# surface downstream stands on.
+
+
+def _reported(plugin: pytest_mergify.PytestMergify) -> typing.Dict[str, typing.Any]:
+    resource = plugin.mergify_ci.resource_attributes
+    assert resource is not None
+    return dict(resource)
+
+
+def test_a_served_subset_reports_what_it_ran_out_of_what_it_collected(
+    pytester: _pytest.pytester.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The reduction itself: one of the two collected tests ran. Both counts are
+    # reported, rather than the executed one alone, because the engine cannot
+    # recover the other -- an ordinary passing test leaves no row behind, so
+    # what the run collected is only knowable from the run.
+    _, plugin, _ = _run_with_selection(
+        pytester,
+        monkeypatch,
+        _TWO_TESTS,
+        served={
+            "selection": "subset",
+            "reason": "queue_rerun",
+            "tests": [
+                "test_a_served_subset_reports_what_it_ran_out_of_what_it_collected.py::test_kept"
+            ],
+        },
+    )
+
+    reported = _reported(plugin)
+    assert reported["test.selection.answer"] == "subset"
+    assert reported["test.selection.reason"] == "queue_rerun"
+    assert reported["test.selection.kept_count"] == 1
+    assert reported["test.collection.count"] == 2
+
+
+def test_a_full_answer_reports_the_whole_collection_as_kept(
+    pytester: _pytest.pytester.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The unreduced run still describes itself. It is the comparison point every
+    # reduction is read against, and the only evidence that a job Mergify was
+    # asked about was answered at all -- a run that reports nothing and a run
+    # answered `full` are the same silence otherwise.
+    _, plugin, _ = _run_with_selection(
+        pytester,
+        monkeypatch,
+        _TWO_TESTS,
+        served={"selection": "full", "reason": "no_predecessor", "tests": []},
+    )
+
+    reported = _reported(plugin)
+    assert reported["test.selection.answer"] == "full"
+    assert reported["test.selection.reason"] == "no_predecessor"
+    assert reported["test.selection.kept_count"] == 2
+    assert reported["test.collection.count"] == 2
+
+
+def test_a_refusal_reports_that_it_executed_nothing(
+    pytester: _pytest.pytester.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A refusal raises before the collection is touched, so the tests are all
+    # still there to be counted while none of them will run. Reporting the
+    # collection as executed here would show the ambiguous job as a full run
+    # that went fine, which is the reading the refusal exists to prevent.
+    _, plugin, _ = _run_with_selection(
+        pytester,
+        monkeypatch,
+        _TWO_TESTS,
+        served={
+            "selection": "refused",
+            "reason": "ambiguous_test_sessions",
+            "tests": [],
+            "message": _SERVED_REFUSAL_MESSAGE,
+        },
+    )
+
+    reported = _reported(plugin)
+    assert reported["test.selection.answer"] == "refused"
+    assert reported["test.selection.reason"] == "ambiguous_test_sessions"
+    assert reported["test.selection.kept_count"] == 0
+    assert reported["test.collection.count"] == 2
+
+
+def test_a_subset_matching_nothing_reports_the_full_run_it_degraded_to(
+    pytester: _pytest.pytester.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The served answer and the run that happened part ways here: a subset
+    # naming tests this collection does not hold degrades to running everything.
+    # What is reported is the run, not the offer -- counting this as a served
+    # subset would credit the feature with a reduction that never occurred, and
+    # hide the mismatch that caused it behind a `subset` nobody would question.
+    _, plugin, _ = _run_with_selection(
+        pytester,
+        monkeypatch,
+        _TWO_TESTS,
+        served={
+            "selection": "subset",
+            "reason": "queue_rerun",
+            "tests": ["some_other_file.py::test_renamed_since"],
+        },
+    )
+
+    reported = _reported(plugin)
+    assert reported["test.selection.answer"] == "full"
+    assert reported["test.selection.reason"] == "subset_matched_no_collected_test"
+    assert reported["test.selection.kept_count"] == 2
+    assert reported["test.collection.count"] == 2
+
+
+def test_what_was_collected_is_what_this_plugin_collected(
+    pytester: _pytest.pytester.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `-k` narrows the collection before this plugin ever sees it, so one of the
+    # two tests is not part of what Mergify was asked about. The count is the
+    # same set the fingerprint identifies -- announcing the whole suite would
+    # make every run under a user filter look like a reduction it never was.
+    _, plugin, _ = _run_with_selection(
+        pytester,
+        monkeypatch,
+        _TWO_TESTS,
+        "-k",
+        "kept",
+        served={"selection": "full", "reason": "no_predecessor", "tests": []},
+    )
+
+    reported = _reported(plugin)
+    assert reported["test.collection.count"] == 1
+    assert reported["test.selection.kept_count"] == 1
+    assert reported["test.collection.fingerprint"] == conftest.collection_fingerprint(
+        ["test_what_was_collected_is_what_this_plugin_collected.py::test_kept"]
+    )
+
+
+def test_a_run_that_asks_for_nothing_reports_no_selection(
+    pytester: _pytest.pytester.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The kill switch: the run never asks, so it has nothing to say about an
+    # answer. The two runs that ask and are answered with nothing -- no
+    # subscription, a failed request -- reach the same silence by a different
+    # route and are pinned separately below; all three would otherwise fill the
+    # reporting with runs the feature never touched. The collection they hold is
+    # still theirs to report.
+    _, plugin, calls = _run_with_selection(
+        pytester,
+        monkeypatch,
+        _TWO_TESTS,
+        setenv={"MERGIFY_TEST_SELECTION_DISABLE": "true"},
+        served={"selection": "full", "reason": "no_predecessor", "tests": []},
+    )
+
+    assert calls == []
+    reported = _reported(plugin)
+    assert "test.selection.answer" not in reported
+    assert "test.selection.reason" not in reported
+    assert "test.selection.kept_count" not in reported
+    assert reported["test.collection.count"] == 2
+
+
+def test_an_empty_selection_uploads_a_session_saying_it_ran_none_of_them(
+    pytester: _pytest.pytester.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+    otlp_collector: conftest.OTLPCollector,
+) -> None:
+    # The half that disappears in silence if it is forgotten. A job told to run
+    # nothing executes nothing, so it has no test result to be counted through
+    # and would be the one run the reporting cannot see -- while being the most
+    # spectacular thing the feature does, and the one a developer comes asking
+    # about. Asserted on the decoded payload rather than on the plugin's own
+    # state: a run can hold the right attributes and have uploaded nothing.
+    conftest.configure_upload(monkeypatch, otlp_collector)
+    monkeypatch.setenv("GITHUB_HEAD_REF", "queue/main/42")
+    monkeypatch.setenv("GITHUB_SHA", "cafecafe")
+    monkeypatch.setenv("GITHUB_WORKFLOW", "CI")
+    monkeypatch.setenv("GITHUB_JOB", "unit")
+    otlp_collector.serve_test_selection(
+        {"selection": "empty", "reason": "predecessor_job_succeeded"}
+    )
+    pytester.makepyfile(_TWO_TESTS)
+
+    result = pytester.runpytest_subprocess()
+
+    assert result.ret == pytest.ExitCode.OK
+    (batch,) = otlp_collector.batches
+    assert batch.resource_attributes["test.selection.answer"] == "empty"
+    assert (
+        batch.resource_attributes["test.selection.reason"]
+        == "predecessor_job_succeeded"
+    )
+    assert batch.resource_attributes["test.selection.kept_count"] == 0
+    # The count is the point: zero executed out of nothing is a job with no
+    # tests, zero executed out of two is the reduction this feature just made.
+    assert batch.resource_attributes["test.collection.count"] == 2
+
+
+def test_a_dormant_repository_reports_no_selection(
+    pytester: _pytest.pytester.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The endpoint had nothing to answer with -- no subscription, or the
+    # feature not served for this repository. The plugin still builds a
+    # selection object, and it reads as a plain full run, so reporting it would
+    # record an answer that was never given. During a pilot these runs are the
+    # majority of installs: counting them as served `full` answers would bury
+    # the runs Mergify actually looked at.
+    _, plugin, calls = _run_with_selection(
+        pytester,
+        monkeypatch,
+        _TWO_TESTS,
+        served=None,
+    )
+
+    # Asked, unlike the kill-switch case -- and answered with nothing.
+    assert len(calls) == 1
+    reported = _reported(plugin)
+    assert "test.selection.answer" not in reported
+    assert "test.selection.reason" not in reported
+    assert "test.selection.kept_count" not in reported
+    assert reported["test.collection.count"] == 2
+
+
+def test_a_failed_request_reports_no_selection(
+    pytester: _pytest.pytester.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The request errored and the run degraded to the full suite. That local
+    # degradation is not an answer: reporting it as one would make a Mergify
+    # outage look like a stretch of runs Mergify examined and declined to
+    # reduce -- which is precisely the signal a non-delivery alert reads.
+    _, plugin, _ = _run_with_selection(
+        pytester,
+        monkeypatch,
+        _TWO_TESTS,
+        error="Mergify API returned HTTP 500",
+    )
+
+    reported = _reported(plugin)
+    assert "test.selection.answer" not in reported
+    assert "test.selection.reason" not in reported
+    assert "test.selection.kept_count" not in reported
+    assert reported["test.collection.count"] == 2
