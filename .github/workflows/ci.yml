@@ -211,6 +211,27 @@ jobs:
       - name: Run Semgrep
         run: semgrep --config=auto --error --timeout=15 clients/ts
 
+  # The same matrix the release builds from. Nothing but release-ts.yml called
+  # it until now, so the cross-compile was first exercised when a release tried
+  # to cut -- which is how the pnpm 12 breakage the previous commit fixes sat in
+  # main for three days with every check green: no pull request builds a
+  # `.node`, so nothing had an opinion until ts-v0.3.6 went to draft and came
+  # back without a Windows binary.
+  #
+  # It goes through ci-gate rather than standing as its own workflow because
+  # ci-gate is the only check the merge protections require; a job outside it
+  # can fail without stopping anything.
+  #
+  # This costs seven Rust release builds per pull request, two of them on macOS.
+  # Swatinem/rust-cache keys on the target and absorbs most of it, and the wheel
+  # job already release-builds on all three platforms, so the shape is not new.
+  # Worth revisiting with a path filter if the bill argues.
+  ts-native-build:
+    name: ts native build
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-ts-native.yml
+
   rspec-tests:
     name: rspec-mergify tests (ruby ${{ matrix.ruby }})
     runs-on: ubuntu-latest
@@ -327,6 +348,7 @@ jobs:
       - ts-tests
       - ts-codespell
       - ts-semgrep
+      - ts-native-build
       - rspec-tests
       - rspec-rubocop
       - rspec-codespell
