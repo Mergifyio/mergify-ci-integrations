@@ -6,3 +6,9 @@
 **/__pycache__/
 .venv/
 node_modules/
+
+# Staged at release time by .github/scripts/stage-ts-licenses.sh. Ignoring them
+# does not keep them out of the tarballs -- npm packs a LICENSE it finds in the
+# package directory regardless.
+clients/ts/packages/*/LICENSE
+clients/ts/packages/native/npm/*/LICENSE
