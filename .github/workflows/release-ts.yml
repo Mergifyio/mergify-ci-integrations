@@ -18,11 +18,12 @@ name: Release ts clients
 #
 # Step 2 -- publish (`release: published`):
 #   The maintainer reviews the draft and publishes it; that fires this stage,
-#   which rebuilds everything from the now-created tag and publishes to npm
-#   with provenance via Trusted Publishing (OIDC, no token). All eleven
-#   packages carry npmjs.com trusted-publisher settings pointed at this repo,
-#   this workflow file, and the `release` environment -- all three have to
-#   match or the token exchange 404s.
+#   which downloads the tarballs the draft attached and pushes those to npm with
+#   provenance via Trusted Publishing (OIDC, no token). It deliberately does not
+#   rebuild: what was reviewed on the draft is what reaches the registry, byte
+#   for byte. All eleven packages carry npmjs.com trusted-publisher settings
+#   pointed at this repo, this workflow file, and the `release` environment --
+#   all three have to match or the token exchange 404s.
 #
 #   Adding a package to the workspace therefore takes one manual step, and it
 #   cannot be done up front: npm only exposes trusted-publisher settings on a
@@ -185,32 +186,23 @@ jobs:
             "${GITHUB_WORKSPACE}"/dist/*.tgz
 
   # ---------------- Step 2: publish (release: published) ----------------
-  build-native-publish:
+  publish:
     # A GitHub Release in this monorepo isn't client-scoped, so only act on
     # ts-v* tags; other clients have their own release workflows.
     if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'ts-v')
-    permissions:
-      contents: read
-    uses: ./.github/workflows/build-ts-native.yml
-
-  publish:
-    if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'ts-v')
-    needs: build-native-publish
     runs-on: ubuntu-latest
-    # A hang, not an error, is this step's characteristic failure: npm's
-    # fetch-timeout is 300s and the retry below can spend it three times per
-    # package. Worth bounding well under the 6h default, since a publish that
-    # has not finished in half an hour is not going to.
+    # Nothing is compiled here any more, so this is far more than the work
+    # needs -- but the OIDC exchange can still hang, and that is what the
+    # ceiling is for.
     timeout-minutes: 30
     # The `release` environment carries the npm Trusted Publishing identity.
     environment: release
     permissions:
-      contents: read # checkout the tag
+      contents: read # checkout for the pinned pnpm, and read the release assets
       id-token: write # npm Trusted Publishing (OIDC) + provenance
-    defaults:
-      run:
-        working-directory: clients/ts
     steps:
+      # Only for `packageManager`, which pins pnpm. Nothing is installed or
+      # built from this checkout.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.release.tag_name }}
@@ -220,72 +212,73 @@ jobs:
       # NODE_AUTH_TOKEN -- a variable this job stopped setting when it moved to
       # Trusted Publishing. Auth now comes from the OIDC exchange, which sets
       # the token itself at publish time.
+      #
+      # `runtime: node` also supplies the npm that performs that exchange.
+      # `pnpm publish` packs its argument and shells out to `npm publish
+      # <tarball> --ignore-scripts`, so npm does the upload either way -- the
+      # note #203 left here claiming pnpm carries its own OIDC exchange is
+      # wrong. npm has to be >= 11.5.1 for Trusted Publishing to exist at all,
+      # which is why ts-v0.3.6 died with ENEEDAUTH against the runner image's
+      # npm 10.9.8. Node 24 bundles 11.x, so resolving a runtime here is what
+      # keeps that from recurring.
       - uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
         with:
           working-directory: clients/ts
           runtime: node
-          cache: true
-          require-lockfile: true
-      - name: Stamp the version
+      - name: Download the tarballs the draft built
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release download "${TAG}" --repo "${REPO}" --pattern '*.tgz' --dir dist
+      - name: Publish to npm
         env:
           TAG: ${{ github.event.release.tag_name }}
-        run: pnpm -r version "${TAG#ts-v}" --no-git-tag-version
-      # Same ordering constraint as the draft job -- see the comment there.
-      - run: pnpm -r run build
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          path: clients/ts/packages/native/artifacts
-          pattern: ts-native-*
-      - name: Assemble the platform packages
-        working-directory: clients/ts/packages/native
         run: |
-          pnpm exec napi artifacts -d artifacts
-          pnpm exec napi version
-          node --eval '
-            const fs = require("node:fs");
-            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
-            pkg.optionalDependencies = Object.fromEntries(
-              fs.readdirSync("npm").map((dir) => [
-                JSON.parse(fs.readFileSync("npm/" + dir + "/package.json", "utf8")).name,
-                pkg.version,
-              ]),
-            );
-            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
-          '
-      # `napi artifacts` populates the platform directories, so the copies have
-      # to land after it. Nothing else here depends on them: npm packs a LICENSE
-      # from the package directory on its own, no `files` entry required.
-      - name: Stage the licenses
-        working-directory: ${{ github.workspace }}
-        run: .github/scripts/stage-ts-licenses.sh
-      - name: Publish to npm
-        run: |
-          # Everything here goes through pnpm, including the napi platform
-          # packages. They are not workspace members -- pnpm-workspace.yaml
-          # globs `packages/*`, and they live at `packages/native/npm/*` -- so
-          # `pnpm -r publish` does not reach them, and they used to be handed to
-          # `npm publish` instead. That put a tool nothing pinned in the release
-          # path: npm was whatever the runner image shipped, and when the job
-          # stopped installing node through actions/setup-node it silently
-          # became 10.9.8, which predates Trusted Publishing entirely and failed
-          # ts-v0.3.6 with ENEEDAUTH. pnpm is pinned by packageManager, carries
-          # its own OIDC exchange, and takes a directory just as happily.
-          publish_dir() {
-            local dir="$1" name version
-            name="$(jq -r .name "${dir}package.json")"
-            version="$(jq -r .version "${dir}package.json")"
+          version="${TAG#ts-v}"
+
+          # Release assets are mutable in a way the tag is not, so every tarball
+          # is checked against the tag it was cut for before anything uploads.
+          # This is what replaces rebuilding-from-source as the guarantee that
+          # the registry gets what the tag says it does.
+          declare -a platform=() workspace=()
+          for tgz in dist/*.tgz; do
+            manifest="$(tar -xzOf "${tgz}" package/package.json)"
+            name="$(jq -r .name <<<"${manifest}")"
+            found="$(jq -r .version <<<"${manifest}")"
+            if [ "${found}" != "${version}" ]; then
+              echo "::error::${tgz##*/} carries ${name}@${found}, expected ${version}"
+              exit 1
+            fi
+            # The napi platform packages are not workspace members, and the
+            # loader pins them as exact-version optionalDependencies, so they
+            # have to reach the registry first.
+            case "${name}" in
+              @mergifyio/ci-native-*) platform+=("${tgz}") ;;
+              *) workspace+=("${tgz}") ;;
+            esac
+          done
+
+          # An empty `dist` would otherwise sail through both loops below and
+          # report success having published nothing at all.
+          if [ "${#platform[@]}" -eq 0 ] || [ "${#workspace[@]}" -eq 0 ]; then
+            echo "::error::expected both kinds of tarball, found ${#platform[@]} platform and ${#workspace[@]} workspace"
+            exit 1
+          fi
+
+          publish_tarball() {
+            local tgz="$1" name
+            name="$(tar -xzOf "${tgz}" package/package.json | jq -r .name)"
             # Publishing eleven packages is not atomic and a version cannot be
             # republished, so a failure part-way would otherwise strand the
             # earlier packages and leave the release unfinishable -- exactly how
             # ts-v0.3.5 died on the seventh package. Skipping what is already
-            # there turns a re-run into a recovery. Checked explicitly rather
-            # than leaning on `pnpm publish`'s own check, so the outcome does
-            # not depend on how that reports itself.
+            # there turns a re-run into a recovery.
             if pnpm view "${name}@${version}" version >/dev/null 2>&1; then
               echo "${name}@${version} is already published, skipping"
               return 0
             fi
-            pnpm publish "./${dir}" --provenance --access public --no-git-checks
+            pnpm publish "${tgz}" --provenance --access public --no-git-checks
           }
 
           # The OIDC token exchange reaches two hosts before anything is
@@ -304,11 +297,9 @@ jobs:
             return 1
           }
 
-          # Platform packages first, so the loader's optionalDependencies
-          # never point at not-yet-published versions.
-          for dir in packages/native/npm/*/; do
-            retry publish_dir "${dir}"
+          for tgz in "${platform[@]}"; do
+            retry publish_tarball "${tgz}"
           done
-          # pnpm skips workspace packages already on the registry at the
-          # version being published, so this half is re-runnable as it stands.
-          retry pnpm -r publish --provenance --access public --no-git-checks
+          for tgz in "${workspace[@]}"; do
+            retry publish_tarball "${tgz}"
+          done
