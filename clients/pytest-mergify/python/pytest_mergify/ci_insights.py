@@ -23,6 +23,44 @@ _MERGIFY_TEST_JOB_NAME = "mergify.test.job.name"
 # Resource attribute carrying the identity of the tests this run collected --
 # reported with the spans so the engine can persist it on the run.
 _TEST_COLLECTION_FINGERPRINT = "test.collection.fingerprint"
+# How many tests that same collection holds. Derived from the very list the
+# fingerprint is computed over, so the two can never describe different sets,
+# and reported on every run whether or not a selection was ever asked for: it
+# is the denominator a reduction is read against, and the engine cannot
+# recount it from the uploaded results, whose ingestion keeps no row for an
+# ordinary passing test (MRGFY-8885).
+_TEST_COLLECTION_COUNT = "test.collection.count"
+
+# The served answer as this run applied it. Nothing on the server keeps its own
+# answer -- it is computed, served, and dropped -- so a session that does not
+# describe its own reduction leaves no reduction reportable afterwards, for any
+# surface (MRGFY-8859). "As applied" and not "as sent", because the two differ:
+# a subset matching none of the collected tests degrades to a full run here,
+# and the reporting has to describe the run that happened rather than the one
+# that was offered.
+#
+# `answer`, not `outcome`: `Outcome` is this repository's word for how an API
+# call went -- `Ready`, `Dormant`, `Failed` (`crates/mergify-ci-api`), and
+# `fetch_test_selection` returns one -- so a key named after it would read as
+# "did the selection work", under which `full` means success. It is the
+# opposite: `full` is what a served full answer and every degradation alike
+# come to.
+_TEST_SELECTION_ANSWER = "test.selection.answer"
+# The server's own word for why it answered that way, forwarded verbatim and
+# never read here -- except that a degradation replaces it with the client's
+# own (`subset_matched_no_collected_test`), so a reader cannot assume every
+# value came from the server.
+_TEST_SELECTION_REASON = "test.selection.reason"
+# How many tests the selection left this run to run -- the whole collection on
+# a full run, the served subset on a reduced one, none on an `empty` answer and
+# none on a refusal, which stops the run before any test starts.
+#
+# `kept`, the word this module already uses for the quantity, and not
+# `executed`: it is counted in the collection hook, before a single test has
+# started, so it is what selection left rather than what ran. Fewer run under
+# `-x`, under `--maxfail`, or when the interpreter dies mid-suite, and a saving
+# computed from an "executed" count would quietly over-claim on all three.
+_TEST_SELECTION_KEPT_COUNT = "test.selection.kept_count"
 
 # How the built spans leave the session.
 TraceMode = typing.Literal["capture", "upload", "debug"]
@@ -100,6 +138,15 @@ class MergifyCIInsights:
             default=None,
         )
     )
+    # Whether the object above holds an answer the server actually gave. It is
+    # also built when the fetch came back with nothing to answer with -- no
+    # subscription, or the endpoint not serving this repository -- and when the
+    # fetch failed outright, and in both cases it reads as a plain full run
+    # (`selection="full"`, `reason="not_requested"`). Those runs are not runs
+    # Mergify answered `full`, and reporting them as such would count every
+    # repository outside the pilot, and every run whose request errored, as a
+    # reduction the feature chose not to make.
+    test_selection_was_served: bool = dataclasses.field(init=False, default=False)
 
     # One binding-backed API client for the whole session, shared by the flaky,
     # quarantine, and test-selection fetches and the trace upload. Built once we
@@ -276,8 +323,36 @@ class MergifyCIInsights:
             collected_test_ids
         )
         self.resource_attributes[_TEST_COLLECTION_FINGERPRINT] = fingerprint
+        self.resource_attributes[_TEST_COLLECTION_COUNT] = len(collected_test_ids)
 
         self._load_test_selection(fingerprint)
+
+    def on_selection_applied(self, kept_count: int) -> None:
+        """Report what the served selection came to, on the run's own session.
+
+        Called once the answer has been applied to the collection, which is the
+        only moment both halves are known: the collection is what the fetch was
+        keyed on, and `kept_count` is what survived it.
+
+        Nothing is reported unless the server actually answered. A run that
+        never asked -- the kill switch, incomplete job coordinates, an xdist
+        worker -- and a run whose question went unanswered -- no subscription,
+        or a fetch that errored -- both degrade to a full run locally, and
+        neither was offered a reduction. That absence is the honest signal:
+        recording a `full` answer for them would make a repository outside the
+        pilot, and an API that was down, indistinguishable from a run Mergify
+        looked at and chose not to reduce -- in every count taken afterwards.
+        """
+        if (
+            self.resource_attributes is None
+            or self.test_selection is None
+            or not self.test_selection_was_served
+        ):
+            return
+
+        self.resource_attributes[_TEST_SELECTION_ANSWER] = self.test_selection.selection
+        self.resource_attributes[_TEST_SELECTION_REASON] = self.test_selection.reason
+        self.resource_attributes[_TEST_SELECTION_KEPT_COUNT] = kept_count
 
     def _load_test_selection(self, collection_fingerprint: str) -> None:
         try:
@@ -329,6 +404,7 @@ class MergifyCIInsights:
                 init_error_msg=init_error_msg,
             )
         else:
+            self.test_selection_was_served = True
             self.test_selection = pytest_mergify.test_selection.TestSelection(
                 selection=fetched["selection"],
                 reason=fetched["reason"],
