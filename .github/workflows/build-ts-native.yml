@@ -44,14 +44,22 @@ jobs:
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      # Fetches pnpm as the self-contained native executable for the runner's
+      # platform, which is what makes this work on Windows: installed through
+      # npm, pnpm 12's `pnpm` bin is a shebang-less sh placeholder that its
+      # install script is supposed to replace with pnpm.exe and relink npm's
+      # .cmd/.ps1 shims against. When that relinking does not take, the shims
+      # still point at a file Windows cannot execute -- and pnpm then does
+      # nothing at all, successfully. Downloading the binary skips that dance.
+      # It installs the runtime too, so actions/setup-node is gone; the node
+      # version mirrors clients/ts/.node-version, which release-ts.yml still
+      # reads.
+      - uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
         with:
-          package_json_file: clients/ts/package.json
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: clients/ts/.node-version
-          cache: pnpm
-          cache-dependency-path: clients/ts/pnpm-lock.yaml
+          working-directory: clients/ts
+          runtime: node@24
+          cache: true
+          require-lockfile: true
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
@@ -72,16 +80,13 @@ jobs:
         if: matrix.zig
         with:
           tool: cargo-zigbuild
-      # Both pnpm steps pin the shell, because the default differs per runner
-      # and pnpm 12 does not survive the Windows one: under `pwsh` both
-      # `pnpm install` and `pnpm exec` returned 0 in under a second having
-      # done nothing at all -- no install, no compile, no output -- and only
-      # `if-no-files-found: error` on the upload turned that silence into a
-      # failure. bash is what the other six targets were already using by
-      # default, and what the wheel job uses for its own Windows steps.
-      - run: pnpm install --frozen-lockfile
-        shell: bash
-        working-directory: clients/ts
+      # `pnpm install` is not a step any more: pnpm/setup runs it, frozen, as
+      # part of setting the workspace up.
+      #
+      # The shell stays pinned even though the native binary no longer needs a
+      # shell to reach it. The default differs per runner, this step is the one
+      # that failed silently when that mattered, and the wheel job pins bash for
+      # its own Windows steps too.
       - name: Build the platform binary
         shell: bash
         working-directory: clients/ts/packages/native
