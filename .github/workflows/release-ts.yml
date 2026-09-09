@@ -247,41 +247,38 @@ jobs:
             fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
           '
       - name: Publish to npm
-        env:
-          # Pin npm's log directory so the upload below can find it regardless
-          # of HOME. That file is the whole diagnosis: npm's OIDC exchange
-          # fails silently by design -- every branch in lib/utils/oidc.js logs
-          # and returns undefined, because trusted publishing is meant to be
-          # optional -- so publish carries on with no credentials and the
-          # registry answers 404, the same 404 an unauthorized publish gets.
-          # The console shows none of that at any loglevel worth running here,
-          # but npm writes every level to its log file regardless, which is why
-          # keeping the file beats turning the console up.
-          NPM_CONFIG_LOGS_DIR: ${{ runner.temp }}/npm-logs
         run: |
-          # Publishing eleven packages is not atomic, and npm refuses to
-          # republish a version: a failure part-way strands the earlier
-          # packages on the registry and leaves the release unfinishable, since
-          # re-running the job would now collide on everything it already did.
-          # ts-v0.3.5 died on the seventh package and cost a version bump.
-          # Skipping what is already published is what turns a re-run into a
-          # recovery.
+          # Everything here goes through pnpm, including the napi platform
+          # packages. They are not workspace members -- pnpm-workspace.yaml
+          # globs `packages/*`, and they live at `packages/native/npm/*` -- so
+          # `pnpm -r publish` does not reach them, and they used to be handed to
+          # `npm publish` instead. That put a tool nothing pinned in the release
+          # path: npm was whatever the runner image shipped, and when the job
+          # stopped installing node through actions/setup-node it silently
+          # became 10.9.8, which predates Trusted Publishing entirely and failed
+          # ts-v0.3.6 with ENEEDAUTH. pnpm is pinned by packageManager, carries
+          # its own OIDC exchange, and takes a directory just as happily.
           publish_dir() {
             local dir="$1" name version
             name="$(jq -r .name "${dir}package.json")"
             version="$(jq -r .version "${dir}package.json")"
-            if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            # Publishing eleven packages is not atomic and a version cannot be
+            # republished, so a failure part-way would otherwise strand the
+            # earlier packages and leave the release unfinishable -- exactly how
+            # ts-v0.3.5 died on the seventh package. Skipping what is already
+            # there turns a re-run into a recovery. Checked explicitly rather
+            # than leaning on `pnpm publish`'s own check, so the outcome does
+            # not depend on how that reports itself.
+            if pnpm view "${name}@${version}" version >/dev/null 2>&1; then
               echo "${name}@${version} is already published, skipping"
               return 0
             fi
-            npm publish "./${dir}" --provenance --access public
+            pnpm publish "./${dir}" --provenance --access public --no-git-checks
           }
 
           # The OIDC token exchange reaches two hosts before anything is
-          # uploaded, and a hang on either one burns npm's 300s fetch-timeout
-          # and then degrades to an unauthenticated publish rather than an
-          # error. That is a transient failure wearing a permissions failure's
-          # clothes, so it is worth a retry.
+          # uploaded, and a hang on either one is a transient failure that
+          # arrives looking like a permissions failure. Worth a retry.
           retry() {
             local attempt
             for attempt in 1 2 3; do
@@ -303,13 +300,3 @@ jobs:
           # pnpm skips workspace packages already on the registry at the
           # version being published, so this half is re-runnable as it stands.
           retry pnpm -r publish --provenance --access public --no-git-checks
-      # npm writes more to its log file than it ever prints, so when a publish
-      # fails for a reason npm swallowed, the answer is in here and nowhere
-      # else.
-      - name: Upload the npm logs
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: npm-logs
-          path: ${{ runner.temp }}/npm-logs/
-          if-no-files-found: ignore
