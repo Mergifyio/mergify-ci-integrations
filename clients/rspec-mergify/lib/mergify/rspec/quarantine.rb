@@ -1,14 +1,19 @@
 # frozen_string_literal: true
 
-require 'net/http'
-require 'json'
-require 'uri'
 require 'set'
 require_relative 'utils'
+require_relative 'native'
+require_relative 'version'
 
 module Mergify
   module RSpec
     # Fetches quarantined test names from the Mergify API and tracks which are used.
+    #
+    # The fetch itself -- pagination, the RFC 8288 `next` links, the status
+    # codes that mean "not subscribed" rather than "broken" -- belongs to the
+    # shared Rust client now, so every Mergify test client reads a quarantine
+    # list the same way. What stays here is what RSpec cares about: which of
+    # those tests this session actually ran, and the report at the end.
     class Quarantine
       attr_reader :quarantined_tests, :init_error_msg
 
@@ -19,10 +24,7 @@ module Mergify
         @used_tests = Set.new
         @init_error_msg = nil
 
-        owner, repo = Utils.split_full_repo_name(repo_name)
-        fetch_quarantined_tests(api_url, token, owner, repo, branch_name)
-      rescue Utils::InvalidRepositoryFullNameError => e
-        @init_error_msg = e.message
+        fetch(api_url, token, branch_name)
       end
 
       def include?(example_id)
@@ -53,80 +55,21 @@ module Mergify
 
       private
 
-      def fetch_quarantined_tests(api_url, token, owner, repo, branch_name)
-        uri = URI("#{api_url}/v1/ci/#{owner}/repositories/#{repo}/quarantines")
-        uri.query = URI.encode_www_form(branch: branch_name, per_page: 100)
-        collected = walk_paginated_quarantines(uri, token)
-        @quarantined_tests = collected if collected
-      rescue Net::OpenTimeout, Net::ReadTimeout, Errno::ECONNREFUSED, SocketError => e
-        @init_error_msg = "Failed to connect to Mergify API: #{e.message}"
-      rescue JSON::ParserError => e
-        @init_error_msg = "Mergify API returned a malformed quarantine list: #{e.message}"
-      end
-
-      # Follows the RFC 5988 `next` link until exhausted. Returns the full list
-      # on success, or `nil` when the run was aborted (subscription missing or
-      # an error already recorded in @init_error_msg).
-      # rubocop:disable-next Metrics/MethodLength,Metrics/AbcSize
-      def walk_paginated_quarantines(uri, token)
-        collected = []
-        # Guard against a server returning a `next` link that loops back to a
-        # URL we have already fetched.
-        seen = Set.new
-        while uri
-          if seen.include?(uri.to_s)
-            @init_error_msg = 'Mergify API returned a cyclic `next` link, aborting.'
-            return nil
-          end
-          seen.add(uri.to_s)
-
-          response = perform_request(uri, token)
-          case response.code.to_i
-          when 200
-            data = JSON.parse(response.body)
-            collected.concat(data.fetch('quarantined_tests', []).map { |t| t['test_name'] })
-            next_url = parse_next_link(response['Link'])
-            uri = next_url ? URI(next_url) : nil
-          when 402
-            return nil
-          else
-            @init_error_msg = "Mergify API returned HTTP #{response.code}"
-            return nil
-          end
+      # A nil list means the repository has no quarantine subscription, which is
+      # not an error: the session simply quarantines nothing. Anything that went
+      # genuinely wrong is recorded and the suite carries on -- this plugin has
+      # never let the backend fail a test run.
+      def fetch(api_url, token, branch_name)
+        unless Native.available?
+          @init_error_msg = "Mergify native extension unavailable: #{Native.load_error}"
+          return
         end
-        collected
-      end
 
-      def perform_request(uri, token)
-        http = Net::HTTP.new(uri.host, uri.port)
-        http.use_ssl = uri.scheme == 'https'
-        http.open_timeout = 10
-        http.read_timeout = 10
-
-        request = Net::HTTP::Get.new(uri)
-        request['Authorization'] = "Bearer #{token}"
-        http.request(request)
-      end
-
-      # Parses RFC 8288 Link headers tolerantly: accepts both quoted
-      # (`rel="next"`) and token (`rel=next`) forms, and matches when `next`
-      # is one of several space-separated rel-types (`rel="next prev"`).
-      def parse_next_link(link_header)
-        return nil if link_header.nil? || link_header.empty?
-
-        link_header.split(',').each do |part|
-          match = part.strip.match(/\A<([^>]+)>\s*;\s*(.+)\z/)
-          next unless match && next_rel?(match[2])
-
-          return match[1]
-        end
-        nil
-      end
-
-      def next_rel?(params)
-        params.scan(/rel\s*=\s*(?:"([^"]+)"|([^\s;,]+))/i).any? do |quoted, token|
-          (quoted || token).split.include?('next')
-        end
+        owner, repo = Utils.split_full_repo_name(@repo_name)
+        client = Native::Client.new(api_url, token, owner, repo, VERSION)
+        @quarantined_tests = client.fetch_quarantine(branch_name) || []
+      rescue Utils::InvalidRepositoryFullNameError, Native::ApiError => e
+        @init_error_msg = e.message
       end
     end
   end
