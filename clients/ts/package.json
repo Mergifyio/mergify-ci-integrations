@@ -22,6 +22,7 @@
     "format:check": "biome check ."
   },
   "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
     "@biomejs/biome": "^2.5.3",
     "@eslint/js": "^10.0.1",
     "@types/node": "^26.1.2",
@@ -30,6 +31,7 @@
     "@typescript/native": "npm:typescript@^7.0.2",
     "eslint": "^10.8.0",
     "globals": "^17.8.0",
+    "publint": "^0.3.24",
     "tsdown": "^0.22.14",
     "typescript": "npm:@typescript/typescript6@^6.0.2"
   }
