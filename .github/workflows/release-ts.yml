@@ -115,15 +115,12 @@ jobs:
         working-directory: clients/ts
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
         with:
-          package_json_file: clients/ts/package.json
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: clients/ts/.node-version
-          cache: pnpm
-          cache-dependency-path: clients/ts/pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile
+          working-directory: clients/ts
+          runtime: node
+          cache: true
+          require-lockfile: true
       # Stamp the in-repo 0.0.0 with the release version; `pnpm pack` rewrites
       # the workspace:* dependency ranges to the stamped version.
       - name: Stamp the version
@@ -211,16 +208,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.release.tag_name }}
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      # No `registry-url` equivalent, and none is needed: that input's whole
+      # effect here was an .npmrc naming registry.npmjs.org, which is already
+      # npm's and pnpm's default, plus an `_authToken` line pointing at
+      # NODE_AUTH_TOKEN -- a variable this job stopped setting when it moved to
+      # Trusted Publishing. Auth now comes from the OIDC exchange, which sets
+      # the token itself at publish time.
+      - uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
         with:
-          package_json_file: clients/ts/package.json
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: clients/ts/.node-version
-          cache: pnpm
-          cache-dependency-path: clients/ts/pnpm-lock.yaml
-          registry-url: https://registry.npmjs.org
-      - run: pnpm install --frozen-lockfile
+          working-directory: clients/ts
+          runtime: node
+          cache: true
+          require-lockfile: true
       - name: Stamp the version
         env:
           TAG: ${{ github.event.release.tag_name }}
