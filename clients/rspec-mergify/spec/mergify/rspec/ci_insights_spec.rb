@@ -18,75 +18,6 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
     allow(Mergify::RSpec::Native::Client).to receive(:new).and_return(client)
     client
   end
-  describe Mergify::RSpec::SynchronousBatchSpanProcessor do
-    let(:exporter) { OpenTelemetry::SDK::Trace::Export::InMemorySpanExporter.new }
-    let(:processor) { described_class.new(exporter) }
-
-    def build_span(sampled: true)
-      trace_flags = sampled ? OpenTelemetry::Trace::TraceFlags::SAMPLED : OpenTelemetry::Trace::TraceFlags::DEFAULT
-      span_context = OpenTelemetry::Trace::SpanContext.new(
-        trace_id: Random.bytes(16),
-        span_id: Random.bytes(8),
-        trace_flags: trace_flags
-      )
-      span_data = Object.new
-      span = Object.new
-      span.define_singleton_method(:context) { span_context }
-      span.define_singleton_method(:to_span_data) { span_data }
-      span
-    end
-
-    describe '#on_finish' do
-      it 'queues sampled spans as span data' do
-        span = build_span(sampled: true)
-        processor.on_finish(span)
-        expect(processor.instance_variable_get(:@queue)).to contain_exactly(span.to_span_data)
-      end
-
-      it 'skips unsampled spans' do
-        span = build_span(sampled: false)
-        processor.on_finish(span)
-        expect(processor.instance_variable_get(:@queue)).to be_empty
-      end
-    end
-
-    describe '#force_flush' do
-      it 'exports all queued spans and clears the queue' do
-        span1 = build_span(sampled: true)
-        span2 = build_span(sampled: true)
-        span_data1 = span1.to_span_data
-        span_data2 = span2.to_span_data
-        allow(exporter).to receive(:export).with([span_data1, span_data2])
-                                           .and_return(OpenTelemetry::SDK::Trace::Export::SUCCESS)
-
-        processor.on_finish(span1)
-        processor.on_finish(span2)
-        result = processor.force_flush
-
-        expect(result).to eq(OpenTelemetry::SDK::Trace::Export::SUCCESS)
-        expect(exporter).to have_received(:export).with([span_data1, span_data2])
-        expect(processor.instance_variable_get(:@queue)).to be_empty
-      end
-
-      it 'raises ExportError when export fails' do
-        span = build_span(sampled: true)
-        allow(exporter).to receive(:export).and_return(OpenTelemetry::SDK::Trace::Export::FAILURE)
-
-        processor.on_finish(span)
-        expect { processor.force_flush }.to raise_error(Mergify::RSpec::ExportError, /Failed to export traces/)
-      end
-
-      it 'clears queue before exporting (so queue is always empty after force_flush attempt)' do
-        span = build_span(sampled: true)
-        allow(exporter).to receive(:export).and_raise(StandardError, 'network error')
-
-        processor.on_finish(span)
-        expect { processor.force_flush }.to raise_error(StandardError, 'network error')
-        expect(processor.instance_variable_get(:@queue)).to be_empty
-      end
-    end
-  end
-
   describe Mergify::RSpec::CIInsights do
     around do |example|
       original = ENV.to_h
@@ -107,14 +38,9 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
         allow(Mergify::RSpec::Utils).to receive(:in_ci?).and_return(false)
       end
 
-      it 'has a nil tracer' do
+      it 'does not record outside CI' do
         insights = described_class.new
-        expect(insights.tracer).to be_nil
-      end
-
-      it 'has a nil tracer_provider' do
-        insights = described_class.new
-        expect(insights.tracer_provider).to be_nil
+        expect(insights.recorder).to be_nil
       end
     end
 
@@ -127,9 +53,10 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
         ENV.delete('_RSPEC_MERGIFY_TEST')
       end
 
-      it 'has a nil tracer' do
+      it 'records the run but does not upload it' do
         insights = described_class.new
-        expect(insights.tracer).to be_nil
+        expect(insights.recorder).to be_a(Mergify::RSpec::Trace::Recorder)
+        expect(insights.flush).to be_nil
       end
     end
 
@@ -144,7 +71,7 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
         ENV['MERGIFY_TOKEN'] = 'test-token'
         ENV['_RSPEC_MERGIFY_TEST'] = 'true'
 
-        empty = OpenTelemetry::SDK::Resources::Resource.create({})
+        empty = {}
         allow(Mergify::RSpec::Resources::RSpec).to receive(:detect).and_return(empty)
 
         # The repository has not opted into flaky detection: the client reports
@@ -152,24 +79,14 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
         stub_native_client
       end
 
-      it 'creates a tracer' do
-        insights = described_class.new
-        expect(insights.tracer).not_to be_nil
-      end
-
       it 'generates a valid test_run_id' do
         insights = described_class.new
         expect(insights.test_run_id).to match(/\A[0-9a-f]{16}\z/)
       end
 
-      it 'creates a tracer_provider' do
+      it 'creates a recorder' do
         insights = described_class.new
-        expect(insights.tracer_provider).to be_a(OpenTelemetry::SDK::Trace::TracerProvider)
-      end
-
-      it 'uses InMemorySpanExporter' do
-        insights = described_class.new
-        expect(insights.exporter).to be_a(OpenTelemetry::SDK::Trace::Export::InMemorySpanExporter)
+        expect(insights.recorder).to be_a(Mergify::RSpec::Trace::Recorder)
       end
 
       it 'has nil flaky_detector when the repository has not opted in' do
@@ -200,7 +117,7 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
         ENV['MERGIFY_TOKEN'] = 'test-token'
         ENV['_RSPEC_MERGIFY_TEST'] = 'true'
 
-        empty = OpenTelemetry::SDK::Resources::Resource.create({})
+        empty = {}
         allow(Mergify::RSpec::Resources::RSpec).to receive(:detect).and_return(empty)
       end
 
@@ -259,7 +176,7 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
         ENV['MERGIFY_TOKEN'] = 'test-token'
         ENV['_RSPEC_MERGIFY_TEST'] = 'true'
 
-        empty = OpenTelemetry::SDK::Resources::Resource.create({})
+        empty = {}
         allow(Mergify::RSpec::Resources::RSpec).to receive(:detect).and_return(empty)
 
         # This block exercises quarantine; the repository has not opted into
