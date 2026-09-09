@@ -1,10 +1,9 @@
 # frozen_string_literal: true
 
-require 'net/http'
-require 'json'
-require 'uri'
 require 'set'
 require_relative 'utils'
+require_relative 'native'
+require_relative 'version'
 
 module Mergify
   module RSpec
@@ -74,34 +73,25 @@ module Mergify
         @tests_to_process = []
         @budget = 0.0
 
-        fetch_context
-        validate!
+        @context = fetch_context
+        raise FlakyDetectionDisabledError unless Native::Budget.should_run(@context, @mode)
       end
 
-      # rubocop:disable-next Metrics/MethodLength,Metrics/AbcSize
+      # Which tests this session reruns, and how long it may spend doing it,
+      # both come from the shared budget engine -- so a Ruby suite and a Python
+      # one facing the same context spend the same time.
+      #
+      # The engine sizes the budget from the existing tests *in this session*,
+      # where this class counted every existing test the context knew about. A
+      # session running part of a suite was handed the whole suite's budget; it
+      # now gets its own.
       def prepare_for_session(test_ids)
-        existing = Set.new(@context[:existing_test_names])
-        unhealthy = Set.new(@context[:unhealthy_test_names])
+        plan = Native::Budget.compute(@context, @mode, test_ids, [])
 
-        @tests_to_process =
-          if @mode == 'new'
-            test_ids.reject { |id| existing.include?(id) }
-          else
-            test_ids.select { |id| unhealthy.include?(id) }
-          end
-
-        budget_ratio = if @mode == 'new'
-                         @context[:budget_ratio_for_new_tests]
-                       else
-                         @context[:budget_ratio_for_unhealthy_tests]
-                       end
-
-        mean_duration_s = @context[:existing_tests_mean_duration_ms] / 1000.0
-        existing_count = @context[:existing_test_names].size
-        min_budget_s = @context[:min_budget_duration_ms] / 1000.0
-
-        ratio_budget = budget_ratio * mean_duration_s * existing_count
-        @budget = [ratio_budget, min_budget_s].max
+        @tests_to_process = plan['tests_to_process']
+        # The engine works in milliseconds; everything downstream compares
+        # against RSpec's durations, which are seconds.
+        @budget = plan['available_budget_ms'] / 1000.0
       end
 
       # rubocop:disable-next Metrics/MethodLength
@@ -113,7 +103,7 @@ module Mergify
 
         return unless @tests_to_process.include?(test_id)
 
-        if test_id.length > @context[:max_test_name_length]
+        if test_id.length > @context['max_test_name_length']
           @over_length_tests.add(test_id)
           return
         end
@@ -153,7 +143,7 @@ module Mergify
         return false unless @metrics.key?(test_id)
 
         metrics = @metrics[test_id]
-        min_exec = @context[:min_test_execution_count]
+        min_exec = @context['min_test_execution_count']
         (metrics.initial_duration * min_exec) > metrics.remaining_time
       end
 
@@ -161,7 +151,7 @@ module Mergify
         return false unless @metrics.key?(test_id)
 
         metrics = @metrics[test_id]
-        metrics.will_exceed_deadline? || metrics.rerun_count >= @context[:max_test_execution_count]
+        metrics.will_exceed_deadline? || metrics.rerun_count >= @context['max_test_execution_count']
       end
 
       def test_metrics(test_id)
@@ -196,54 +186,16 @@ module Mergify
 
       private
 
-      # rubocop:disable-next Metrics/AbcSize,Metrics/MethodLength
+      # A nil context means the repository has not opted into flaky detection,
+      # which is the expected default rather than a failure.
       def fetch_context
+        raise FlakyDetectionDisabledError unless Native.available?
+
         owner, repo = Utils.split_full_repo_name(@full_repository_name)
-        uri = URI("#{@url}/v1/ci/#{owner}/repositories/#{repo}/flaky-detection-context")
+        context = Native::Client.new(@url, @token, owner, repo, VERSION).fetch_flaky_context
+        raise FlakyDetectionDisabledError if context.nil?
 
-        http = Net::HTTP.new(uri.host, uri.port)
-        http.use_ssl = uri.scheme == 'https'
-        http.open_timeout = 10
-        http.read_timeout = 10
-
-        request = Net::HTTP::Get.new(uri)
-        request['Authorization'] = "Bearer #{@token}"
-
-        response = http.request(request)
-        case response.code.to_i
-        when 200
-          parse_context(response.body)
-        when 404
-          # A 404 means the repository has not opted into flaky detection; this
-          # is the expected default, not an error.
-          raise FlakyDetectionDisabledError
-        else
-          raise "Mergify API returned HTTP #{response.code}"
-        end
-      end
-
-      # rubocop:disable-next Metrics/MethodLength,Metrics/AbcSize
-      def parse_context(body)
-        data = JSON.parse(body, symbolize_names: true)
-        @context = {
-          budget_ratio_for_new_tests: data[:budget_ratio_for_new_tests].to_f,
-          budget_ratio_for_unhealthy_tests: data[:budget_ratio_for_unhealthy_tests].to_f,
-          existing_test_names: Array(data[:existing_test_names]),
-          existing_tests_mean_duration_ms: data[:existing_tests_mean_duration_ms].to_f,
-          unhealthy_test_names: Array(data[:unhealthy_test_names]),
-          max_test_execution_count: data[:max_test_execution_count].to_i,
-          max_test_name_length: data[:max_test_name_length].to_i,
-          min_budget_duration_ms: data[:min_budget_duration_ms].to_f,
-          min_test_execution_count: data[:min_test_execution_count].to_i
-        }
-      end
-
-      def validate!
-        return unless @mode == 'new' && @context[:existing_test_names].empty?
-
-        # Without a baseline, `new` mode would treat every test as new and rerun
-        # the whole suite. Skip instead of surfacing an error.
-        raise FlakyDetectionDisabledError
+        context
       end
 
       def remaining_budget

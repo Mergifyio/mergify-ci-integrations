@@ -4,12 +4,19 @@ require 'spec_helper'
 require 'mergify/rspec/ci_insights'
 
 RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
-  # Quarantine fetches happen in Rust now, past WebMock's reach, so stub the
-  # binding's client instead of the HTTP call.
-  def stub_quarantine(names)
-    client = instance_double(Mergify::RSpec::Native::Client, fetch_quarantine: names)
+  # Both fetches happen in Rust now, past WebMock's reach, so the seam is the
+  # binding's client. One helper for both: two of them stubbing Client.new
+  # would just overwrite each other.
+  def stub_native_client(quarantine: [], flaky: nil, flaky_raises: nil)
+    client = instance_double(Mergify::RSpec::Native::Client, fetch_quarantine: quarantine)
+    if flaky_raises
+      allow(client).to receive(:fetch_flaky_context).and_raise(flaky_raises)
+    else
+      allow(client).to receive(:fetch_flaky_context).and_return(flaky)
+    end
     allow(Mergify::RSpec::Native).to receive(:available?).and_return(true)
     allow(Mergify::RSpec::Native::Client).to receive(:new).and_return(client)
+    client
   end
   describe Mergify::RSpec::SynchronousBatchSpanProcessor do
     let(:exporter) { OpenTelemetry::SDK::Trace::Export::InMemorySpanExporter.new }
@@ -140,10 +147,9 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
         empty = OpenTelemetry::SDK::Resources::Resource.create({})
         allow(Mergify::RSpec::Resources::RSpec).to receive(:detect).and_return(empty)
 
-        # The repository has not opted into flaky detection, so the server
-        # answers 404 and the detector skips silently.
-        stub_request(:get, 'https://api.mergify.com/v1/ci/owner/repositories/repo/flaky-detection-context')
-          .to_return(status: 404)
+        # The repository has not opted into flaky detection: the client reports
+        # dormant, and the detector skips silently.
+        stub_native_client
       end
 
       it 'creates a tracer' do
@@ -199,22 +205,17 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
       end
 
       it 'loads flaky_detector when API succeeds' do
-        stub_request(:get, 'https://api.mergify.com/v1/ci/owner/repositories/repo/flaky-detection-context')
-          .to_return(
-            status: 200,
-            body: {
-              budget_ratio_for_new_tests: 0.1,
-              budget_ratio_for_unhealthy_tests: 0.2,
-              existing_test_names: ['./spec/old_spec.rb[1:1]'],
-              existing_tests_mean_duration_ms: 100,
-              unhealthy_test_names: [],
-              max_test_execution_count: 10,
-              max_test_name_length: 500,
-              min_budget_duration_ms: 5000,
-              min_test_execution_count: 3
-            }.to_json,
-            headers: { 'Content-Type' => 'application/json' }
-          )
+        stub_native_client(flaky: {
+                             'budget_ratio_for_new_tests' => 0.1,
+                             'budget_ratio_for_unhealthy_tests' => 0.2,
+                             'existing_test_names' => ['./spec/old_spec.rb[1:1]'],
+                             'existing_tests_mean_duration_ms' => 100,
+                             'unhealthy_test_names' => [],
+                             'max_test_execution_count' => 10,
+                             'max_test_name_length' => 500,
+                             'min_budget_duration_ms' => 5000,
+                             'min_test_execution_count' => 3
+                           })
 
         insights = described_class.new
         expect(insights.flaky_detector).to be_a(Mergify::RSpec::FlakyDetector)
@@ -222,8 +223,7 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
       end
 
       it 'sets error message when API fails' do
-        stub_request(:get, 'https://api.mergify.com/v1/ci/owner/repositories/repo/flaky-detection-context')
-          .to_return(status: 500, body: 'Internal Server Error')
+        stub_native_client(flaky_raises: Mergify::RSpec::Native::ApiError.new('Mergify API returned HTTP 500'))
 
         insights = described_class.new
         expect(insights.flaky_detector).to be_nil
@@ -231,8 +231,7 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
       end
 
       it 'sets error message when connection times out' do
-        stub_request(:get, 'https://api.mergify.com/v1/ci/owner/repositories/repo/flaky-detection-context')
-          .to_timeout
+        stub_native_client(flaky_raises: Mergify::RSpec::Native::ApiError.new('Mergify API request timed out'))
 
         insights = described_class.new
         expect(insights.flaky_detector).to be_nil
@@ -240,8 +239,7 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
       end
 
       it 'skips silently when the repository has not opted in (404)' do
-        stub_request(:get, 'https://api.mergify.com/v1/ci/owner/repositories/repo/flaky-detection-context')
-          .to_return(status: 404)
+        stub_native_client
 
         insights = described_class.new
         expect(insights.flaky_detector).to be_nil
@@ -266,12 +264,11 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
 
         # This block exercises quarantine; the repository has not opted into
         # flaky detection, so the server answers 404 and the detector skips.
-        stub_request(:get, 'https://api.mergify.com/v1/ci/owner/repositories/repo/flaky-detection-context')
-          .to_return(status: 404)
+        stub_native_client
       end
 
       it 'loads quarantined_tests' do
-        stub_quarantine(['./spec/foo_spec.rb[1:1]'])
+        stub_native_client(quarantine: ['./spec/foo_spec.rb[1:1]'])
 
         insights = described_class.new
         expect(insights.branch_name).to eq('main')
@@ -280,7 +277,7 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
       end
 
       it 'returns true for mark_test_as_quarantined_if_needed with quarantined test' do
-        stub_quarantine(['./spec/foo_spec.rb[1:1]'])
+        stub_native_client(quarantine: ['./spec/foo_spec.rb[1:1]'])
 
         insights = described_class.new
         expect(insights.mark_test_as_quarantined_if_needed('./spec/foo_spec.rb[1:1]')).to be true
