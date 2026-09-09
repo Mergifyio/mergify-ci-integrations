@@ -11,6 +11,7 @@ mod circleci;
 mod github_actions;
 mod jenkins;
 mod pytest_suite;
+mod rspec_suite;
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -43,4 +44,5 @@ pub(crate) static REGISTRY: &[&dyn CiProvider] = &[
     &jenkins::Jenkins,
     &buildkite::Buildkite,
     &pytest_suite::PytestSuite,
+    &rspec_suite::RspecSuite,
 ];
