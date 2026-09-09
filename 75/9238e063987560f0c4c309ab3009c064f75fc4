@@ -1,0 +1,1 @@
+Rebased on main after #221 (explicit opt-in for test selection) rewrote the same files. One docstring conflict merged (both intents kept), and the OTLP upload test now opts in like its siblings. No behaviour change.
