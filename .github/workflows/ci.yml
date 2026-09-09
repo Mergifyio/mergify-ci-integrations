@@ -209,6 +209,18 @@ jobs:
       - name: Run Semgrep
         run: semgrep --config=auto --error --timeout=15 clients/ts
 
+  # The same matrix the release builds from. Until now nothing but
+  # release-ts.yml called it, so the cross-compile was first exercised at
+  # release time: pnpm 12 (#157) broke the Windows build three days before
+  # ts-v0.3.6 tried to cut, and CI stayed green throughout because no pull
+  # request ever built a `.node`. A release is the wrong place to learn that
+  # a toolchain bump does not cross-compile.
+  ts-native:
+    name: ts native
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-ts-native.yml
+
   rspec-tests:
     name: rspec-mergify tests (ruby ${{ matrix.ruby }})
     runs-on: ubuntu-latest
@@ -325,6 +337,7 @@ jobs:
       - ts-tests
       - ts-codespell
       - ts-semgrep
+      - ts-native
       - rspec-tests
       - rspec-rubocop
       - rspec-codespell
