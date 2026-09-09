@@ -5,6 +5,13 @@ shared:
     - check-success=ci-gate
   default_review_cond: &DefaultReviewCond
     - "#approved-reviews-by>=2"
+    # A reviewer who reads a change and finds it trivial can label it
+    # `low risk` and let it merge on their approval alone.
+    # low-risk-label-guard.yml strips the label back off when the author adds
+    # it, so nobody can halve their own review requirement.
+    - and:
+        - label = low risk
+        - "#approved-reviews-by>=1"
     - author = dependabot[bot]
     - author = renovate[bot]
     - author = mergify-ci-bot
