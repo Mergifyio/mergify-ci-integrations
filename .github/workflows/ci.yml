@@ -143,12 +143,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Installs pnpm as a native binary and the runtime with it, so there is
       # no separate actions/setup-node, and runs the frozen install itself.
-      # The node version mirrors clients/ts/.node-version, which release-ts.yml
-      # still reads.
+      # The version comes from devEngines.runtime in clients/ts/package.json.
       - uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
         with:
           working-directory: clients/ts
-          runtime: node@24
+          runtime: node
           cache: true
           require-lockfile: true
       - run: pnpm run format:check
@@ -168,7 +167,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The matrix drives the runtime here, so this is the one call site that
-      # does not follow clients/ts/.node-version.
+      # overrides devEngines.runtime -- an explicit version in the input wins.
+      # devEngines carries onFail: warn for exactly this: pnpm checks the
+      # runtime against it and would otherwise fail the node 22 leg with
+      # ERR_PNPM_BAD_RUNTIME_VERSION.
       - uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
         with:
           working-directory: clients/ts

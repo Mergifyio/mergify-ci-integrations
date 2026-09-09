@@ -51,13 +51,15 @@ jobs:
       # .cmd/.ps1 shims against. When that relinking does not take, the shims
       # still point at a file Windows cannot execute -- and pnpm then does
       # nothing at all, successfully. Downloading the binary skips that dance.
-      # It installs the runtime too, so actions/setup-node is gone; the node
-      # version mirrors clients/ts/.node-version, which release-ts.yml still
-      # reads.
+      # It installs the runtime too, so actions/setup-node is gone. `runtime`
+      # names node without a version so the version comes from
+      # devEngines.runtime in clients/ts/package.json -- naming it is still
+      # required, since pnpm/setup installs no runtime at all when the input is
+      # absent.
       - uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
         with:
           working-directory: clients/ts
-          runtime: node@24
+          runtime: node
           cache: true
           require-lockfile: true
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable

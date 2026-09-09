@@ -3,6 +3,13 @@
   "private": true,
   "type": "module",
   "packageManager": "pnpm@12.3.4",
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": "24",
+      "onFail": "warn"
+    }
+  },
   "engines": {
     "node": ">=22.0.0"
   },
