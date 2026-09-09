@@ -72,9 +72,18 @@ jobs:
         if: matrix.zig
         with:
           tool: cargo-zigbuild
+      # Both pnpm steps pin the shell, because the default differs per runner
+      # and pnpm 12 does not survive the Windows one: under `pwsh` both
+      # `pnpm install` and `pnpm exec` returned 0 in under a second having
+      # done nothing at all -- no install, no compile, no output -- and only
+      # `if-no-files-found: error` on the upload turned that silence into a
+      # failure. bash is what the other six targets were already using by
+      # default, and what the wheel job uses for its own Windows steps.
       - run: pnpm install --frozen-lockfile
+        shell: bash
         working-directory: clients/ts
       - name: Build the platform binary
+        shell: bash
         working-directory: clients/ts/packages/native
         run: pnpm exec napi build --platform --release --target ${{ matrix.target }} ${{ matrix.zig && '-x' || '' }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
