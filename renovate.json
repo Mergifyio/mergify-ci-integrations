@@ -10,19 +10,6 @@
         "npm"
       ],
       "minimumReleaseAge": "7 days"
-    },
-    {
-      "description": "typescript-eslint hard-errors on a TypeScript major it does not support yet, so such a bump cannot pass CI however long it waits. Park it on the dependency dashboard and approve it once typescript-eslint catches up.",
-      "matchManagers": [
-        "npm"
-      ],
-      "matchPackageNames": [
-        "typescript"
-      ],
-      "matchUpdateTypes": [
-        "major"
-      ],
-      "dependencyDashboardApproval": true
     }
   ]
 }
