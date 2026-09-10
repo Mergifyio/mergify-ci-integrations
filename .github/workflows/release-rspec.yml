@@ -168,9 +168,63 @@ jobs:
           path: clients/rspec-mergify/pkg/*.gem
           if-no-files-found: error
 
-  create-draft:
+  # A build that succeeds proves nothing about what it produced, and this gem
+  # has a failure mode the other clients do not: a platform gem missing the
+  # extension for one Ruby installs, loads, and reports no CI at all, because
+  # the loader is deliberately fail-open. Detection would stop working for
+  # everyone on that Ruby with no error anywhere.
+  check-packages:
     if: github.event_name == 'workflow_dispatch'
     needs: [resolve-tag, build-gems, build-ruby-gem]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: dist
+          pattern: gem-*
+          merge-multiple: true
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          working-directory: clients/rspec-mergify
+      - name: Check the built gems
+        env:
+          TAG: ${{ needs.resolve-tag.outputs.tag }}
+        run: ruby .github/scripts/check-rspec-gems.rb dist "${TAG#rspec-mergify-v}"
+
+  # Installing and requiring is the easy half. The half that matters is that
+  # RSpec really registers the formatter: if that chain silently does not
+  # complete the gem installs, requires without error, and reports nothing.
+  #
+  # Only the platform this runner can execute is covered; musl and the foreign
+  # architectures would need a container or QEMU, the same gap the other two
+  # clients have.
+  check-install:
+    if: github.event_name == 'workflow_dispatch'
+    needs: [resolve-tag, build-gems, build-ruby-gem]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: dist
+          pattern: gem-*
+          merge-multiple: true
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          working-directory: clients/rspec-mergify
+      - name: Install the gem and exercise it
+        env:
+          TAG: ${{ needs.resolve-tag.outputs.tag }}
+        run: ruby .github/scripts/check-rspec-install.rb dist "${TAG#rspec-mergify-v}"
+
+  create-draft:
+    if: github.event_name == 'workflow_dispatch'
+    needs: [resolve-tag, build-gems, build-ruby-gem, check-packages, check-install]
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the draft release
