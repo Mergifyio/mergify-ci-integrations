@@ -47,11 +47,14 @@ workspace, two-step draft-then-publish like pytest-mergify).
 
 The RSpec gem under `clients/rspec-mergify/` (imported from
 [rspec-mergify](https://github.com/Mergifyio/rspec-mergify) with its git
-history) is not yet on the core at all — it still carries its own Ruby
-detection, API calls, and OpenTelemetry SDK export; the magnus binding lands in
-a later step. It releases from this repo via `rspec-mergify-v<SemVer>` tags,
-two-step draft-then-publish like the others, to RubyGems over Trusted
-Publishing.
+history) wraps the core behind magnus, and follows the bundled model the same
+way the wheel does rather than the way npm natives do: Ruby has no stable ABI,
+so a precompiled gem is *fat*, carrying one extension per supported Ruby. It
+still carries its own API calls and OpenTelemetry SDK export. It releases from
+this repo via `rspec-mergify-v<SemVer>` tags, two-step draft-then-publish like
+the others, to RubyGems over Trusted Publishing: seven platform gems plus a
+plain `ruby` gem that installs anywhere and reports CI as unknown, so an
+unsupported platform degrades rather than failing to install.
 
 ## Develop
 
