@@ -15,11 +15,13 @@ name: Release rspec-mergify
 #
 # Step 2 -- publish (`release: published`):
 #   The maintainer reviews the draft and publishes it; that fires this stage,
-#   which rebuilds from the now-created tag and pushes to RubyGems via Trusted
-#   Publishing (OIDC, no API key). RubyGems binds that trust to this repository,
-#   THIS workflow filename, and the `release` environment -- all three have to
-#   match the publisher configured on the gem or the token exchange fails, so
-#   renaming this file is a breaking change.
+#   which downloads the .gem the draft attached and pushes that to RubyGems via
+#   Trusted Publishing (OIDC, no API key). It deliberately does not rebuild:
+#   what was reviewed on the draft is what reaches the index, byte for byte.
+#   RubyGems binds that trust to this repository, THIS workflow filename, and
+#   the `release` environment -- all three have to match the publisher
+#   configured on the gem or the token exchange fails, so renaming this file is
+#   a breaking change.
 on:
   workflow_dispatch:
     inputs:
@@ -129,24 +131,46 @@ jobs:
     # The `release` environment carries the RubyGems Trusted Publishing identity.
     environment: release
     permissions:
-      contents: read # checkout the tag
+      contents: read # checkout for .ruby-version, and read the release assets
       id-token: write # RubyGems Trusted Publishing (OIDC)
     steps:
+      # Only for .ruby-version. Nothing is staged or built from this checkout,
+      # so stage-rspec-release.sh is not run here -- the gem it staged for is
+      # already built and attached to the release.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.release.tag_name }}
       - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
         with:
-          bundler-cache: true
           working-directory: clients/rspec-mergify
-      - name: Stage the release inputs
+      - name: Download the gem the draft built
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release download "${TAG}" --repo "${REPO}" --dir pkg --pattern '*.gem'
+
+          # Release assets are mutable in a way the tag is not, so the gem is
+          # checked against the version the tag names before it is pushed. The
+          # gemspec builds `rspec-mergify-<version>.gem`, and exactly one of
+          # them belongs on a release.
+          expected="rspec-mergify-${TAG#rspec-mergify-v}.gem"
+          shopt -s nullglob
+          gems=(pkg/*.gem)
+          if [ "${#gems[@]}" -ne 1 ] || [ "${gems[0]##*/}" != "${expected}" ]; then
+            echo "::error::expected exactly ${expected} on ${TAG}, found: ${gems[*]:-nothing}"
+            exit 1
+          fi
+          echo "verified ${expected}"
+      # Replaces rubygems/release-gem, which runs `rake release` and so builds
+      # the gem it pushes. This one only performs the OIDC exchange and writes
+      # the credentials, leaving `gem push` below to send the reviewed file.
+      # The trust is bound to the workflow identity, not to whichever action
+      # performs the exchange, so the publisher configured on the gem is
+      # unaffected by the swap.
+      - uses: rubygems/configure-rubygems-credentials@dc5a8d8553e6ee01fc26761a49e99e733d17954a # v2.1.0
+      - name: Push the gem
         env:
           TAG: ${{ github.event.release.tag_name }}
-        run: .github/scripts/stage-rspec-release.sh "${TAG}"
-      # Runs `bundle exec rake release`, which builds and pushes. The Rakefile
-      # clears `release:guard_clean` -- staging above dirties the tree on
-      # purpose -- and `release:source_control_push`, since the tag already
-      # exists: this run was triggered by publishing it.
-      - uses: rubygems/release-gem@7f9650160c1a4e7989fdc9855807bdbd421d8b6b # v1.4.1
-        with:
-          working-directory: clients/rspec-mergify
+        run: gem push "pkg/rspec-mergify-${TAG#rspec-mergify-v}.gem"
