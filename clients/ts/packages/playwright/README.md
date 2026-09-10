@@ -107,6 +107,13 @@ guarantees.
 
 ### Reduced merge-queue reruns
 
+**This is off until you turn it on, per job**: set
+`MERGIFY_TEST_SELECTION_ENABLE=true` on the job you want reduced. Installing
+the reporter is not enough — a feature that decides not to run tests starts
+only where you wrote that it should. A job that has not opted in never queries
+the endpoint, and anything that is not a recognised yes (unset, empty, `false`,
+unparsable) means no.
+
 When Mergify's merge queue relaunches a CI run that failed, it already knows
 which tests broke. `globalSetup` asks the API whether this run may replay only
 those, and the reporter applies the answer through Playwright's
@@ -129,7 +136,7 @@ whenever anything is off-nominal:
 - **none of the served names is among the tests actually collected** — the
   guard against a stale set after a rename. A reduced run that matched nothing
   would go green having tested nothing;
-- `MERGIFY_TEST_SELECTION_DISABLE=true` is set.
+- the job did not set `MERGIFY_TEST_SELECTION_ENABLE=true` — the opt-in above.
 
 Setup and teardown projects always run in full: Playwright makes their tests
 read-only, and they are never counted as a match either.
@@ -162,7 +169,7 @@ no project name are never prefixed.
 | `MERGIFY_API_URL` | Mergify API endpoint | `https://api.mergify.com` |
 | `PLAYWRIGHT_MERGIFY_ENABLE` | Force-enable outside CI | `false` |
 | `PLAYWRIGHT_MERGIFY_INCLUDE_PROJECT_IN_TEST_NAME` | Prefix the project to multi-project test names as `[project] > …` | `false` |
-| `MERGIFY_TEST_SELECTION_DISABLE` | Never reduce a merge-queue rerun; an unparsable value also disables | `false` |
+| `MERGIFY_TEST_SELECTION_ENABLE` | Let Mergify reduce a merge-queue rerun of this job; anything unparsable means no | `false` |
 | `MERGIFY_CI_DEBUG` | Print spans to console instead of uploading | `false` |
 | `MERGIFY_TRACEPARENT` | W3C distributed trace context | — |
 | `MERGIFY_TEST_RUN_ID` | Test run identifier (set by `withMergify`'s globalSetup; read by workers) | — |

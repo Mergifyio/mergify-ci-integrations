@@ -37,7 +37,7 @@ The plugin activates automatically when running in CI (detected via the `CI` env
 | `PYTEST_MERGIFY_DEBUG` | Print spans to console | `false` |
 | `MERGIFY_TRACEPARENT` | W3C distributed trace context | — |
 | `MERGIFY_TEST_JOB_NAME` | Mergify test job name | — |
-| `MERGIFY_TEST_SELECTION_DISABLE` | Opt out of test selection (see below) | `false` |
+| `MERGIFY_TEST_SELECTION_ENABLE` | Opt this job into test selection (see below) | `false` |
 
 For detailed documentation, see the [official guide](https://docs.mergify.com/ci-insights/test-frameworks/pytest/).
 
@@ -57,17 +57,31 @@ which one the current run repeats, and it will not guess which tests to skip.
 The run then **fails**, showing Mergify's explanation of what it saw — usually
 asking you to give each of those runs its own `MERGIFY_TEST_JOB_NAME`.
 
-Otherwise there is nothing to configure: the plugin uses the token and job
+**This is off until you turn it on, per job.** Installing the plugin is not
+enough: a feature that decides not to run tests starts only where you wrote
+that it should. Set `MERGIFY_TEST_SELECTION_ENABLE=true` on the job you want
+reduced:
+
+```yaml
+      - name: Run tests
+        run: pytest
+        env:
+          MERGIFY_TOKEN: ${{ secrets.MERGIFY_TOKEN }}
+          MERGIFY_TEST_SELECTION_ENABLE: "true"
+```
+
+A job that does not set it never queries the endpoint and always runs the full
+suite; everything else the plugin does — test tracing, flaky detection,
+quarantine — is unaffected either way. Anything that is not a recognised yes
+(unset, empty, `false`, or a value the plugin cannot parse) means no.
+
+Past that there is nothing to configure: the plugin uses the token and job
 identity it already has, and Mergify decides. Every remaining situation — a
 normal run, a rerun Mergify has no previous results for, an unreachable API, an
 answer from a newer Mergify this plugin does not understand — runs the full
 suite, so the feature never costs coverage. It is also enabled per organization
-on Mergify's side, so it stays inactive until your organization is opted in.
-
-Set `MERGIFY_TEST_SELECTION_DISABLE=true` in your CI to opt out: the plugin
-then always runs the full suite and never queries the endpoint. It is scoped
-to this feature only — test tracing, flaky detection and quarantine keep
-working (unset `MERGIFY_TOKEN` to turn the plugin off entirely).
+on Mergify's side, so a job that opts in stays inactive until your organization
+is opted in too.
 
 ## Development
 

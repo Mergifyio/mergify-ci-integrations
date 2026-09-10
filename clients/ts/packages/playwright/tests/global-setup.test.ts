@@ -2,6 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FlakyDetectionContext, MergifyApiClient } from '@mergifyio/ci-core';
+import { TEST_SELECTION_ENABLE_ENV } from '@mergifyio/ci-core';
 import type { FullConfig } from '@playwright/test';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runGlobalSetup } from '../src/global-setup.js';
@@ -251,5 +252,77 @@ describe('runGlobalSetup — flaky detection', () => {
     expect(state.quarantinedTests).toEqual([]); // quarantine still wrote
     expect(state.flakyContext).toBeUndefined();
     expect(state.flakyMode).toBeUndefined();
+  });
+});
+
+describe('runGlobalSetup — test selection', () => {
+  // The coordinates the answer is keyed on. Without all four there is nothing
+  // to ask, which would make every assertion below pass for the wrong reason.
+  beforeEach(() => {
+    // On a `pull_request` event the core takes the head revision from the
+    // event payload, not from GITHUB_SHA, which there is the merge commit
+    // (`crates/mergify-ci-core/src/providers/github_actions.rs`). This suite
+    // runs inside such a job on our own CI, so without neutralising the event
+    // name the detection reads the real pull request's SHA and the stub below
+    // is ignored — green locally, red in CI, which is exactly what happened.
+    vi.stubEnv('GITHUB_EVENT_NAME', 'push');
+    vi.stubEnv('GITHUB_SHA', 'cafecafe');
+    vi.stubEnv('GITHUB_WORKFLOW', 'CI');
+    vi.stubEnv('GITHUB_JOB', 'unit');
+    vi.stubEnv('GITHUB_REF_NAME', 'queue/main/42');
+  });
+
+  it('asks for nothing when the job did not opt in', async () => {
+    // The property MRGFY-9172 rests on: a job that never opted in leaves no
+    // selection answer on its session, which is how Mergify tells a repository
+    // that has not asked from one that has. Asking in order to be told "not
+    // opted in" would answer that question everywhere and erase it.
+    delete process.env[TEST_SELECTION_ENABLE_ENV];
+    const client = stubClient();
+    const { deps } = depsWith(client, cacheRoot);
+
+    await runGlobalSetup(fakeConfig('/repo'), deps);
+
+    expect(client.fetchTestSelection).not.toHaveBeenCalled();
+    const id = process.env.MERGIFY_TEST_RUN_ID!;
+    const state = JSON.parse(readFileSync(stateFilePath(cacheRoot, id), 'utf8'));
+    expect(state.testSelection).toBeUndefined();
+    // The rest of the plugin is untouched by the opt-in: it gates this feature
+    // alone, not the reporting a repository already pays for.
+    expect(client.fetchQuarantine).toHaveBeenCalled();
+  });
+
+  it('asks, and carries the answer to the reporter, when the job opted in', async () => {
+    vi.stubEnv(TEST_SELECTION_ENABLE_ENV, 'true');
+    const client = stubClient({
+      fetchTestSelection: vi.fn().mockResolvedValue({
+        selection: 'subset',
+        reason: 'queue_rerun',
+        tests: ['tests/a.spec.ts > x'],
+      }),
+    });
+    const { deps } = depsWith(client, cacheRoot);
+
+    await runGlobalSetup(fakeConfig('/repo'), deps);
+
+    expect(client.fetchTestSelection).toHaveBeenCalledWith(
+      'queue/main/42',
+      'cafecafe',
+      'CI',
+      'unit'
+    );
+    const id = process.env.MERGIFY_TEST_RUN_ID!;
+    const state = JSON.parse(readFileSync(stateFilePath(cacheRoot, id), 'utf8'));
+    expect(state.testSelection.selection).toBe('subset');
+  });
+
+  it('asks for nothing on a value it cannot read as a yes', async () => {
+    vi.stubEnv(TEST_SELECTION_ENABLE_ENV, 'probably');
+    const client = stubClient();
+    const { deps } = depsWith(client, cacheRoot);
+
+    await runGlobalSetup(fakeConfig('/repo'), deps);
+
+    expect(client.fetchTestSelection).not.toHaveBeenCalled();
   });
 });

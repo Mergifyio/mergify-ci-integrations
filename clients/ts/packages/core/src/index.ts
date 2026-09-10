@@ -25,8 +25,9 @@ export {
   applyToCollected,
   fetchTestSelection,
   formatTestSelectionReport,
-  isTestSelectionDisabled,
+  isTestSelectionEnabled,
   resolveSelectionCoordinates,
+  TEST_SELECTION_ENABLE_ENV,
   toTestSelection,
 } from './test-selection.js';
 // Trace context
