@@ -86,20 +86,45 @@ export function resolveSelectionCoordinates(
   return { branch, headSha, pipelineName, jobName };
 }
 
-/** The kill switch, honoured before any network call is made. */
-export function isTestSelectionDisabled(
-  value = process.env.MERGIFY_TEST_SELECTION_DISABLE
-): boolean {
-  // An EMPTY value is "unset", not "disable". The standard GitHub Actions idiom
-  // for a conditional variable (`${{ cond && 'true' || '' }}`, or a `vars.X`
-  // that resolves to nothing) produces `''` for what the author means as
-  // absent; reading it as "disable" turns the feature off for a whole workflow
-  // with no diagnostic at all. A deliberate divergence from pytest-mergify,
-  // which still has that gap.
-  if (value === undefined || value.length === 0) return false;
-  // Past that, a kill switch must never break a run: a value we cannot parse
-  // reads as an attempt to disable, exactly as pytest-mergify treats it.
-  return envToBool(value, true);
+/**
+ * The environment variable a job sets to ask for test selection.
+ *
+ * Exported so the reporters name it once — an error message that tells a user
+ * to unset a variable spelt differently from the one they set is worse than no
+ * message at all.
+ */
+export const TEST_SELECTION_ENABLE_ENV = 'MERGIFY_TEST_SELECTION_ENABLE';
+
+/**
+ * Whether this job asked for test selection.
+ *
+ * Opt-in, per job, and read before anything else: the feature decides not to
+ * run tests, so it starts only where the customer wrote that it should.
+ * Installing the plugin buys tracing, quarantine and flaky detection; it does
+ * not buy a reduced run.
+ *
+ * A job that has not opted in makes NO request at all, rather than one the
+ * server answers "not opted in". That is deliberate and load bearing on the
+ * server's side: a session's stored selection answer is null exactly when its
+ * job never asked, which is what lets Mergify tell an instrumented repository
+ * that has never opted in from one that has (MRGFY-9172). Asking in order to
+ * be refused would set that column everywhere and erase the distinction.
+ *
+ * Everything unrecognised is off. Unset is off, the empty string is off — the
+ * standard GitHub Actions idiom for a conditional variable
+ * (`${{ cond && 'true' || '' }}`, or a `vars.X` that resolves to nothing)
+ * produces `''` for what the author means as absent — and so is a value we
+ * cannot parse: a mistyped `true` must not start skipping tests. All three
+ * point the same way, towards running the whole suite.
+ *
+ * Trimmed, unlike the other variables this package reads, because this one is
+ * read by pytest-mergify too and `is_env_true` strips there. One `env:` block
+ * at the top of a workflow feeds jobs of both kinds, so a YAML block scalar or
+ * a stray trailing space must not opt the Python job in and leave the
+ * JavaScript ones out, with nothing said on either side.
+ */
+export function isTestSelectionEnabled(value = process.env[TEST_SELECTION_ENABLE_ENV]): boolean {
+  return envToBool(value?.trim(), false);
 }
 
 /**

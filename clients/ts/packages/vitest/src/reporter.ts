@@ -23,10 +23,11 @@ import {
   generateTestRunId,
   getRepoName,
   isInCI,
-  isTestSelectionDisabled,
+  isTestSelectionEnabled,
   resolveBranchFromAttributes,
   resolveSelectionCoordinates,
   startSessionSpan,
+  TEST_SELECTION_ENABLE_ENV,
   toTestSelection,
 } from '@mergifyio/ci-core';
 import type { Reporter, TestCase, TestModule, Vitest } from 'vitest/node';
@@ -38,8 +39,8 @@ import { readPluginVersion } from './version.js';
 const DEFAULT_API_URL = 'https://api.mergify.com';
 
 /**
- * Test selection is OFF here unless explicitly asked for — a Vitest-only
- * default, not the shared kill switch.
+ * Sharding is the hazard this feature still has on Vitest, and opting in is
+ * what a user accepts when they take it on.
  *
  * On a sharded job every shard reports the same `job_name`, so each is served
  * the pooled failing set of all shards. A shard owning none of those tests
@@ -49,20 +50,15 @@ const DEFAULT_API_URL = 'https://api.mergify.com';
  * widening back to a full run; it can, because it sees the whole collection in
  * one process before anything executes. Here the collection is only complete
  * once the workers are done, so prevention is not available and the guard is
- * all that is left.
+ * all that is left. It comes back the day a per-shard identity exists
+ * (MRGFY-8629 and its successors); MRGFY-8906 carries the decision.
  *
- * Off by default rather than removed: the feature is correct and measured on
- * non-sharded runs, and it comes back the day a per-shard identity exists
- * (MRGFY-8629 and its successors). MRGFY-8906 carries the decision.
- *
- * The `false` here is NOT what makes it off by default — `envToBool` returns
- * false for an unset variable regardless. It governs only an unparsable value,
- * and it points the same way as the shared kill switch does with `true`: both
- * resolve garbage towards running the full suite.
+ * Until then this is a documented limitation of the opt-in rather than a
+ * second, Vitest-only switch: `VITEST_MERGIFY_TEST_SELECTION_ENABLE` existed
+ * only to keep the feature off by default, and since MRGFY-9208 every client
+ * is off by default anyway. Two names for one answer is what the ticket sends
+ * us to remove.
  */
-export function isTestSelectionOptedIn(): boolean {
-  return envToBool(process.env.VITEST_MERGIFY_TEST_SELECTION_ENABLE, false);
-}
 
 export class MergifyReporter implements Reporter {
   private vitest: Vitest | undefined;
@@ -200,7 +196,7 @@ export class MergifyReporter implements Reporter {
     const fetch = client.fetchTestSelection?.bind(client);
     // An injected stand-in predating this feature has no such method; that
     // reads as "no selection", i.e. run everything.
-    if (!fetch || isTestSelectionDisabled() || !isTestSelectionOptedIn()) return;
+    if (!fetch || !isTestSelectionEnabled()) return;
 
     // The selection is keyed on the run's OWN identity — the head branch and
     // revision (a merge-queue draft branch on reruns) plus the job coordinates,
@@ -511,7 +507,7 @@ export class MergifyReporter implements Reporter {
           '  Two things cause this:\n' +
           '    - the tests were renamed or moved since the previous attempt, so the served identifiers no longer exist;\n' +
           '    - this is one branch of a matrix job whose branches share a job name, and the failures belong to a sibling branch.\n' +
-          '  To get a full run instead, set MERGIFY_TEST_SELECTION_DISABLE=1.'
+          `  To get a full run instead, unset ${TEST_SELECTION_ENABLE_ENV}.`
       );
       this.session!.status = 'failed';
       process.exitCode = 1;

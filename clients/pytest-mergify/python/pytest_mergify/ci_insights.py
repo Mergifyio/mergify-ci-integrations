@@ -62,6 +62,11 @@ _TEST_SELECTION_REASON = "test.selection.reason"
 # computed from an "executed" count would quietly over-claim on all three.
 _TEST_SELECTION_KEPT_COUNT = "test.selection.kept_count"
 
+# The environment variable a job sets to ask for test selection (MRGFY-9208).
+# The same name across every Mergify test client, so one workflow-level `env:`
+# block reads the same whatever framework the job runs.
+TEST_SELECTION_ENABLE_ENV = "MERGIFY_TEST_SELECTION_ENABLE"
+
 # How the built spans leave the session.
 TraceMode = typing.Literal["capture", "upload", "debug"]
 
@@ -292,7 +297,8 @@ class MergifyCIInsights:
         actually intends to execute. It does two independent things — reports
         the fingerprint with the run's spans, and asks Mergify whether a subset
         of that collection is enough — so a run that never asks (no
-        subscription, no job coordinates, the kill switch) still reports it.
+        subscription, no job coordinates, a job that never opted in) still
+        reports it.
         """
         if self.resource_attributes is None:
             # No resource means no spans and no API client: nothing to report
@@ -335,13 +341,14 @@ class MergifyCIInsights:
         keyed on, and `kept_count` is what survived it.
 
         Nothing is reported unless the server actually answered. A run that
-        never asked -- the kill switch, incomplete job coordinates, an xdist
-        worker -- and a run whose question went unanswered -- no subscription,
-        or a fetch that errored -- both degrade to a full run locally, and
-        neither was offered a reduction. That absence is the honest signal:
-        recording a `full` answer for them would make a repository outside the
-        pilot, and an API that was down, indistinguishable from a run Mergify
-        looked at and chose not to reduce -- in every count taken afterwards.
+        never asked -- a job that never opted in, incomplete job coordinates,
+        an xdist worker -- and a run whose question went unanswered -- no
+        subscription, or a fetch that errored -- both degrade to a full run
+        locally, and neither was offered a reduction. That absence is the
+        honest signal: recording a `full` answer for them would make a
+        repository outside the pilot, and an API that was down,
+        indistinguishable from a run Mergify looked at and chose not to reduce
+        -- in every count taken afterwards.
         """
         if (
             self.resource_attributes is None
@@ -355,16 +362,26 @@ class MergifyCIInsights:
         self.resource_attributes[_TEST_SELECTION_KEPT_COUNT] = kept_count
 
     def _load_test_selection(self, collection_fingerprint: str) -> None:
-        try:
-            disabled = utils.strtobool(
-                os.environ.get("MERGIFY_TEST_SELECTION_DISABLE", "false")
-            )
-        except ValueError:
-            # A kill switch must never crash pytest startup: any value we
-            # cannot parse reads as an attempt to disable.
-            disabled = True
+        # Opt-in, per job, and read before anything else: this feature decides
+        # not to run tests, so it starts only where the customer wrote that it
+        # should. Installing the plugin buys tracing, quarantine and flaky
+        # detection; it does not buy a reduced run.
+        #
+        # A job that has not opted in asks NOTHING, rather than asking to be
+        # told it is not opted in. That is load bearing on the server's side: a
+        # session's stored selection answer is null exactly when its job never
+        # asked, which is what lets Mergify tell an instrumented repository
+        # that has never opted in from one that has (MRGFY-9172). Asking in
+        # order to be refused would fill that column everywhere and erase the
+        # distinction.
+        #
+        # `is_env_true` reads anything unrecognised as off -- unset, empty,
+        # and a mistyped `true` alike -- which is the direction that runs the
+        # whole suite.
+        if not utils.is_env_true(TEST_SELECTION_ENABLE_ENV):
+            return
 
-        if self.api_client is None or self.resource_attributes is None or disabled:
+        if self.api_client is None or self.resource_attributes is None:
             return
 
         # The selection is keyed on the run's OWN identity: the head branch

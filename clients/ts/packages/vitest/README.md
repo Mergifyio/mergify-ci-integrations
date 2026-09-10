@@ -39,7 +39,19 @@ a bisection step — Mergify already knows which tests failed on the previous
 attempt. The reporter asks for that list and the bundled runner skips every
 other test, so the rerun replays only what actually gated.
 
-It needs no configuration and only ever removes work:
+**It is off until you turn it on, per job**: set
+`MERGIFY_TEST_SELECTION_ENABLE=true` on the job you want reduced. Installing
+the reporter is not enough — a feature that decides not to run tests starts
+only where you wrote that it should. Anything that is not a recognised yes
+(unset, empty, `false`, unparsable) means no, and a job that has not opted in
+never queries the endpoint.
+
+**Do not opt in a sharded job.** Every shard reports under the same job name,
+so each is served the failing tests of all the shards; a shard that owns none
+of them matches nothing and the run fails deliberately (see the last bullet
+below). Sharded Vitest jobs get their own identity in a later release.
+
+Once opted in, it only ever removes work:
 
 - any error, timeout, or unrecognised answer runs the full suite;
 - the served subset is matched against the tests Vitest actually collected, and
@@ -52,8 +64,6 @@ It needs no configuration and only ever removes work:
   since the previous attempt, say), the run **fails** rather than turn green
   having executed nothing.
 
-Set `MERGIFY_TEST_SELECTION_DISABLE=1` to always run the full suite.
-
 ### Environment variables
 
 | Variable | Description | Default |
@@ -62,7 +72,7 @@ Set `MERGIFY_TEST_SELECTION_DISABLE=1` to always run the full suite.
 | `MERGIFY_API_URL` | Mergify API endpoint | `https://api.mergify.com` |
 | `VITEST_MERGIFY_ENABLE` | Force-enable outside CI | `false` |
 | `MERGIFY_CI_DEBUG` | Print spans to console instead of uploading | `false` |
-| `MERGIFY_TEST_SELECTION_DISABLE` | Never reduce a merge-queue rerun | `false` |
+| `MERGIFY_TEST_SELECTION_ENABLE` | Let Mergify reduce a merge-queue rerun of this job | `false` |
 | `MERGIFY_TRACEPARENT` | W3C distributed trace context | — |
 
 For detailed documentation, see the [official guide](https://docs.mergify.com/ci-insights/test-frameworks/vitest/).

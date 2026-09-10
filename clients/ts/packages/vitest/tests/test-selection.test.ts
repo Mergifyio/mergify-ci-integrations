@@ -1,10 +1,15 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { InMemorySpanSink } from '@mergifyio/ci-core';
+import type { MergifyApiClient } from '@mergifyio/ci-core';
+import {
+  InMemorySpanSink,
+  isTestSelectionEnabled,
+  TEST_SELECTION_ENABLE_ENV,
+} from '@mergifyio/ci-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { startVitest } from 'vitest/node';
-import { isTestSelectionOptedIn, MergifyReporter } from '../src/reporter.js';
+import { MergifyReporter } from '../src/reporter.js';
 
 const fixturesDir = resolve(import.meta.dirname, 'fixtures');
 
@@ -169,37 +174,113 @@ describe('test selection', () => {
   });
 });
 
+/**
+ * A stand-in for the bundled client, so the gate can be watched at the seam it
+ * guards. Injected rather than mocked at module level: what has to be pinned is
+ * that the reporter never *calls*, and only a client it actually holds can tell
+ * the difference between "did not call" and "had nobody to call".
+ */
+function stubApiClient(): MergifyApiClient {
+  return {
+    fetchQuarantine: vi.fn().mockResolvedValue(null),
+    fetchFlakyContext: vi.fn().mockResolvedValue(null),
+    fetchTestSelection: vi.fn().mockResolvedValue(null),
+    uploadTrace: vi.fn().mockResolvedValue(undefined),
+  };
+}
+
+async function runWith(apiClient: MergifyApiClient): Promise<void> {
+  const reporter = new MergifyReporter({ sink: new InMemorySpanSink(), apiClient });
+  const vitest = await startVitest('test', [], {
+    root: fixturesDir,
+    include: ['selection.test.ts'],
+    reporters: [reporter],
+    watch: false,
+  });
+  await vitest?.close();
+}
+
 describe('the opt-in gate', () => {
-  // `_initTestSelection` itself has no coverage — nothing in this package
-  // injects an `apiClient`, and every test above bypasses the fetch through the
-  // `testSelection` option. That gap predates this gate and is not closed here;
-  // what is pinned is the decision the gate encodes.
-  const VAR = 'VITEST_MERGIFY_TEST_SELECTION_ENABLE';
+  beforeEach(() => {
+    markerDir = mkdtempSync(join(tmpdir(), 'mergify-selection-'));
+    markerFile = join(markerDir, 'executed.txt');
+    vi.stubEnv('MERGIFY_SELECTION_MARKER', markerFile);
+    // A CI whose job coordinates are complete: without all four there is
+    // nothing to ask, and every assertion below would pass for that reason
+    // instead of for the gate.
+    //
+    // `GITHUB_EVENT_NAME` comes first because it decides where the rest is
+    // read from: on a `pull_request` event the core takes the head revision
+    // from the event payload rather than from GITHUB_SHA, which there is the
+    // merge commit (`crates/mergify-ci-core/src/providers/github_actions.rs`).
+    // This suite runs inside such a job on our own CI, so without this line
+    // the stubbed SHA below is ignored and the real one arrives instead —
+    // green locally, red in CI.
+    vi.stubEnv('GITHUB_EVENT_NAME', 'push');
+    vi.stubEnv('GITHUB_ACTIONS', 'true');
+    vi.stubEnv('GITHUB_REPOSITORY', 'test-owner/test-repo');
+    vi.stubEnv('GITHUB_HEAD_REF', '');
+    vi.stubEnv('GITHUB_REF_NAME', 'queue/main/42');
+    vi.stubEnv('GITHUB_SHA', 'cafecafe');
+    vi.stubEnv('GITHUB_WORKFLOW', 'CI');
+    vi.stubEnv('GITHUB_JOB', 'unit');
+  });
 
   afterEach(() => {
-    delete process.env[VAR];
+    vi.unstubAllEnvs();
+    rmSync(markerDir, { recursive: true, force: true });
+    process.exitCode = undefined;
   });
 
-  it('is off when nothing asks for it', () => {
-    delete process.env[VAR];
-    // A contract test, and deliberately not a guard on the fallback argument:
-    // `envToBool` returns false for an unset variable whatever that argument
-    // says, so flipping it to `true` does NOT make this case fail. What it
-    // pins is the behaviour a reader depends on — silence means off, because
-    // on a sharded job the plugin fails a batch that would otherwise merge
-    // (MRGFY-8906). The fallback is pinned by the unparsable case below.
-    expect(isTestSelectionOptedIn()).toBe(false);
+  it('asks for nothing when the job did not opt in', async () => {
+    // The property MRGFY-9172 rests on: a job that never opted in leaves no
+    // selection answer on its session, which is how Mergify tells a repository
+    // that has not asked from one that has. Asking in order to be told "not
+    // opted in" would answer that question everywhere and erase it.
+    const apiClient = stubApiClient();
+
+    await runWith(apiClient);
+
+    expect(apiClient.fetchTestSelection).not.toHaveBeenCalled();
+    // The opt-in gates this feature alone, not the reporting a repository
+    // already pays for.
+    expect(apiClient.fetchQuarantine).toHaveBeenCalled();
   });
 
-  it('is on only when explicitly enabled', () => {
-    process.env[VAR] = '1';
-    expect(isTestSelectionOptedIn()).toBe(true);
+  it("asks, with the run's own coordinates, when the job opted in", async () => {
+    vi.stubEnv(TEST_SELECTION_ENABLE_ENV, 'true');
+    const apiClient = stubApiClient();
+
+    await runWith(apiClient);
+
+    expect(apiClient.fetchTestSelection).toHaveBeenCalledWith(
+      'queue/main/42',
+      'cafecafe',
+      'CI',
+      'unit'
+    );
   });
 
-  it('treats an unparsable value as off, never as on', () => {
-    // Opposite of the shared kill switch, which reads garbage as "disable".
-    // Both resolve the same way — towards running the full suite.
-    process.env[VAR] = 'perhaps';
-    expect(isTestSelectionOptedIn()).toBe(false);
+  it.each([
+    'false',
+    '',
+    'perhaps',
+    ' ',
+  ])('asks for nothing on %j, which is not a yes', async (value) => {
+    vi.stubEnv(TEST_SELECTION_ENABLE_ENV, value);
+    const apiClient = stubApiClient();
+
+    await runWith(apiClient);
+
+    expect(apiClient.fetchTestSelection).not.toHaveBeenCalled();
+  });
+
+  it('is on for a yes a workflow author would plausibly write', () => {
+    // Kept as a unit assertion next to the ones above: the values themselves
+    // are the core's business, and driving a whole Vitest run per spelling
+    // would buy nothing.
+    for (const yes of ['1', 'true', 'yes', 'on', 'TRUE', ' true ']) {
+      expect(isTestSelectionEnabled(yes)).toBe(true);
+    }
   });
 });
