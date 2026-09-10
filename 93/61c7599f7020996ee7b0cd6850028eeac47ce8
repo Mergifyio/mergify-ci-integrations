@@ -1,0 +1,1 @@
+CI rouge: codespell rejetait le mot mal orthographié servant d'exemple, et deux tests stubaient GITHUB_SHA alors que le core lit le SHA depuis le payload de l'événement sur un pull_request — vert en local, rouge en CI. Exemple reformulé, GITHUB_EVENT_NAME neutralisé dans les deux suites.
