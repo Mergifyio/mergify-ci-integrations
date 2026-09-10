@@ -105,12 +105,12 @@ jobs:
       contents: read
     uses: ./.github/workflows/build-ts-native.yml
 
-  create-draft:
+  pack-packages:
     if: github.event_name == 'workflow_dispatch'
     needs: [resolve-tag, build-native-draft]
     runs-on: ubuntu-latest
     permissions:
-      contents: write # create the draft release
+      contents: read # checkout only; create-draft is what needs write
     defaults:
       run:
         working-directory: clients/ts
@@ -170,6 +170,85 @@ jobs:
           for dir in packages/native/npm/*/; do
             npm pack "./${dir}" --pack-destination "${GITHUB_WORKSPACE}/dist"
           done
+      # Everything below inspects the tarballs that were just packed -- the
+      # ones the publish stage will upload, since it no longer rebuilds. A pack
+      # exits 0 on a package with no LICENSE, no binary, or a manifest naming a
+      # file no build emits, so nothing else here has an opinion on any of that.
+      - name: Check the packed contents
+        working-directory: ${{ github.workspace }}
+        env:
+          TAG: ${{ needs.resolve-tag.outputs.tag }}
+        run: node .github/scripts/check-ts-packages.mjs dist "${TAG#ts-v}"
+      # publint and attw judge the manifest rather than the file list: exports
+      # maps, main/module/types agreement, and whether the declarations resolve
+      # under each TypeScript module-resolution mode.
+      #
+      # Both are workspace devDependencies rather than fetched per run, so the
+      # lockfile pins them and renovate can see them. `pnpm dlx` would pin the
+      # version just as exactly, but only inside this file, where nothing
+      # updates it -- and a release is the last place to discover a tool has
+      # gone stale. Runs from clients/ts, where the install lives.
+      - name: Check the publishing metadata
+        run: |
+          for tgz in "${GITHUB_WORKSPACE}"/dist/*.tgz; do
+            echo "::group::${tgz##*/}"
+            pnpm exec publint "${tgz}"
+            pnpm exec attw --pack "${tgz}"
+            echo "::endgroup::"
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ts-packages
+          path: dist/*.tgz
+          if-no-files-found: error
+
+  # Install the packed packages the way a user would and prove they load. Only
+  # the three natively executable targets run here: the four cross-compiled ones
+  # (both musl archs, linux arm64, and the intel mac) need a container, QEMU, or
+  # a different runner image, and are not covered.
+  check-install:
+    if: github.event_name == 'workflow_dispatch'
+    needs: [resolve-tag, pack-packages]
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # For a node to run the check with; nothing is installed from the
+      # workspace, and the consumer project the script builds uses npm, since
+      # that is what most consumers will.
+      - uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
+        with:
+          working-directory: clients/ts
+          runtime: node
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ts-packages
+          path: dist
+      - name: Install and load the packed packages
+        shell: bash
+        env:
+          TAG: ${{ needs.resolve-tag.outputs.tag }}
+        run: node .github/scripts/check-ts-install.mjs dist "${TAG#ts-v}"
+
+  create-draft:
+    if: github.event_name == 'workflow_dispatch'
+    needs: [resolve-tag, pack-packages, check-install]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the draft release
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ts-packages
+          path: dist
+      # Reached only once every check above has passed, so a draft release --
+      # and the tag that publishing it would create -- never exists for a set of
+      # tarballs that failed inspection.
       - name: Create the draft release with the tarballs attached
         env:
           GH_TOKEN: ${{ github.token }}
@@ -183,7 +262,7 @@ jobs:
             --draft \
             --title "ts clients ${TAG#ts-v}" \
             --generate-notes \
-            "${GITHUB_WORKSPACE}"/dist/*.tgz
+            dist/*.tgz
 
   # ---------------- Step 2: publish (release: published) ----------------
   publish:
@@ -231,6 +310,13 @@ jobs:
           REPO: ${{ github.repository }}
           TAG: ${{ github.event.release.tag_name }}
         run: gh release download "${TAG}" --repo "${REPO}" --pattern '*.tgz' --dir dist
+      # The draft stage checked these, but release assets are mutable where a
+      # tag is not, so the same assertions run again on what actually came back.
+      # Seconds, and it closes the only window between review and upload.
+      - name: Check the downloaded contents
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: node .github/scripts/check-ts-packages.mjs dist "${TAG#ts-v}"
       - name: Publish to npm
         env:
           TAG: ${{ github.event.release.tag_name }}
