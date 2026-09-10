@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "clients/pytest-mergify", "clients/ts/packages/native"]
+members = [
+    "crates/*",
+    "clients/pytest-mergify",
+    "clients/rspec-mergify/ext/mergify_ci",
+    "clients/ts/packages/native",
+]
 
 [workspace.package]
 edition = "2024"

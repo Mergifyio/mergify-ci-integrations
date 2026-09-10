@@ -25,6 +25,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The workspace now contains the gem's magnus binding, and rb-sys reads a
+      # real Ruby's headers to generate its bindings. Pin one rather than lean
+      # on whatever the runner image happens to ship.
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          # setup-ruby resolves .ruby-version relative to working-directory,
+          # and has no input for naming the file directly.
+          working-directory: clients/rspec-mergify
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
@@ -253,7 +261,14 @@ jobs:
           ruby-version: ${{ matrix.ruby }}
           bundler-cache: true
           working-directory: clients/rspec-mergify
-      - run: bundle exec rspec
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # `rake spec` compiles the extension first. `bundle install` does not
+      # build it for a path gem, and the loader fails open, so running rspec
+      # directly would silently skip every binding example.
+      - run: bundle exec rake spec
 
   rspec-rubocop:
     name: rspec-mergify rubocop
