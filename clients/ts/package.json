@@ -1,5 +1,5 @@
 {
-  "name": "mergify-ci-plugins-ts",
+  "name": "mergify-ci-ts",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@12.3.4",
