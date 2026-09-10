@@ -5,7 +5,7 @@ import _pytest.pytester
 import pytest
 
 import pytest_mergify
-from pytest_mergify import test_selection
+from pytest_mergify import ci_insights, test_selection
 from tests import conftest
 
 
@@ -236,6 +236,11 @@ def _run_with_selection(
     monkeypatch.setenv("GITHUB_SHA", "cafecafe")
     monkeypatch.setenv("GITHUB_WORKFLOW", "CI")
     monkeypatch.setenv("GITHUB_JOB", "unit")
+    # The opt-in this job would have written in its workflow. Set here rather
+    # than per test so what each test below reads is the behaviour it is about;
+    # `setenv={...: None}` takes it back for the tests that are about the gate
+    # itself.
+    monkeypatch.setenv(ci_insights.TEST_SELECTION_ENABLE_ENV, "true")
     for key, value in (setenv or {}).items():
         if value is None:
             monkeypatch.delenv(key, raising=False)
@@ -322,14 +327,15 @@ def test_the_fingerprint_is_reported_even_when_nothing_is_asked(
     pytester: _pytest.pytester.Pytester,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The kill switch stops the request, not the reporting: the two are
-    # independent, and a run whose selection was disabled still has to leave the
-    # engine able to answer for the run after it.
+    # The opt-in gates the request, not the reporting: the two are independent,
+    # and a run whose job never asked for a selection still has to leave the
+    # engine able to answer for the run after it -- including the run where the
+    # customer finally opts in.
     result, plugin, calls = _run_with_selection(
         pytester,
         monkeypatch,
         _TWO_TESTS,
-        setenv={"MERGIFY_TEST_SELECTION_DISABLE": "true"},
+        setenv={ci_insights.TEST_SELECTION_ENABLE_ENV: None},
     )
 
     result.assert_outcomes(passed=2)
@@ -338,6 +344,55 @@ def test_the_fingerprint_is_reported_even_when_nothing_is_asked(
     resource = plugin.mergify_ci.resource_attributes
     assert resource is not None
     assert "test.collection.fingerprint" in resource
+
+
+@pytest.mark.parametrize("value", ["false", "0", "off", "", "probably"])
+def test_only_an_explicit_yes_asks_for_a_selection(
+    pytester: _pytest.pytester.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    # Everything that is not a yes leaves the run alone, including the two
+    # shapes a workflow produces by accident: the empty string, which is what
+    # `${{ cond && 'true' || '' }}` and an unset `vars.X` come to, and a value
+    # nobody can parse. Both mean the customer did not say yes, and this
+    # feature does not skip tests on a maybe.
+    result, plugin, calls = _run_with_selection(
+        pytester,
+        monkeypatch,
+        _TWO_TESTS,
+        setenv={ci_insights.TEST_SELECTION_ENABLE_ENV: value},
+        served={
+            "selection": "subset",
+            "reason": "queue_rerun",
+            "tests": ["test_only_an_explicit_yes_asks_for_a_selection.py::test_kept"],
+        },
+    )
+
+    result.assert_outcomes(passed=2)
+    assert calls == []
+    assert plugin.mergify_ci.test_selection is None
+
+
+@pytest.mark.parametrize("value", ["true", " true ", "TRUE", "1", "yes", "on"])
+def test_a_yes_asks_for_a_selection_whatever_its_spelling(
+    pytester: _pytest.pytester.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    # Surrounding whitespace included: a workflow-level `env:` block feeds jobs
+    # of every framework, and a YAML block scalar or a stray trailing space
+    # must not opt this job in while leaving the JavaScript ones out. The
+    # TypeScript clients trim for the same reason.
+    _, _, calls = _run_with_selection(
+        pytester,
+        monkeypatch,
+        _TWO_TESTS,
+        setenv={ci_insights.TEST_SELECTION_ENABLE_ENV: value},
+        served={"selection": "full", "reason": "no_predecessor", "tests": []},
+    )
+
+    assert len(calls) == 1
 
 
 def test_incomplete_job_coordinates_ask_for_nothing(
@@ -488,6 +543,7 @@ def test_an_empty_selection_still_uploads_its_session(
     monkeypatch.setenv("GITHUB_SHA", "cafecafe")
     monkeypatch.setenv("GITHUB_WORKFLOW", "CI")
     monkeypatch.setenv("GITHUB_JOB", "unit")
+    monkeypatch.setenv(ci_insights.TEST_SELECTION_ENABLE_ENV, "true")
     otlp_collector.serve_test_selection(
         {"selection": "empty", "reason": "predecessor_job_succeeded"}
     )
@@ -595,6 +651,7 @@ def test_a_refused_run_uploads_a_session_marked_failed(
     monkeypatch.setenv("GITHUB_SHA", "cafecafe")
     monkeypatch.setenv("GITHUB_WORKFLOW", "CI")
     monkeypatch.setenv("GITHUB_JOB", "unit")
+    monkeypatch.setenv(ci_insights.TEST_SELECTION_ENABLE_ENV, "true")
     otlp_collector.serve_test_selection(
         {
             "selection": "refused",
@@ -765,17 +822,20 @@ def test_a_run_that_asks_for_nothing_reports_no_selection(
     pytester: _pytest.pytester.Pytester,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The kill switch: the run never asks, so it has nothing to say about an
-    # answer. The two runs that ask and are answered with nothing -- no
+    # A job that never opted in: the run never asks, so it has nothing to say
+    # about an answer. The two runs that ask and are answered with nothing -- no
     # subscription, a failed request -- reach the same silence by a different
     # route and are pinned separately below; all three would otherwise fill the
     # reporting with runs the feature never touched. The collection they hold is
     # still theirs to report.
+    #
+    # The server is standing by with an answer here on purpose: what makes this
+    # run silent is the missing opt-in, not a server with nothing to say.
     _, plugin, calls = _run_with_selection(
         pytester,
         monkeypatch,
         _TWO_TESTS,
-        setenv={"MERGIFY_TEST_SELECTION_DISABLE": "true"},
+        setenv={ci_insights.TEST_SELECTION_ENABLE_ENV: None},
         served={"selection": "full", "reason": "no_predecessor", "tests": []},
     )
 
@@ -803,6 +863,7 @@ def test_an_empty_selection_uploads_a_session_saying_it_ran_none_of_them(
     monkeypatch.setenv("GITHUB_SHA", "cafecafe")
     monkeypatch.setenv("GITHUB_WORKFLOW", "CI")
     monkeypatch.setenv("GITHUB_JOB", "unit")
+    monkeypatch.setenv(ci_insights.TEST_SELECTION_ENABLE_ENV, "true")
     otlp_collector.serve_test_selection(
         {"selection": "empty", "reason": "predecessor_job_succeeded"}
     )

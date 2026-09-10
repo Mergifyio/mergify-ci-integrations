@@ -10,7 +10,7 @@ import {
   generateTestRunId,
   getRepoName,
   isInCI,
-  isTestSelectionDisabled,
+  isTestSelectionEnabled,
   type MergifyApiClient,
   resolveBranchFromAttributes,
   resolveSelectionCoordinates,
@@ -131,10 +131,10 @@ export async function runGlobalSetup(config: FullConfig, deps: RunGlobalSetupDep
 /**
  * The test selection for this run, or undefined when nothing was served.
  *
- * Undefined covers three cases the reporter treats alike, by staying silent:
- * the user kill switch, a run whose own identity is incomplete (a missing head
- * SHA, pipeline, or job name — a request keyed on a partial identity could only
- * match the wrong run), and a dormant repository. All three mean the full
+ * Undefined covers three cases the reporter treats alike, by staying silent: a
+ * job that never opted in, a run whose own identity is incomplete (a missing
+ * head SHA, pipeline, or job name — a request keyed on a partial identity could
+ * only match the wrong run), and a dormant repository. All three mean the full
  * suite, which is also what a failure degrades to — but a failure comes back as
  * a real value so the end-of-run report can say so.
  */
@@ -143,7 +143,7 @@ async function loadTestSelection(
   attrs: SpanAttributes,
   log: (msg: string) => void
 ): Promise<TestSelection | undefined> {
-  if (isTestSelectionDisabled()) return undefined;
+  if (!isTestSelectionEnabled()) return undefined;
   const coordinates = resolveSelectionCoordinates(attrs);
   if (!coordinates) return undefined;
   const selection = await fetchTestSelection(client, coordinates, log);

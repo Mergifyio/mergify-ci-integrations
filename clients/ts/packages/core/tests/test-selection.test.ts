@@ -3,8 +3,9 @@ import {
   applyToCollected,
   fetchTestSelection,
   formatTestSelectionReport,
-  isTestSelectionDisabled,
+  isTestSelectionEnabled,
   resolveSelectionCoordinates,
+  TEST_SELECTION_ENABLE_ENV,
   type TestSelection,
   type TestSelectionClient,
 } from '../src/test-selection.js';
@@ -146,41 +147,44 @@ describe('resolveSelectionCoordinates', () => {
   });
 });
 
-describe('isTestSelectionDisabled', () => {
-  it('is off by default', () => {
-    vi.stubEnv('MERGIFY_TEST_SELECTION_DISABLE', undefined);
-    expect(isTestSelectionDisabled()).toBe(false);
+describe('isTestSelectionEnabled', () => {
+  it('is off until a job asks for it', () => {
+    vi.stubEnv('MERGIFY_TEST_SELECTION_ENABLE', undefined);
+    expect(isTestSelectionEnabled()).toBe(false);
     vi.unstubAllEnvs();
   });
 
-  it.each(['1', 'true', 'yes'])('is on for %s', (value) => {
-    vi.stubEnv('MERGIFY_TEST_SELECTION_DISABLE', value);
-    expect(isTestSelectionDisabled()).toBe(true);
+  it.each(['1', 'true', 'yes', 'on', 'TRUE', ' true '])('is on for %j', (value) => {
+    vi.stubEnv('MERGIFY_TEST_SELECTION_ENABLE', value);
+    expect(isTestSelectionEnabled()).toBe(true);
     vi.unstubAllEnvs();
   });
 
-  it('disables on an unparsable value rather than crashing the run', () => {
-    vi.stubEnv('MERGIFY_TEST_SELECTION_DISABLE', 'maybe');
-    expect(isTestSelectionDisabled()).toBe(true);
+  it('reads the variable named by TEST_SELECTION_ENABLE_ENV', () => {
+    // The reporters print that constant at users; a message naming a variable
+    // this function does not read would send them to fix the wrong line.
+    vi.stubEnv(TEST_SELECTION_ENABLE_ENV, 'true');
+    expect(isTestSelectionEnabled()).toBe(true);
     vi.unstubAllEnvs();
   });
-});
 
-describe('isTestSelectionDisabled', () => {
-  it('is enabled when the kill switch is unset', () => {
-    expect(isTestSelectionDisabled(undefined)).toBe(false);
+  it.each(['false', '0', 'no', 'off'])('stays off on %s', (value) => {
+    expect(isTestSelectionEnabled(value)).toBe(false);
   });
 
-  it.each(['true', '1', 'yes', 'on'])('is disabled by %s', (value) => {
-    expect(isTestSelectionDisabled(value)).toBe(true);
+  it('stays off on whitespace alone', () => {
+    // The trim that makes ` true ` a yes must not make a blank value one.
+    expect(isTestSelectionEnabled('  ')).toBe(false);
   });
 
-  it.each(['false', '0', 'no', 'off'])('stays enabled on %s', (value) => {
-    expect(isTestSelectionDisabled(value)).toBe(false);
+  it('stays off on the empty string', () => {
+    // `${{ cond && 'true' || '' }}` and a `vars.X` that resolves to nothing
+    // both produce this for what the author means as "not set".
+    expect(isTestSelectionEnabled('')).toBe(false);
   });
 
-  it('reads an unparsable value as an attempt to disable', () => {
-    expect(isTestSelectionDisabled('maybe')).toBe(true);
+  it('stays off on an unparsable value rather than start skipping tests', () => {
+    expect(isTestSelectionEnabled('maybe')).toBe(false);
   });
 });
 
