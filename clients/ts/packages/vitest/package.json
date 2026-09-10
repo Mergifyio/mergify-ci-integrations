@@ -29,6 +29,14 @@
       }
     }
   },
+  "sideEffects": false,
+  "typesVersions": {
+    "*": {
+      "runner": [
+        "./dist/runner.d.cts"
+      ]
+    }
+  },
   "files": [
     "dist"
   ],
