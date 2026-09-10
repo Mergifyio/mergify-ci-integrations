@@ -104,9 +104,78 @@ jobs:
     with:
       tag: ${{ needs.resolve-tag.outputs.tag }}
 
-  create-draft:
+  # Everything below inspects the distributions build-draft produced -- the ones
+  # the publish stage uploads, since it no longer rebuilds. A maturin build
+  # exits 0 whether or not the compiled extension ended up in the wheel and
+  # whether or not the pytest11 entry point still names something importable,
+  # and a wheel missing that entry point installs perfectly and then does
+  # nothing at all, for every user, silently.
+  check-packages:
     if: github.event_name == 'workflow_dispatch'
     needs: [resolve-tag, build-draft]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: dist
+          pattern: wheels-*
+          merge-multiple: true
+      - name: Check the built contents
+        env:
+          TAG: ${{ needs.resolve-tag.outputs.tag }}
+        run: python3 .github/scripts/check-pytest-packages.py dist "${TAG#pytest-mergify-v}"
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      # abi3audit proves the abi3 wheels really are abi3 -- that the extension
+      # uses no CPython API outside the stable ABI it claims. Nothing else would
+      # catch a violation until a user on a different CPython hit a missing
+      # symbol, since the wheels are only ever built and tested on one.
+      #
+      # `twine check` was here and was removed: its single hard assertion is
+      # that long_description renders, which only ever fails for RST, and this
+      # project's readme is markdown. Deliberately mangled markdown passes it;
+      # a missing description only warns. The assertions worth having moved
+      # into check-pytest-packages.py, where they fail.
+      #
+      # `--only-group check` installs abi3audit without building the project,
+      # so linting a finished wheel does not pay for a maturin compile.
+      - name: Check the wheels are really abi3
+        working-directory: clients/pytest-mergify
+        run: |
+          uv sync --frozen --only-group check
+          uv run --frozen --no-sync abi3audit --strict "${GITHUB_WORKSPACE}"/dist/*.whl
+
+  # Install the wheel the way a user would and prove it works. Only the three
+  # natively executable platforms run here; the musl and linux-arm64 wheels
+  # would need a container or QEMU and are not covered.
+  check-install:
+    if: github.event_name == 'workflow_dispatch'
+    needs: [resolve-tag, build-draft]
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: dist
+          pattern: wheels-*
+          merge-multiple: true
+      - name: Install and exercise the wheel
+        shell: bash
+        env:
+          TAG: ${{ needs.resolve-tag.outputs.tag }}
+        run: python3 .github/scripts/check-pytest-install.py dist "${TAG#pytest-mergify-v}"
+
+  create-draft:
+    if: github.event_name == 'workflow_dispatch'
+    needs: [resolve-tag, build-draft, check-packages, check-install]
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the draft release
@@ -146,6 +215,9 @@ jobs:
       # The draft attached these; rebuilding them here would have produced a
       # second set of wheels from a floating maturin/Rust toolchain, published
       # under a version number that promises they are the reviewed ones.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
       - name: Download the distributions the draft built
         env:
           GH_TOKEN: ${{ github.token }}
@@ -154,28 +226,12 @@ jobs:
         run: |
           gh release download "${TAG}" --repo "${REPO}" --dir dist \
             --pattern '*.whl' --pattern '*.tar.gz'
-
-          # Release assets are mutable in a way the tag is not, so the file
-          # names are checked against the version the tag names before any of
-          # them is uploaded. PyPI encodes the version in the file name, so
-          # this needs no unpacking.
-          version="${TAG#pytest-mergify-v}"
-          shopt -s nullglob
-          files=(dist/*)
-          if [ "${#files[@]}" -eq 0 ]; then
-            echo "::error::${TAG} has no distributions attached"
-            exit 1
-          fi
-          for f in "${files[@]}"; do
-            case "${f##*/}" in
-              "pytest_mergify-${version}-"*.whl | "pytest_mergify-${version}.tar.gz") ;;
-              *)
-                echo "::error::${f##*/} does not belong to ${version}"
-                exit 1
-                ;;
-            esac
-          done
-          echo "verified ${#files[@]} distributions for ${version}"
+      # The draft stage checked these, but release assets are mutable where a
+      # tag is not, so the same assertions run again on what actually came back.
+      - name: Check the downloaded contents
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: python3 .github/scripts/check-pytest-packages.py dist "${TAG#pytest-mergify-v}"
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           packages-dir: dist

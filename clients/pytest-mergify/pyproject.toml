@@ -31,6 +31,13 @@ dev = [
     "pytest-xdist>=3.0",
 ]
 
+# Kept out of `dev` so the release can install it with `--only-group check`,
+# which skips building the project -- these inspect finished wheels and have no
+# use for the extension module.
+check = [
+    "abi3audit>=0.0.17",
+]
+
 # Compiled build (maturin): the wheel now bundles the Rust binding as
 # `pytest_mergify._mergify_ci` (abi3-py38 -- one wheel per platform works across
 # all CPython 3.8+). The static `version` above is a placeholder: the release
