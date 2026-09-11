@@ -118,8 +118,11 @@ def test_with_token_gha(
     result = pytester.runpytest_subprocess()
     result.assert_outcomes(passed=1)
     for line in result.stdout.lines:
-        if line.startswith("MERGIFY_TEST_RUN_ID="):
-            _, test_run_id = line.split("=", 2)
+        if line.startswith("Test run ID: "):
+            # The id is what support asks for, so the line says so and reads
+            # as a sentence rather than as an environment variable (MRGFY-8978).
+            test_run_id, tail = line[len("Test run ID: ") :].split(" ", 1)
+            assert tail == "(use it when contacting Mergify support)"
             assert len(test_run_id) == 16
             assert len(bytes.fromhex(test_run_id)) == 8
             break
@@ -197,10 +200,7 @@ def test_errors_logs(
         line.startswith("Error while exporting traces: trace upload failed")
         for line in result.stdout.lines
     )
-    assert not any(
-        line.startswith("::notice title=Mergify CI::MERGIFY_TEST_RUN_ID=")
-        for line in result.stdout.lines
-    )
+    assert not any(line.startswith("Test run ID: ") for line in result.stdout.lines)
 
 
 @pytest.mark.parametrize("http_server", [403], indirect=True)
@@ -230,7 +230,4 @@ def test_errors_logs_403(
         line.startswith("Error while exporting traces: trace upload failed (HTTP 403)")
         for line in result.stdout.lines
     )
-    assert not any(
-        line.startswith("::notice title=Mergify CI::MERGIFY_TEST_RUN_ID=")
-        for line in result.stdout.lines
-    )
+    assert not any(line.startswith("Test run ID: ") for line in result.stdout.lines)

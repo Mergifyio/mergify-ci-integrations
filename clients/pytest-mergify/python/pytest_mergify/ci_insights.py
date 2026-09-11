@@ -409,10 +409,9 @@ class MergifyCIInsights:
                 collection_fingerprint,
             )
         except RuntimeError as exception:
-            init_error_msg = (
-                "Error when querying Mergify's API, the full test suite will "
-                f"run. Error: {str(exception)}"
-            )
+            # The bare error: the terminal block wraps it in its own sentence
+            # about what the failure meant for this run (`report`).
+            init_error_msg = str(exception)
             fetched = None
 
         if fetched is None:
