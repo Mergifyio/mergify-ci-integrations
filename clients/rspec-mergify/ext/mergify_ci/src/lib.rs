@@ -11,9 +11,10 @@
 use std::collections::BTreeMap;
 use std::ffi::c_void;
 
-use magnus::{Error, ExceptionClass, RHash, Ruby, function, method, prelude::*};
+use magnus::{Error, ExceptionClass, RArray, RHash, Ruby, function, method, prelude::*};
 use mergify_ci_api::{
-    ApiConfig, Client, ClientInfo, FlakyDetectionContext, Mode, Outcome, budget,
+    ApiConfig, AttrValue as ApiAttrValue, Client, ClientInfo, FlakyDetectionContext, Mode, Outcome,
+    SpanData, SpanStatus, budget,
 };
 use mergify_ci_core::{AttrValue, CiContext};
 
@@ -68,6 +69,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     client.define_singleton_method("new", function!(ApiClient::new, 5))?;
     client.define_method("fetch_quarantine", method!(ApiClient::fetch_quarantine, 1))?;
     client.define_method("fetch_flaky_context", method!(ApiClient::fetch_flaky_context, 0))?;
+    client.define_method("upload_trace", method!(ApiClient::upload_trace, 2))?;
 
     let budget = native.define_module("Budget")?;
     budget.define_singleton_method("should_run", function!(should_run, 2))?;
@@ -129,6 +131,29 @@ impl ApiClient {
             Outcome::Dormant => Ok(None),
             Outcome::Failed(message) => Err(api_error(ruby, message)),
         }
+    }
+
+    /// Send a finished trace: the resource attributes every span shares, and
+    /// the spans themselves as Hashes. Fails loud -- unlike a fetch, there is
+    /// no degraded version of "the run was not reported".
+    // Spans arrive as an RArray rather than a Vec: a Vec would have to own its
+    // elements, and these are handles to live Ruby objects the GC still tracks.
+    #[allow(clippy::needless_pass_by_value)]
+    fn upload_trace(
+        ruby: &Ruby,
+        rb_self: &Self,
+        resource_attributes: RHash,
+        spans: RArray,
+    ) -> Result<(), Error> {
+        let resource = attributes_from_hash(resource_attributes)?;
+        let mut converted = Vec::with_capacity(spans.len());
+        for span in spans {
+            converted.push(span_from_hash(ruby, RHash::try_convert(span)?)?);
+        }
+        let spans = converted;
+
+        without_gvl(|| rb_self.runtime.block_on(rb_self.client.upload_trace(&resource, &spans)))
+            .map_err(|error| api_error(ruby, error.to_string()))
     }
 
     /// The flaky-detection context as a Hash, or `nil` when it is not enabled.
@@ -226,6 +251,88 @@ fn flaky_context_hash(ruby: &Ruby, context: &FlakyDetectionContext) -> Result<RH
     hash.aset("min_budget_duration_ms", context.min_budget_duration_ms)?;
     hash.aset("min_test_execution_count", context.min_test_execution_count)?;
     Ok(hash)
+}
+
+/// Span attributes: strings and integers, as `otel_attributes` produces.
+fn attributes_from_hash(hash: RHash) -> Result<Vec<(String, ApiAttrValue)>, Error> {
+    let mut attributes = Vec::new();
+    hash.foreach(|key: String, value: magnus::Value| {
+        let value = if let Ok(i) = i64::try_convert(value) {
+            ApiAttrValue::Int(i)
+        } else if let Ok(b) = bool::try_convert(value) {
+            ApiAttrValue::Bool(b)
+        } else {
+            ApiAttrValue::Str(String::try_convert(value)?)
+        };
+        attributes.push((key, value));
+        Ok(magnus::r_hash::ForEach::Continue)
+    })?;
+    Ok(attributes)
+}
+
+/// A trace or span id, which Ruby carries as a binary String. OpenTelemetry
+/// fixes their widths, so a wrong length is a caller bug rather than something
+/// to pad around.
+fn byte_array<const N: usize>(
+    ruby: &Ruby,
+    value: magnus::Value,
+    what: &str,
+) -> Result<[u8; N], Error> {
+    let string = magnus::RString::try_convert(value)?;
+    // SAFETY: the slice is copied here and now. Nothing between borrowing it
+    // and owning the copy can run Ruby code, so the GC cannot move the string
+    // out from under it.
+    let bytes = unsafe { string.as_slice() }.to_vec();
+    let len = bytes.len();
+    bytes.try_into().map_err(|_| {
+        Error::new(
+            ruby.exception_arg_error(),
+            format!("{what} must be {N} bytes, got {len}"),
+        )
+    })
+}
+
+fn span_from_hash(ruby: &Ruby, span: RHash) -> Result<SpanData, Error> {
+    let status = match span.get("status") {
+        Some(value) => match String::try_convert(value)?.as_str() {
+            "ok" => SpanStatus::Ok,
+            "unset" => SpanStatus::Unset,
+            "error" => SpanStatus::Error(
+                span.get("status_message")
+                    .map(String::try_convert)
+                    .transpose()?
+                    .unwrap_or_default(),
+            ),
+            other => {
+                return Err(Error::new(
+                    ruby.exception_arg_error(),
+                    format!("unknown span status: {other}"),
+                ));
+            }
+        },
+        None => SpanStatus::Unset,
+    };
+
+    let parent_span_id = match span.get("parent_span_id") {
+        Some(value) => Some(byte_array::<8>(ruby, value, "parent_span_id")?),
+        None => None,
+    };
+
+    let attributes = match span.get("attributes") {
+        Some(value) => attributes_from_hash(RHash::try_convert(value)?)?,
+        None => Vec::new(),
+    };
+
+    Ok(SpanData {
+        name: required(ruby, span, "name")?,
+        trace_id: byte_array::<16>(ruby, required(ruby, span, "trace_id")?, "trace_id")?,
+        span_id: byte_array::<8>(ruby, required(ruby, span, "span_id")?, "span_id")?,
+        parent_span_id,
+        start_unix_nano: required(ruby, span, "start_unix_nano")?,
+        end_unix_nano: required(ruby, span, "end_unix_nano")?,
+        attributes,
+        status,
+    })
 }
 
 // ---------------------------------------------------------------------------
