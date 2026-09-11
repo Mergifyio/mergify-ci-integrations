@@ -214,14 +214,15 @@ class PytestMergify:
                     self.mergify_ci.quarantined_tests.quarantined_tests_report()
                 )
 
-        # Mergify test selection (reduced merge-queue reruns) logs
+        # Mergify test selection (reduced merge-queue reruns) logs. One block
+        # whatever happened; a request that failed is the same block in
+        # yellow, since the run was not reduced and the developer should see
+        # why at a glance.
         if self.mergify_ci.test_selection is not None:
-            if self.mergify_ci.test_selection.init_error_msg:
-                terminalreporter.write_line(
-                    self.mergify_ci.test_selection.init_error_msg, yellow=True
-                )
-            else:
-                terminalreporter.write_line(self.mergify_ci.test_selection.report())
+            terminalreporter.write_line(
+                self.mergify_ci.test_selection.report(),
+                yellow=self.mergify_ci.test_selection.init_error_msg is not None,
+            )
 
         # Mergify Test Insights Traces upload logs
         if self.mergify_ci.trace_mode is None:
@@ -232,8 +233,13 @@ class PytestMergify:
         else:
             uploaded, error = self._export_result
             if uploaded:
+                # A sentence, not an environment variable: nothing reads this
+                # line back (checked across this repository, the monorepo and
+                # the docs, MRGFY-8978), and the one reader it has is a
+                # developer who needs to know what the id is for.
                 terminalreporter.write_line(
-                    f"MERGIFY_TEST_RUN_ID={self.mergify_ci.test_run_id}",
+                    f"Test run ID: {self.mergify_ci.test_run_id}"
+                    " (use it when contacting Mergify support)",
                 )
             elif error is not None:
                 terminalreporter.write_line(
