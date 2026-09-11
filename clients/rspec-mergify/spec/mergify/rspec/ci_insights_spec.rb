@@ -4,6 +4,13 @@ require 'spec_helper'
 require 'mergify/rspec/ci_insights'
 
 RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
+  # Quarantine fetches happen in Rust now, past WebMock's reach, so stub the
+  # binding's client instead of the HTTP call.
+  def stub_quarantine(names)
+    client = instance_double(Mergify::RSpec::Native::Client, fetch_quarantine: names)
+    allow(Mergify::RSpec::Native).to receive(:available?).and_return(true)
+    allow(Mergify::RSpec::Native::Client).to receive(:new).and_return(client)
+  end
   describe Mergify::RSpec::SynchronousBatchSpanProcessor do
     let(:exporter) { OpenTelemetry::SDK::Trace::Export::InMemorySpanExporter.new }
     let(:processor) { described_class.new(exporter) }
@@ -264,13 +271,7 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
       end
 
       it 'loads quarantined_tests' do
-        stub_request(:get, 'https://api.mergify.com/v1/ci/owner/repositories/repo/quarantines')
-          .with(query: { branch: 'main', per_page: '100' })
-          .to_return(
-            status: 200,
-            body: { quarantined_tests: [{ test_name: './spec/foo_spec.rb[1:1]' }] }.to_json,
-            headers: { 'Content-Type' => 'application/json' }
-          )
+        stub_quarantine(['./spec/foo_spec.rb[1:1]'])
 
         insights = described_class.new
         expect(insights.branch_name).to eq('main')
@@ -279,13 +280,7 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
       end
 
       it 'returns true for mark_test_as_quarantined_if_needed with quarantined test' do
-        stub_request(:get, 'https://api.mergify.com/v1/ci/owner/repositories/repo/quarantines')
-          .with(query: { branch: 'main', per_page: '100' })
-          .to_return(
-            status: 200,
-            body: { quarantined_tests: [{ test_name: './spec/foo_spec.rb[1:1]' }] }.to_json,
-            headers: { 'Content-Type' => 'application/json' }
-          )
+        stub_quarantine(['./spec/foo_spec.rb[1:1]'])
 
         insights = described_class.new
         expect(insights.mark_test_as_quarantined_if_needed('./spec/foo_spec.rb[1:1]')).to be true

@@ -7,6 +7,13 @@ require 'mergify/rspec/quarantine'
 require_relative '../support/sandbox_helper'
 
 RSpec.describe 'Integration: Quarantine' do # rubocop:disable RSpec/DescribeClass
+  # Quarantine fetches happen in Rust now, past WebMock's reach, so stub the
+  # binding's client instead of the HTTP call.
+  def stub_quarantine(names)
+    client = instance_double(Mergify::RSpec::Native::Client, fetch_quarantine: names)
+    allow(Mergify::RSpec::Native).to receive(:available?).and_return(true)
+    allow(Mergify::RSpec::Native::Client).to receive(:new).and_return(client)
+  end
   include SandboxHelper
 
   around do |example|
@@ -129,18 +136,7 @@ RSpec.describe 'Integration: Quarantine' do # rubocop:disable RSpec/DescribeClas
 
   describe 'quarantine API integration' do
     it 'fetches and matches quarantined tests via HTTP' do
-      stub_request(:get, 'https://api.mergify.com/v1/ci/owner/repositories/repo/quarantines')
-        .with(query: { branch: 'main', per_page: '100' })
-        .to_return(
-          status: 200,
-          body: {
-            quarantined_tests: [
-              { test_name: './spec/flaky_spec.rb[1:1]' },
-              { test_name: './spec/flaky_spec.rb[1:2]' }
-            ]
-          }.to_json,
-          headers: { 'Content-Type' => 'application/json' }
-        )
+      stub_quarantine(['./spec/flaky_spec.rb[1:1]', './spec/flaky_spec.rb[1:2]'])
 
       q = Mergify::RSpec::Quarantine.new(
         api_url: 'https://api.mergify.com',

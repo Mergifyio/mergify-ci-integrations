@@ -2,322 +2,150 @@
 
 require 'spec_helper'
 require 'mergify/rspec/quarantine'
+require 'mergify/rspec/native'
 
-RSpec.describe Mergify::RSpec::Quarantine do
+# The class now talks to the binding, so these need it compiled -- `rake spec`
+# builds it first, which is what CI runs. A bare `rspec` on a checkout without
+# the extension skips them rather than failing, as the binding's own specs do.
+# The no-extension path is still covered here, by stubbing `available?` false.
+RSpec.describe Mergify::RSpec::Quarantine, if: Mergify::RSpec::Native.available? do
   let(:api_url) { 'https://api.mergify.com' }
   let(:token) { 'test-token' }
   let(:repo_name) { 'owner/repo' }
   let(:branch_name) { 'main' }
+  let(:tests) { ['./spec/foo_spec.rb[1:1]', './spec/bar_spec.rb[1:2]'] }
 
-  let(:quarantine_url) { 'https://api.mergify.com/v1/ci/owner/repositories/repo/quarantines' }
+  # The fetch happens in Rust, where WebMock cannot see it, so the seam is the
+  # client object rather than the HTTP call. A verifying double keeps that
+  # honest: it fails if the binding's signature ever drifts from what this
+  # class calls. Everything the old stubs covered -- pagination, `next` links,
+  # malformed bodies, timeouts -- is the Rust client's contract now, tested
+  # there and pinned from Ruby in the binding's own specs.
+  let(:client) { instance_double(Mergify::RSpec::Native::Client) }
 
-  let(:quarantined_tests_response) do
-    {
-      quarantined_tests: [
-        { test_name: './spec/foo_spec.rb[1:1]' },
-        { test_name: './spec/bar_spec.rb[1:2]' }
-      ]
-    }.to_json
-  end
-
-  def stub_quarantine_request(status: 200, body: quarantined_tests_response, headers: {})
-    stub_request(:get, quarantine_url)
-      .with(
-        query: { branch: branch_name, per_page: '100' },
-        headers: { 'Authorization' => "Bearer #{token}" }
-      )
-      .to_return(
-        status: status,
-        body: body,
-        headers: { 'Content-Type' => 'application/json' }.merge(headers)
-      )
+  def build(fetch: nil, raises: nil)
+    allow(Mergify::RSpec::Native).to receive(:available?).and_return(true)
+    allow(Mergify::RSpec::Native::Client).to receive(:new).and_return(client)
+    if raises
+      allow(client).to receive(:fetch_quarantine).and_raise(raises)
+    else
+      allow(client).to receive(:fetch_quarantine).and_return(fetch)
+    end
+    described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
   end
 
   describe '#initialize' do
-    context 'with successful fetch' do
-      before { stub_quarantine_request }
+    it 'populates quarantined_tests with the names the client returned' do
+      expect(build(fetch: tests).quarantined_tests).to eq(tests)
+    end
 
-      it 'populates quarantined_tests with test names' do
-        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
-        expect(q.quarantined_tests).to contain_exactly('./spec/foo_spec.rb[1:1]', './spec/bar_spec.rb[1:2]')
-      end
+    it 'records no error on success' do
+      expect(build(fetch: tests).init_error_msg).to be_nil
+    end
 
-      it 'sets init_error_msg to nil' do
-        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
-        expect(q.init_error_msg).to be_nil
+    it 'asks for the branch it was given' do
+      allow(Mergify::RSpec::Native).to receive(:available?).and_return(true)
+      allow(Mergify::RSpec::Native::Client).to receive(:new).and_return(client)
+      allow(client).to receive(:fetch_quarantine).and_return([])
+
+      described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
+
+      expect(client).to have_received(:fetch_quarantine).with(branch_name)
+    end
+
+    context 'when the repository has no quarantine subscription' do
+      it 'quarantines nothing, and calls it no error' do
+        quarantine = build(fetch: nil)
+
+        expect(quarantine.quarantined_tests).to eq([])
+        expect(quarantine.init_error_msg).to be_nil
       end
     end
 
-    context 'with HTTP 402 response' do
-      before { stub_quarantine_request(status: 402, body: '') }
+    context 'when the API call fails' do
+      it 'records the message instead of failing the suite' do
+        quarantine = build(raises: Mergify::RSpec::Native::ApiError.new('Mergify API returned HTTP 500'))
 
-      it 'leaves quarantined_tests empty' do
-        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
-        expect(q.quarantined_tests).to be_empty
-      end
-
-      it 'does not set init_error_msg' do
-        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
-        expect(q.init_error_msg).to be_nil
+        expect(quarantine.init_error_msg).to eq('Mergify API returned HTTP 500')
+        expect(quarantine.quarantined_tests).to eq([])
       end
     end
 
-    context 'with HTTP 500 response' do
-      before { stub_quarantine_request(status: 500, body: 'Internal Server Error') }
+    context 'with an invalid repo_name' do
+      let(:repo_name) { 'not-a-full-name' }
 
-      it 'sets init_error_msg' do
-        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
-        expect(q.init_error_msg).not_to be_nil
-      end
+      it 'records the message without building a client' do
+        allow(Mergify::RSpec::Native).to receive(:available?).and_return(true)
+        allow(Mergify::RSpec::Native::Client).to receive(:new)
 
-      it 'leaves quarantined_tests empty' do
-        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
-        expect(q.quarantined_tests).to be_empty
-      end
-    end
+        quarantine = described_class.new(api_url: api_url, token: token, repo_name: repo_name,
+                                         branch_name: branch_name)
 
-    context 'with connection timeout' do
-      before do
-        stub_request(:get, quarantine_url)
-          .with(query: { branch: branch_name, per_page: '100' })
-          .to_timeout
-      end
-
-      it 'sets init_error_msg' do
-        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
-        expect(q.init_error_msg).not_to be_nil
-      end
-
-      it 'leaves quarantined_tests empty' do
-        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
-        expect(q.quarantined_tests).to be_empty
+        expect(quarantine.init_error_msg).to include('Invalid repository name')
+        expect(Mergify::RSpec::Native::Client).not_to have_received(:new)
       end
     end
 
-    context 'with paginated response' do
-      before do
-        page2_url = "#{quarantine_url}?cursor=PAGE2&per_page=100"
-        page3_url = "#{quarantine_url}?cursor=PAGE3&per_page=100"
+    context 'without the native extension' do
+      it 'says so, and quarantines nothing' do
+        allow(Mergify::RSpec::Native).to receive_messages(available?: false,
+                                                          load_error: LoadError.new('no such file'))
 
-        stub_request(:get, quarantine_url)
-          .with(query: { branch: branch_name, per_page: '100' })
-          .to_return(
-            status: 200,
-            body: { quarantined_tests: [{ test_name: 'a' }, { test_name: 'b' }] }.to_json,
-            headers: { 'Content-Type' => 'application/json', 'Link' => "<#{page2_url}>; rel=\"next\"" }
-          )
-        stub_request(:get, quarantine_url)
-          .with(query: { cursor: 'PAGE2', per_page: '100' })
-          .to_return(
-            status: 200,
-            body: { quarantined_tests: [{ test_name: 'c' }] }.to_json,
-            headers: { 'Content-Type' => 'application/json', 'Link' => "<#{page3_url}>; rel=\"next\"" }
-          )
-        stub_request(:get, quarantine_url)
-          .with(query: { cursor: 'PAGE3', per_page: '100' })
-          .to_return(
-            status: 200,
-            body: { quarantined_tests: [{ test_name: 'd' }] }.to_json,
-            headers: { 'Content-Type' => 'application/json' }
-          )
-      end
+        quarantine = described_class.new(api_url: api_url, token: token, repo_name: repo_name,
+                                         branch_name: branch_name)
 
-      it 'concatenates tests from every page' do
-        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
-        expect(q.quarantined_tests).to eq(%w[a b c d])
-      end
-
-      it 'records no init_error_msg' do
-        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
-        expect(q.init_error_msg).to be_nil
-      end
-    end
-
-    context 'with a mid-pagination error' do
-      before do
-        page2_url = "#{quarantine_url}?cursor=PAGE2&per_page=100"
-
-        stub_request(:get, quarantine_url)
-          .with(query: { branch: branch_name, per_page: '100' })
-          .to_return(
-            status: 200,
-            body: { quarantined_tests: [{ test_name: 'a' }] }.to_json,
-            headers: { 'Content-Type' => 'application/json', 'Link' => "<#{page2_url}>; rel=\"next\"" }
-          )
-        stub_request(:get, quarantine_url)
-          .with(query: { cursor: 'PAGE2', per_page: '100' })
-          .to_return(status: 500, body: 'Internal Server Error')
-      end
-
-      it 'records init_error_msg' do
-        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
-        expect(q.init_error_msg).to include('500')
-      end
-
-      it 'does not leak partial results' do
-        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
-        expect(q.quarantined_tests).to be_empty
-      end
-    end
-
-    context 'with a cyclic next link' do
-      before do
-        cycling_url = "#{quarantine_url}?cursor=LOOP&per_page=100"
-
-        stub_request(:get, quarantine_url)
-          .with(query: { branch: branch_name, per_page: '100' })
-          .to_return(
-            status: 200,
-            body: { quarantined_tests: [{ test_name: 'a' }] }.to_json,
-            headers: { 'Content-Type' => 'application/json', 'Link' => "<#{cycling_url}>; rel=\"next\"" }
-          )
-        stub_request(:get, quarantine_url)
-          .with(query: { cursor: 'LOOP', per_page: '100' })
-          .to_return(
-            status: 200,
-            body: { quarantined_tests: [{ test_name: 'b' }] }.to_json,
-            # Page 2 advertises itself as the next link, forming a cycle.
-            headers: { 'Content-Type' => 'application/json', 'Link' => "<#{cycling_url}>; rel=\"next\"" }
-          )
-      end
-
-      it 'records init_error_msg about the cycle' do
-        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
-        expect(q.init_error_msg).to include('cyclic')
-      end
-
-      it 'does not leak partial results' do
-        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
-        expect(q.quarantined_tests).to be_empty
-      end
-    end
-
-    context 'with malformed JSON' do
-      before do
-        stub_request(:get, quarantine_url)
-          .with(query: { branch: branch_name, per_page: '100' })
-          .to_return(
-            status: 200,
-            body: '<html>upstream proxy error</html>',
-            headers: { 'Content-Type' => 'application/json' }
-          )
-      end
-
-      it 'records init_error_msg instead of crashing the suite' do
-        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
-        expect(q.init_error_msg).to include('malformed')
-      end
-
-      it 'leaves quarantined_tests empty' do
-        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
-        expect(q.quarantined_tests).to be_empty
-      end
-    end
-
-    context 'with RFC 8288 Link header variants' do
-      let(:page2_url) { "#{quarantine_url}?cursor=PAGE2&per_page=100" }
-
-      def stub_first_page_with_link(link_header)
-        stub_request(:get, quarantine_url)
-          .with(query: { branch: branch_name, per_page: '100' })
-          .to_return(
-            status: 200,
-            body: { quarantined_tests: [{ test_name: 'a' }] }.to_json,
-            headers: { 'Content-Type' => 'application/json', 'Link' => link_header }
-          )
-        stub_request(:get, quarantine_url)
-          .with(query: { cursor: 'PAGE2', per_page: '100' })
-          .to_return(
-            status: 200,
-            body: { quarantined_tests: [{ test_name: 'b' }] }.to_json,
-            headers: { 'Content-Type' => 'application/json' }
-          )
-      end
-
-      it 'follows unquoted token form (rel=next)' do
-        stub_first_page_with_link("<#{page2_url}>; rel=next")
-        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
-        expect(q.quarantined_tests).to eq(%w[a b])
-      end
-
-      it 'follows multi-rel quoted form (rel="next prev")' do
-        stub_first_page_with_link("<#{page2_url}>; rel=\"next prev\"")
-        q = described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
-        expect(q.quarantined_tests).to eq(%w[a b])
-      end
-    end
-
-    context 'with invalid repo_name format' do
-      it 'sets init_error_msg without making any HTTP request' do
-        q = described_class.new(api_url: api_url, token: token, repo_name: 'invalid-repo', branch_name: branch_name)
-        expect(q.init_error_msg).not_to be_nil
-      end
-
-      it 'leaves quarantined_tests empty' do
-        q = described_class.new(api_url: api_url, token: token, repo_name: 'invalid-repo', branch_name: branch_name)
-        expect(q.quarantined_tests).to be_empty
+        expect(quarantine.init_error_msg).to include('native extension unavailable')
+        expect(quarantine.quarantined_tests).to eq([])
       end
     end
   end
 
   describe '#include?' do
-    before { stub_quarantine_request }
-
-    let(:quarantine) do
-      described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
-    end
+    subject(:quarantine) { build(fetch: tests) }
 
     it 'returns true for a quarantined test' do
       expect(quarantine.include?('./spec/foo_spec.rb[1:1]')).to be(true)
     end
 
     it 'returns false for a non-quarantined test' do
-      expect(quarantine.include?('./spec/unknown_spec.rb[1:1]')).to be(false)
+      expect(quarantine.include?('./spec/other_spec.rb[1:1]')).to be(false)
     end
   end
 
   describe '#mark_as_used' do
-    before { stub_quarantine_request }
-
-    let(:quarantine) do
-      described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
-    end
-
     it 'tracks the example as used' do
+      quarantine = build(fetch: tests)
       quarantine.mark_as_used('./spec/foo_spec.rb[1:1]')
-      used = quarantine.instance_variable_get(:@used_tests)
-      expect(used).to include('./spec/foo_spec.rb[1:1]')
+
+      expect(quarantine.report).to include('Quarantined tests run (1)')
     end
   end
 
   describe '#report' do
-    let(:quarantine) do
-      described_class.new(api_url: api_url, token: token, repo_name: repo_name, branch_name: branch_name)
-    end
-
-    before do
-      stub_quarantine_request
+    subject(:report) do
+      quarantine = build(fetch: tests)
       quarantine.mark_as_used('./spec/foo_spec.rb[1:1]')
+      quarantine.report
     end
 
     it 'includes the repository name' do
-      expect(quarantine.report).to include('owner/repo')
+      expect(report).to include('owner/repo')
     end
 
     it 'includes the branch name' do
-      expect(quarantine.report).to include('main')
+      expect(report).to include('main')
     end
 
     it 'includes the count of quarantined tests' do
-      expect(quarantine.report).to include('2')
+      expect(report).to include('Quarantined tests from API: 2')
     end
 
     it 'lists used quarantined tests' do
-      expect(quarantine.report).to include('./spec/foo_spec.rb[1:1]')
+      expect(report).to match(%r{Quarantined tests run \(1\):\n\s+- \./spec/foo_spec\.rb\[1:1\]})
     end
 
     it 'lists unused quarantined tests' do
-      expect(quarantine.report).to include('./spec/bar_spec.rb[1:2]')
+      expect(report).to match(%r{Unused quarantined tests \(1\):\n\s+- \./spec/bar_spec\.rb\[1:2\]})
     end
   end
 end
