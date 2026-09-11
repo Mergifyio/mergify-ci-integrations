@@ -16,9 +16,22 @@ use mergify_ci_api::{ApiConfig, Client, ClientInfo, FlakyDetectionContext, Outco
 use mergify_ci_core::{AttrValue, CiContext};
 
 /// The distribution this binding ships inside, as reported in the `User-Agent`.
-/// Its version comes from Ruby: the crate version is the build-time 0.0.0
-/// placeholder, while the gem carries the real one.
 const CLIENT_NAME: &str = "rspec-mergify";
+
+/// The gem's version, as reported in the `User-Agent`.
+///
+/// Read back from `Mergify::RSpec::VERSION`: the crate version is the
+/// build-time 0.0.0 placeholder, while the release stamps the real one into
+/// version.rb, which is also what the gemspec publishes under. Looking it up
+/// here rather than taking it as an argument keeps it off the Ruby surface —
+/// the binding knows which gem it ships inside.
+fn client_version(ruby: &Ruby) -> String {
+    // The gem loads version.rb before this extension, so the fallback only
+    // covers the extension being loaded on its own. The User-Agent is
+    // telemetry: report that rather than refuse to build the client.
+    ruby.eval::<String>("Mergify::RSpec::VERSION")
+        .unwrap_or_else(|_| "unknown".to_owned())
+}
 
 /// Detect from the current process environment and working directory.
 fn context() -> CiContext {
@@ -63,7 +76,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     native.define_singleton_method("detect_attributes", function!(detect_attributes, 0))?;
 
     let client = native.define_class("Client", ruby.class_object())?;
-    client.define_singleton_method("new", function!(ApiClient::new, 5))?;
+    client.define_singleton_method("new", function!(ApiClient::new, 4))?;
     client.define_method("fetch_quarantine", method!(ApiClient::fetch_quarantine, 1))?;
     client.define_method("fetch_flaky_context", method!(ApiClient::fetch_flaky_context, 0))?;
 
@@ -84,18 +97,14 @@ struct ApiClient {
 }
 
 impl ApiClient {
-    // magnus converts Ruby arguments into owned values, so these arrive by
-    // value whether or not each one is consumed.
-    #[allow(clippy::needless_pass_by_value)]
     fn new(
         ruby: &Ruby,
         api_url: String,
         token: String,
         owner: String,
         repo: String,
-        client_version: String,
     ) -> Result<Self, Error> {
-        let client_info = ClientInfo::new(CLIENT_NAME, &client_version)
+        let client_info = ClientInfo::new(CLIENT_NAME, &client_version(ruby))
             .with_runtime("ruby", &ruby.eval::<String>("RUBY_VERSION")?);
         let client = Client::new(
             ApiConfig::new(api_url, token, owner, repo),

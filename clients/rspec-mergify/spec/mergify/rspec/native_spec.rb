@@ -83,7 +83,29 @@ RSpec.describe Mergify::RSpec::Native do
     end
 
     def client(url)
-      described_class.new(url, 'token', 'Mergifyio', 'rspec-mergify', '1.2.3')
+      described_class.new(url, 'token', 'Mergifyio', 'rspec-mergify')
+    end
+
+    # The binding reads the gem's version on its own, so nothing in Ruby would
+    # notice that lookup going wrong: every install would just report `unknown`.
+    it 'names the gem and its version in the User-Agent' do
+      with_stub_api(status: 402, body: '{}') do |url, _paths, user_agents|
+        client(url).fetch_quarantine('main')
+
+        expect(user_agents).to contain_exactly(
+          start_with("rspec-mergify/#{Mergify::RSpec::VERSION} (ruby/#{RUBY_VERSION}; ")
+        )
+      end
+    end
+
+    it 'still builds a client when the gem version cannot be read' do
+      hide_const('Mergify::RSpec::VERSION')
+
+      with_stub_api(status: 402, body: '{}') do |url, _paths, user_agents|
+        client(url).fetch_quarantine('main')
+
+        expect(user_agents).to contain_exactly(start_with('rspec-mergify/unknown (ruby/'))
+      end
     end
 
     it 'returns the quarantined test names' do
