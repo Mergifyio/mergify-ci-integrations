@@ -56,7 +56,7 @@ RSpec.describe 'Integration: Flaky Detection' do # rubocop:disable RSpec/Describ
       stop_notification = double('stop_notification')
       formatter.stop(stop_notification)
 
-      spans = insights.exporter.finished_spans.to_h { |s| [s.name, s] }
+      spans = insights.recorder.finished_spans.to_h { |s| [s.name, s] }
       span = spans.values.find { |s| s.attributes['test.scope'] == 'case' }
 
       [span, output.string]

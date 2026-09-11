@@ -1,11 +1,11 @@
 # frozen_string_literal: true
 
 require 'rspec/core/formatters/base_formatter'
-require 'opentelemetry-sdk'
+require_relative 'trace'
 
 module Mergify
   module RSpec
-    # RSpec formatter that creates OpenTelemetry spans for Mergify Test Insights and
+    # RSpec formatter that records spans for Mergify Test Insights and
     # prints a terminal report. It is purely observational and does not modify
     # test execution.
     # rubocop:disable-next Metrics/ClassLength
@@ -17,18 +17,14 @@ module Mergify
                                          :example_pending,
                                          :stop
 
-      # rubocop:disable-next Metrics/MethodLength
       def start(notification)
         super
 
         @ci_insights = Mergify::RSpec.ci_insights
-        return unless @ci_insights&.tracer
+        return unless @ci_insights&.recorder
 
-        extract_distributed_trace_context
-
-        @session_span = @ci_insights.tracer.start_span(
+        @session_span = @ci_insights.recorder.start_span(
           'rspec session start',
-          with_parent: @parent_context,
           attributes: { 'test.scope' => 'session' }
         )
         @has_error = false
@@ -36,15 +32,14 @@ module Mergify
       end
 
       def example_started(notification)
-        return unless @ci_insights&.tracer && @session_span
+        return unless @ci_insights&.recorder && @session_span
 
         example = notification.example
-        parent_context = OpenTelemetry::Trace.context_with_span(@session_span)
         quarantined = @ci_insights.mark_test_as_quarantined_if_needed(example.id)
 
-        span = @ci_insights.tracer.start_span(
+        span = @ci_insights.recorder.start_span(
           example.id,
-          with_parent: parent_context,
+          parent: @session_span,
           attributes: build_example_attributes(example, quarantined)
         )
         @example_spans[example.id] = span
@@ -67,10 +62,10 @@ module Mergify
           set_error_attributes(span, result.exception)
           @has_error = true
         else
-          span.status = OpenTelemetry::Trace::Status.ok
+          span.ok!
         end
 
-        span.finish
+        @ci_insights.recorder.record(span)
       end
 
       def example_pending(notification)
@@ -81,7 +76,7 @@ module Mergify
         return unless span
 
         span.set_attribute('test.case.result.status', 'skipped')
-        span.finish
+        @ci_insights.recorder.record(span)
       end
 
       def stop(_notification)
@@ -91,14 +86,6 @@ module Mergify
       end
 
       private
-
-      def extract_distributed_trace_context
-        traceparent = ENV.fetch('MERGIFY_TRACEPARENT', nil)
-        @parent_context = if traceparent
-                            propagator = OpenTelemetry::Trace::Propagation::TraceContext::TextMapPropagator.new
-                            propagator.extract({ 'traceparent' => traceparent })
-                          end
-      end
 
       def build_example_attributes(example, quarantined)
         {
@@ -133,18 +120,18 @@ module Mergify
         span.set_attribute('exception.type', exception.class.to_s)
         span.set_attribute('exception.message', exception.message)
         span.set_attribute('exception.stacktrace', exception.backtrace&.join("\n") || '')
-        span.status = OpenTelemetry::Trace::Status.error(exception.message)
+        span.error!(exception.message)
       end
 
       def finish_session_span
         return unless @session_span
 
-        @session_span.status = if @has_error
-                                 OpenTelemetry::Trace::Status.error('One or more tests failed')
-                               else
-                                 OpenTelemetry::Trace::Status.ok
-                               end
-        @session_span.finish
+        if @has_error
+          @session_span.error!('One or more tests failed')
+        else
+          @session_span.ok!
+        end
+        @ci_insights.recorder.record(@session_span)
       end
 
       # rubocop:disable-next Metrics/MethodLength
@@ -187,20 +174,13 @@ module Mergify
         output.puts report if report
       end
 
-      def flush_and_shutdown # rubocop:disable Metrics/MethodLength
-        return unless @ci_insights&.tracer_provider
+      # One upload, at the end. There is nothing to shut down any more: the
+      # recorder holds spans in memory and the client owns the connection.
+      def flush_and_shutdown
+        return unless @ci_insights&.recorder
 
-        begin
-          @ci_insights.tracer_provider.force_flush
-        rescue StandardError => e
-          print_export_error(e)
-        end
-
-        begin
-          @ci_insights.tracer_provider.shutdown
-        rescue StandardError => e
-          output.puts "Error while shutting down the tracer: #{e.message}"
-        end
+        error = @ci_insights.flush
+        print_export_error(StandardError.new(error)) if error
       end
 
       def print_export_error(error)

@@ -3,10 +3,9 @@
 require 'mergify/rspec'
 require 'mergify/rspec/ci_insights'
 require 'mergify/rspec/formatter'
-require 'opentelemetry-sdk'
 
 # Helper module for running RSpec examples in a sandbox and collecting
-# OpenTelemetry spans. Used by integration tests to verify tracing,
+# recorded spans. Used by integration tests to verify tracing,
 # quarantine, and flaky detection behaviour end-to-end.
 module SandboxHelper
   # Build a CIInsights instance in test mode with an InMemorySpanExporter.
@@ -33,13 +32,10 @@ module SandboxHelper
     # A clean, predictable resource: the CI attributes now arrive as one hash
     # from the binding, stubbed empty above, leaving only the framework
     # detector to silence.
-    empty_resource = OpenTelemetry::SDK::Resources::Resource.create({})
+    empty_resource = {}
     allow(Mergify::RSpec::Resources::RSpec).to receive(:detect).and_return(empty_resource)
 
     insights = Mergify::RSpec::CIInsights.new
-
-    # Prevent shutdown from clearing the exporter so we can inspect spans after stop
-    allow(insights.tracer_provider).to receive(:shutdown) if insights.tracer_provider
 
     # If quarantined tests are provided, replace the quarantined_tests object
     setup_quarantine_double(insights, quarantined_tests) if quarantined_tests
@@ -140,6 +136,6 @@ module SandboxHelper
   end
 
   def ci_exporter_to_hash(insights)
-    insights.exporter.finished_spans.to_h { |span| [span.name, span] }
+    insights.recorder.finished_spans.to_h { |span| [span.name, span] }
   end
 end

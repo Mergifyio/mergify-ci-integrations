@@ -28,6 +28,5 @@ Gem::Specification.new do |spec|
   spec.files = Dir['lib/**/*.rb', 'LICENSE', 'README.md']
   spec.require_paths = ['lib']
 
-  spec.add_dependency 'opentelemetry-sdk', '~> 1.4'
   spec.add_dependency 'rspec-core', '~> 3.12'
 end

@@ -5,20 +5,18 @@ require 'mergify/rspec/ci_insights'
 require 'mergify/rspec/formatter'
 
 RSpec.describe Mergify::RSpec::Formatter do
-  let(:exporter) { OpenTelemetry::SDK::Trace::Export::InMemorySpanExporter.new }
+  # The recorder is the capture seam now: it holds the run's spans in memory
+  # and the upload is a separate step, so a spec can read them without one.
+  let(:recorder) { Mergify::RSpec::Trace::Recorder.new }
   let(:output) { StringIO.new }
   let(:formatter) { described_class.new(output) }
 
   let(:ci_insights) do
     insights = instance_double(Mergify::RSpec::CIInsights)
-    processor = OpenTelemetry::SDK::Trace::Export::SimpleSpanProcessor.new(exporter)
-    tracer_provider = OpenTelemetry::SDK::Trace::TracerProvider.new
-    tracer_provider.add_span_processor(processor)
-    tracer = tracer_provider.tracer('rspec-mergify-test', '0.0.1')
 
     allow(insights).to receive_messages(
-      tracer: tracer,
-      tracer_provider: tracer_provider,
+      recorder: recorder,
+      flush: nil,
       token: 'test-token',
       repo_name: 'owner/repo',
       test_run_id: 'abc123',
@@ -91,16 +89,12 @@ RSpec.describe Mergify::RSpec::Formatter do
 
   before do
     allow(Mergify::RSpec).to receive(:ci_insights).and_return(ci_insights)
-    allow(ci_insights).to receive(:tracer_provider).and_return(ci_insights.tracer_provider)
-    # Suppress force_flush/shutdown
-    allow(ci_insights.tracer_provider).to receive(:force_flush)
-    allow(ci_insights.tracer_provider).to receive(:shutdown)
   end
 
   describe '#start' do
     it 'creates a session span' do
       formatter.start(build_start_notification)
-      finished_spans = exporter.finished_spans
+      finished_spans = recorder.finished_spans
       # session span is not finished yet
       expect(finished_spans).to be_empty
       # but the formatter has set up the session span
@@ -117,9 +111,9 @@ RSpec.describe Mergify::RSpec::Formatter do
       expect(formatter.instance_variable_get(:@example_spans)).to eq({})
     end
 
-    context 'when tracer is nil' do
+    context 'when there is no recorder' do
       before do
-        allow(ci_insights).to receive(:tracer).and_return(nil)
+        allow(ci_insights).to receive(:recorder).and_return(nil)
       end
 
       it 'returns early without creating a session span' do
@@ -140,8 +134,8 @@ RSpec.describe Mergify::RSpec::Formatter do
       expect(formatter.instance_variable_get(:@example_spans)).to have_key(example.id)
     end
 
-    it 'does nothing when tracer is nil' do
-      allow(ci_insights).to receive(:tracer).and_return(nil)
+    it 'does nothing when there is no recorder' do
+      allow(ci_insights).to receive(:recorder).and_return(nil)
       formatter2 = described_class.new(output)
       formatter2.start(build_start_notification)
       formatter2.example_started(notification)
@@ -166,21 +160,21 @@ RSpec.describe Mergify::RSpec::Formatter do
 
     it 'finishes the span (it appears in exporter)' do
       formatter.example_finished(notification)
-      spans = exporter.finished_spans
+      spans = recorder.finished_spans
       example_span = spans.find { |s| s.name == example.id }
       expect(example_span).not_to be_nil
     end
 
     it 'sets test.case.result.status to "passed" for a passing test' do
       formatter.example_finished(notification)
-      span = exporter.finished_spans.find { |s| s.name == example.id }
+      span = recorder.finished_spans.find { |s| s.name == example.id }
       expect(span.attributes['test.case.result.status']).to eq('passed')
     end
 
     it 'sets span status to OK for a passing test' do
       formatter.example_finished(notification)
-      span = exporter.finished_spans.find { |s| s.name == example.id }
-      expect(span.status.code).to eq(OpenTelemetry::Trace::Status::OK)
+      span = recorder.finished_spans.find { |s| s.name == example.id }
+      expect(span.status).to eq('ok')
     end
 
     it 'does not set @has_error for a passing test' do
@@ -197,14 +191,14 @@ RSpec.describe Mergify::RSpec::Formatter do
 
       it 'sets test.case.result.status to "failed"' do
         formatter.example_finished(notification)
-        span = exporter.finished_spans.find { |s| s.name == example.id }
+        span = recorder.finished_spans.find { |s| s.name == example.id }
         expect(span.attributes['test.case.result.status']).to eq('failed')
       end
 
       it 'sets span status to ERROR' do
         formatter.example_finished(notification)
-        span = exporter.finished_spans.find { |s| s.name == example.id }
-        expect(span.status.code).to eq(OpenTelemetry::Trace::Status::ERROR)
+        span = recorder.finished_spans.find { |s| s.name == example.id }
+        expect(span.status).to eq('error')
       end
 
       it 'sets @has_error to true' do
@@ -214,13 +208,13 @@ RSpec.describe Mergify::RSpec::Formatter do
 
       it 'sets exception.message attribute' do
         formatter.example_finished(notification)
-        span = exporter.finished_spans.find { |s| s.name == example.id }
+        span = recorder.finished_spans.find { |s| s.name == example.id }
         expect(span.attributes['exception.message']).to eq('expected true, got false')
       end
 
       it 'sets exception.type attribute' do
         formatter.example_finished(notification)
-        span = exporter.finished_spans.find { |s| s.name == example.id }
+        span = recorder.finished_spans.find { |s| s.name == example.id }
         expect(span.attributes['exception.type']).to eq('RSpec::Expectations::ExpectationNotMetError')
       end
     end
@@ -229,34 +223,34 @@ RSpec.describe Mergify::RSpec::Formatter do
       it 'sets cicd.test.flaky_detection when metadata is true' do
         example.metadata[:mergify_flaky_detection] = true
         formatter.example_finished(notification)
-        span = exporter.finished_spans.find { |s| s.name == example.id }
+        span = recorder.finished_spans.find { |s| s.name == example.id }
         expect(span.attributes['cicd.test.flaky_detection']).to be(true)
       end
 
       it 'sets cicd.test.new when metadata is true' do
         example.metadata[:mergify_new_test] = true
         formatter.example_finished(notification)
-        span = exporter.finished_spans.find { |s| s.name == example.id }
+        span = recorder.finished_spans.find { |s| s.name == example.id }
         expect(span.attributes['cicd.test.new']).to be(true)
       end
 
       it 'sets cicd.test.rerun_count from metadata' do
         example.metadata[:mergify_rerun_count] = 5
         formatter.example_finished(notification)
-        span = exporter.finished_spans.find { |s| s.name == example.id }
+        span = recorder.finished_spans.find { |s| s.name == example.id }
         expect(span.attributes['cicd.test.rerun_count']).to eq(5)
       end
 
       it 'sets cicd.test.flaky when metadata is true' do
         example.metadata[:mergify_flaky] = true
         formatter.example_finished(notification)
-        span = exporter.finished_spans.find { |s| s.name == example.id }
+        span = recorder.finished_spans.find { |s| s.name == example.id }
         expect(span.attributes['cicd.test.flaky']).to be(true)
       end
 
       it 'does not set flaky attributes when metadata is nil' do
         formatter.example_finished(notification)
-        span = exporter.finished_spans.find { |s| s.name == example.id }
+        span = recorder.finished_spans.find { |s| s.name == example.id }
         expect(span.attributes).not_to have_key('cicd.test.flaky_detection')
         expect(span.attributes).not_to have_key('cicd.test.new')
         expect(span.attributes).not_to have_key('cicd.test.rerun_count')
@@ -267,31 +261,31 @@ RSpec.describe Mergify::RSpec::Formatter do
     context 'with correct span attributes' do
       it 'sets test.scope attribute' do
         formatter.example_finished(notification)
-        span = exporter.finished_spans.find { |s| s.name == example.id }
+        span = recorder.finished_spans.find { |s| s.name == example.id }
         expect(span.attributes['test.scope']).to eq('case')
       end
 
       it 'sets code.filepath attribute' do
         formatter.example_finished(notification)
-        span = exporter.finished_spans.find { |s| s.name == example.id }
+        span = recorder.finished_spans.find { |s| s.name == example.id }
         expect(span.attributes['code.filepath']).to eq('spec/models/user_spec.rb')
       end
 
       it 'sets code.function attribute' do
         formatter.example_finished(notification)
-        span = exporter.finished_spans.find { |s| s.name == example.id }
+        span = recorder.finished_spans.find { |s| s.name == example.id }
         expect(span.attributes['code.function']).to eq('does something')
       end
 
       it 'sets code.lineno attribute' do
         formatter.example_finished(notification)
-        span = exporter.finished_spans.find { |s| s.name == example.id }
+        span = recorder.finished_spans.find { |s| s.name == example.id }
         expect(span.attributes['code.lineno']).to eq(10)
       end
 
       it 'sets code.namespace attribute' do
         formatter.example_finished(notification)
-        span = exporter.finished_spans.find { |s| s.name == example.id }
+        span = recorder.finished_spans.find { |s| s.name == example.id }
         expect(span.attributes['code.namespace']).to eq('User')
       end
     end
@@ -311,13 +305,13 @@ RSpec.describe Mergify::RSpec::Formatter do
 
     it 'finishes the span with skipped status' do
       formatter.example_pending(notification)
-      span = exporter.finished_spans.find { |s| s.name == example.id }
+      span = recorder.finished_spans.find { |s| s.name == example.id }
       expect(span).not_to be_nil
     end
 
     it 'sets test.case.result.status to "skipped"' do
       formatter.example_pending(notification)
-      span = exporter.finished_spans.find { |s| s.name == example.id }
+      span = recorder.finished_spans.find { |s| s.name == example.id }
       expect(span.attributes['test.case.result.status']).to eq('skipped')
     end
   end
@@ -329,7 +323,7 @@ RSpec.describe Mergify::RSpec::Formatter do
 
     it 'finishes the session span' do
       formatter.stop(build_stop_notification)
-      session_span = exporter.finished_spans.find { |s| s.name == 'rspec session start' }
+      session_span = recorder.finished_spans.find { |s| s.name == 'rspec session start' }
       expect(session_span).not_to be_nil
     end
 
@@ -343,21 +337,16 @@ RSpec.describe Mergify::RSpec::Formatter do
       expect(output.string).to include('Mergify CI')
     end
 
-    it 'calls force_flush on tracer_provider' do
+    it 'uploads the run once, at the end' do
       formatter.stop(build_stop_notification)
-      expect(ci_insights.tracer_provider).to have_received(:force_flush)
-    end
-
-    it 'calls shutdown on tracer_provider' do
-      formatter.stop(build_stop_notification)
-      expect(ci_insights.tracer_provider).to have_received(:shutdown)
+      expect(ci_insights).to have_received(:flush)
     end
 
     context 'when there are no errors' do
       it 'sets session span status to OK' do
         formatter.stop(build_stop_notification)
-        session_span = exporter.finished_spans.find { |s| s.name == 'rspec session start' }
-        expect(session_span.status.code).to eq(OpenTelemetry::Trace::Status::OK)
+        session_span = recorder.finished_spans.find { |s| s.name == 'rspec session start' }
+        expect(session_span.status).to eq('ok')
       end
     end
 
@@ -370,8 +359,8 @@ RSpec.describe Mergify::RSpec::Formatter do
         formatter.example_finished(notification)
 
         formatter.stop(build_stop_notification)
-        session_span = exporter.finished_spans.find { |s| s.name == 'rspec session start' }
-        expect(session_span.status.code).to eq(OpenTelemetry::Trace::Status::ERROR)
+        session_span = recorder.finished_spans.find { |s| s.name == 'rspec session start' }
+        expect(session_span.status).to eq('error')
       end
     end
 
