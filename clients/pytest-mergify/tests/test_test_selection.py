@@ -1,4 +1,5 @@
 import dataclasses
+import textwrap
 import typing
 
 import _pytest.pytester
@@ -146,8 +147,7 @@ def test_an_empty_selection_deselects_the_whole_collection() -> None:
         "tests/b.py::test_two",
     ]
     assert selection.deselected_count == 2
-    assert "executing no test" in selection.report()
-    assert "all 2 selected test(s)" in selection.report()
+    assert "all 2 tests passed back then. Mergify skipped them" in selection.report()
 
 
 def test_a_refusal_raises_rather_than_degrading() -> None:
@@ -466,7 +466,14 @@ def test_a_failed_request_runs_the_full_suite(
     result.assert_outcomes(passed=2)
     assert plugin.mergify_ci.test_selection is not None
     assert plugin.mergify_ci.test_selection.selection == "full"
-    result.stdout.fnmatch_lines(["*the full test suite will run*HTTP 500*"])
+    # The block names the consequence first and keeps the error for support.
+    result.stdout.fnmatch_lines(
+        [
+            "*Mergify couldn't be asked whether this run could be reduced, so the full suite*",
+            "ran.",
+            "Error: Mergify API returned HTTP 500",
+        ]
+    )
 
 
 def test_an_xdist_worker_reports_no_fingerprint(
@@ -521,7 +528,9 @@ def test_an_empty_selection_runs_nothing_and_exits_green(
     assert len(calls) == 1
     assert plugin.mergify_ci.test_selection is not None
     assert plugin.mergify_ci.test_selection.selection == "empty"
-    result.stdout.fnmatch_lines(["*executing no test*all 2 selected test(s)*"])
+    result.stdout.fnmatch_lines(
+        ["*all 2 tests passed back then. Mergify skipped them*"]
+    )
 
 
 def test_an_empty_selection_still_uploads_its_session(
@@ -594,7 +603,12 @@ def test_a_refusal_fails_the_run(
     assert result.ret == pytest.ExitCode.USAGE_ERROR
     result.assert_outcomes(passed=0, failed=0)
     assert len(calls) == 1
-    assert _SERVED_REFUSAL_MESSAGE in result.stderr.str() + result.stdout.str()
+    # Exactly once: it is the error that stopped the run, and the terminal
+    # block printed afterwards points at it rather than repeating it.
+    assert (result.stderr.str() + result.stdout.str()).count(
+        _SERVED_REFUSAL_MESSAGE
+    ) == 1
+    assert "Mergify stopped this run before any test ran" in result.stdout.str()
 
 
 def test_an_empty_selection_over_an_empty_collection_stays_an_error(
@@ -624,7 +638,7 @@ def test_an_empty_selection_over_an_empty_collection_stays_an_error(
     # And the Mergify section says nothing about a skip: announcing that a
     # previous attempt ran and passed "all 0 selected test(s)" would send whoever
     # is debugging that red job to look at Mergify instead of at their filter.
-    assert "Skipped rerun" not in result.stdout.str()
+    assert "Mergify skipped" not in result.stdout.str()
     # Reported all the same, and readable for what it is: the answer arrived,
     # and the counts say no reduction came of it. Zero executed out of zero
     # collected is a run with nothing to run; it is the collected count that
@@ -930,3 +944,382 @@ def test_a_failed_request_reports_no_selection(
     assert "test.selection.reason" not in reported
     assert "test.selection.kept_count" not in reported
     assert reported["test.collection.count"] == 2
+
+
+# --- The terminal block (MRGFY-8978) ---
+#
+# The CI job log is where a developer already is when a reduced run surprises
+# them, and the question in their head is "is this broken, and can I trust
+# this green?". The block has to answer it in prose a reader who has never
+# heard of the feature can follow, and no internal identifier may ever reach
+# it. The wording below was validated by Alexandre on 2026-09-11 and is pinned
+# verbatim on purpose: a change to it is a product decision, not a refactor.
+
+# Every identifier the engine or this client can put in `reason`. The last
+# test of this block renders every block and greps for each of these; adding a
+# reason without a sentence is what makes that test fail.
+_ENGINE_FULL_REASONS = [
+    "feature_disabled",
+    "not_a_merge_queue_run",
+    "stale_run",
+    "no_predecessor",
+    "predecessor_unknown",
+    "no_collection_fingerprint",
+    "no_matching_test_session",
+    "indeterminate_test_session",
+    "matched_test_session_partially_processed",
+    "matched_test_session_dropped_cases",
+    "matched_test_session_declaration_unreadable",
+    "matched_test_session_ran_no_test",
+]
+_CLIENT_FULL_REASONS = [
+    "not_requested",
+    "unrecognised_selection",
+    "subset_served_without_tests",
+    "subset_matched_no_collected_test",
+    "subset_partly_absent_from_collection",
+]
+_OTHER_REASONS = [
+    "reduced_rerun",
+    "matched_test_session_had_no_gating_failure",
+    "ambiguous_test_sessions",
+]
+_EVERY_REASON = _ENGINE_FULL_REASONS + _CLIENT_FULL_REASONS + _OTHER_REASONS
+
+
+def _served_subset(
+    served: typing.List[str], collected: typing.List[str]
+) -> test_selection.TestSelection:
+    selection = test_selection.TestSelection(
+        selection="subset", reason="reduced_rerun", tests=served
+    )
+    items = [FakeItem(name) for name in collected]
+    selection.filter_items(FakeConfig(), items)  # type: ignore[arg-type]
+    return selection
+
+
+def _served_empty(collected: int) -> test_selection.TestSelection:
+    selection = test_selection.TestSelection(
+        selection="empty", reason="matched_test_session_had_no_gating_failure"
+    )
+    items = [FakeItem(f"tests/test_x.py::test_{i}") for i in range(collected)]
+    selection.filter_items(FakeConfig(), items)  # type: ignore[arg-type]
+    return selection
+
+
+def test_the_empty_block_reads_as_a_deliberate_skip() -> None:
+    assert _served_empty(24).report() == (
+        "✂️ Test selection\n"
+        "\n"
+        "The code under test hasn't changed since the previous attempt of this job, and\n"
+        "all 24 tests passed back then. Mergify skipped them: the job is green, and no\n"
+        "test was executed.\n"
+    )
+
+
+def test_the_empty_block_over_one_test_does_not_say_all_1_tests() -> None:
+    report = _served_empty(1).report()
+    assert "its only test passed back then. Mergify skipped it:" in report
+    assert "1 tests" not in report
+
+
+def test_the_empty_block_over_nothing_makes_no_skip_claim() -> None:
+    # `-k` left nothing to run: pytest's exit code 5 is the honest answer, and
+    # a paragraph saying Mergify skipped "all 0 tests" would send whoever is
+    # debugging that red job to look at Mergify instead of at their filter.
+    assert _served_empty(0).report() == "✂️ Test selection\n"
+
+
+def test_the_subset_block_lists_what_was_re_executed() -> None:
+    failed = [
+        "tests/suite/test_checkout.py::test_checkout_rejects_negative_quantity_07",
+        "tests/suite/test_checkout.py::test_checkout_total_02",
+        "tests/suite/test_payment.py::test_refund_partial",
+    ]
+    collected = failed + [f"tests/suite/test_other.py::test_{i}" for i in range(321)]
+    assert _served_subset(failed, collected).report() == (
+        "✂️ Test selection\n"
+        "\n"
+        "The code under test hasn't changed since the previous attempt of this job, where\n"
+        "3 of its 324 tests failed. Mergify re-executed only those 3 and skipped the 321\n"
+        "that had already passed:\n"
+        "\n"
+        "  tests/suite/test_checkout.py::test_checkout_rejects_negative_quantity_07\n"
+        "  tests/suite/test_checkout.py::test_checkout_total_02\n"
+        "  tests/suite/test_payment.py::test_refund_partial\n"
+    )
+
+
+def test_the_subset_block_lists_only_what_was_collected() -> None:
+    # A served name absent from the collection was not re-executed, so it has
+    # no place in a list titled by what Mergify re-executed.
+    served = ["tests/test_a.py::test_kept", "tests/test_gone.py::test_renamed"]
+    collected = ["tests/test_a.py::test_kept", "tests/test_a.py::test_fine"]
+    report = _served_subset(served, collected).report()
+    assert "  tests/test_a.py::test_kept\n" in report
+    assert "test_renamed" not in report
+    assert (
+        "1 of its 2 tests failed. Mergify re-executed only that one and skipped"
+        in report
+    )
+
+
+def test_the_subset_list_is_capped_at_ten() -> None:
+    failed = [f"tests/test_x.py::test_{i:02d}" for i in range(12)]
+    collected = failed + ["tests/test_y.py::test_fine"]
+    report = _served_subset(failed, collected).report()
+    listed = [line for line in report.splitlines() if line.startswith("  ")]
+    assert listed == [f"  tests/test_x.py::test_{i:02d}" for i in range(10)] + [
+        "  … and 2 more"
+    ]
+
+
+def test_the_subset_list_is_not_capped_at_exactly_ten() -> None:
+    # "… and 0 more" would be a line about nothing.
+    failed = [f"tests/test_x.py::test_{i:02d}" for i in range(10)]
+    report = _served_subset(failed, failed + ["tests/test_y.py::test_fine"]).report()
+    assert "more" not in report
+    assert report.count("  tests/test_x.py::") == 10
+
+
+def test_the_subset_block_when_every_collected_test_had_failed() -> None:
+    # Nothing was skipped, so "skipped the 0 that had already passed" must not
+    # be printed.
+    failed = ["tests/test_a.py::test_one", "tests/test_a.py::test_two"]
+    report = _served_subset(failed, failed).report()
+    assert "all 2 of its tests failed. Mergify re-executed all of them:" in report
+    assert "skipped" not in report
+
+
+def test_the_subset_block_when_the_only_collected_test_had_failed() -> None:
+    failed = ["tests/test_a.py::test_one"]
+    report = _served_subset(failed, failed).report()
+    assert "its only test failed. Mergify re-executed it:" in report
+    assert "1 of its" not in report
+
+
+# The table from the ticket, one row per engine reason. It is the contract,
+# and the completeness test below pins that it names every reason the
+# engine can serve.
+_ENGINE_SENTENCES: typing.List[typing.Tuple[str, str]] = [
+    ("no_predecessor", "First attempt of this batch, so the full suite ran."),
+    (
+        "not_a_merge_queue_run",
+        "This job isn't part of a merge queue run, so the full suite ran.",
+    ),
+    (
+        "stale_run",
+        "The batch branch was updated while this job was running, so the full"
+        " suite ran.",
+    ),
+    (
+        "no_matching_test_session",
+        "The previous attempt didn't run this exact set of tests, so the full"
+        " suite ran.",
+    ),
+    (
+        "matched_test_session_ran_no_test",
+        "The previous attempt executed no tests, so the full suite ran.",
+    ),
+    (
+        "predecessor_unknown",
+        "Mergify couldn't tell which previous run to start from, so the full"
+        " suite ran.",
+    ),
+    (
+        "indeterminate_test_session",
+        "Mergify couldn't tell which previous run to start from, so the full"
+        " suite ran.",
+    ),
+    (
+        "matched_test_session_partially_processed",
+        "Mergify didn't have the complete results of the previous attempt, so"
+        " the full suite ran.",
+    ),
+    (
+        "matched_test_session_dropped_cases",
+        "Mergify didn't have the complete results of the previous attempt, so"
+        " the full suite ran.",
+    ),
+    (
+        "matched_test_session_declaration_unreadable",
+        "Mergify didn't have the complete results of the previous attempt, so"
+        " the full suite ran.",
+    ),
+    (
+        "no_collection_fingerprint",
+        "This version of pytest-mergify doesn't report what it collected, so"
+        " the full suite ran. Upgrade it to let Mergify reduce reruns.",
+    ),
+    (
+        "feature_disabled",
+        "Test selection isn't enabled for this organization yet, so the full"
+        " suite ran.",
+    ),
+]
+
+
+@pytest.mark.parametrize(("reason", "sentence"), _ENGINE_SENTENCES)
+def test_every_engine_reason_has_its_sentence(reason: str, sentence: str) -> None:
+    selection = test_selection.TestSelection(selection="full", reason=reason)
+    # Wrapped at the width the block prints at; the sentence itself is the
+    # contract, the line break is where an 80-column log viewer would put it.
+    assert selection.report() == f"✂️ Test selection\n\n{textwrap.fill(sentence, 80)}\n"
+
+
+def test_the_engine_reason_table_is_complete() -> None:
+    # The parametrization above IS the table; this pins that it covers every
+    # reason the engine can serve, so a reason added on one side without the
+    # other is caught here rather than in a customer's log.
+    assert {reason for reason, _ in _ENGINE_SENTENCES} == set(_ENGINE_FULL_REASONS)
+
+
+def test_a_dormant_repository_gets_a_sentence() -> None:
+    selection = test_selection.TestSelection()
+    assert selection.reason == "not_requested"
+    assert selection.report() == (
+        "✂️ Test selection\n"
+        "\n"
+        "Test selection isn't available for this repository, so the full suite ran.\n"
+    )
+
+
+def test_a_subset_matching_nothing_gets_a_sentence() -> None:
+    selection = _served_subset(["tests/test_gone.py::test_renamed"], ["tests/a.py::t"])
+    assert selection.reason == "subset_matched_no_collected_test"
+    assert selection.report() == (
+        "✂️ Test selection\n"
+        "\n"
+        "Mergify's answer didn't match the tests this run collected, so the full suite\n"
+        "ran.\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "subset_served_without_tests",
+        "subset_matched_no_collected_test",
+        "subset_partly_absent_from_collection",
+    ],
+)
+def test_an_answer_that_could_not_be_applied_leaves_the_reader_nothing_to_do(
+    reason: str,
+) -> None:
+    # Unreachable against a correct engine, and visible in our own data, so the
+    # three share a sentence that names the fact and asks nothing of the reader.
+    report = test_selection.TestSelection(selection="full", reason=reason).report()
+    assert "Mergify's answer didn't match the tests this run collected" in report
+    assert "Upgrade" not in report
+
+
+def test_the_two_remedies_are_told_apart_in_the_report() -> None:
+    # A `selection` this plugin predates is the normal way the engine grows new
+    # answers, and it is the user's to fix: the sentence leads to the upgrade,
+    # not to support.
+    report = test_selection.TestSelection(
+        selection="full", reason="unrecognised_selection"
+    ).report()
+    assert "Upgrade it to let Mergify reduce reruns" in report
+    assert "support" not in report
+
+
+def test_a_failed_request_gets_a_sentence_and_keeps_the_error() -> None:
+    # The error text is what support will ask for; the sentence is what the
+    # developer reads first.
+    selection = test_selection.TestSelection(
+        init_error_msg="Mergify API request timed out"
+    )
+    assert selection.report() == (
+        "✂️ Test selection\n"
+        "\n"
+        "Mergify couldn't be asked whether this run could be reduced, so the full suite\n"
+        "ran.\n"
+        "Error: Mergify API request timed out\n"
+    )
+
+
+def test_the_error_text_is_never_wrapped() -> None:
+    # The client's errors carry the request URL. Wrapped at 80 columns it
+    # would be split at a hyphen, and what support gets pasted is a broken
+    # link.
+    url = (
+        "https://api.mergify.com/v1/ci/test-selection?branch=mergify%2Fmerge-"
+        "queue%2Fmain%2F1234&head_sha=cafecafe&pipeline_name=CI&job_name=unit-tests"
+    )
+    report = test_selection.TestSelection(
+        init_error_msg=f"error sending request for url ({url})"
+    ).report()
+    assert f"Error: error sending request for url ({url})\n" in report
+
+
+def test_an_unknown_reason_still_reads_as_a_full_run() -> None:
+    # A newer engine may serve a reason this client predates. It must neither
+    # crash nor print the raw identifier.
+    selection = test_selection.TestSelection(
+        selection="full", reason="a_reason_this_client_predates"
+    )
+    assert selection.report() == "✂️ Test selection\n\nMergify served the full suite.\n"
+
+
+def test_a_refusal_block_points_at_the_error_instead_of_repeating_it() -> None:
+    # The engine's message is the `UsageError` that stopped the run, and pytest
+    # prints it; the block printed after it must not show it a second time.
+    selection = test_selection.TestSelection(
+        selection="refused",
+        reason="ambiguous_test_sessions",
+        message=_SERVED_REFUSAL_MESSAGE,
+    )
+    assert selection.report() == (
+        "✂️ Test selection\n"
+        "\n"
+        "Mergify stopped this run before any test ran; its explanation is in the error\n"
+        "above.\n"
+    )
+    assert _SERVED_REFUSAL_MESSAGE not in selection.report()
+
+
+def test_no_internal_identifier_ever_reaches_the_terminal() -> None:
+    rendered = [
+        test_selection.TestSelection(selection="full", reason=reason).report()
+        for reason in _ENGINE_FULL_REASONS + _CLIENT_FULL_REASONS
+    ]
+    rendered.append(_served_empty(5).report())
+    rendered.append(
+        _served_subset(
+            ["tests/a.py::t1"], ["tests/a.py::t1", "tests/a.py::t2"]
+        ).report()
+    )
+    rendered.append(test_selection.TestSelection(init_error_msg="boom").report())
+    rendered.append(
+        test_selection.TestSelection(
+            selection="refused", reason="ambiguous_test_sessions"
+        ).report()
+    )
+    for text in rendered:
+        for identifier in _EVERY_REASON:
+            assert identifier not in text, (identifier, text)
+        assert "reason:" not in text
+        assert "selection:" not in text.lower()
+
+
+def test_no_block_tells_the_reader_to_contact_support() -> None:
+    # Alexandre, 2026-09-11: the shapes that cannot come from a correct engine
+    # are ours to see in our own data; asking the customer to report them hands
+    # them our work. The run id line is the one mention of support in the
+    # section, and it is printed elsewhere, as information.
+    rendered = [
+        test_selection.TestSelection(selection="full", reason=reason).report()
+        for reason in _ENGINE_FULL_REASONS + _CLIENT_FULL_REASONS + ["unknown"]
+    ]
+    rendered.append(_served_empty(5).report())
+    rendered.append(_served_subset(["tests/a.py::t1"], ["tests/a.py::t1"]).report())
+    rendered.append(test_selection.TestSelection(init_error_msg="boom").report())
+    rendered.append(
+        test_selection.TestSelection(
+            selection="refused", reason="ambiguous_test_sessions"
+        ).report()
+    )
+    for text in rendered:
+        assert "support" not in text.lower(), text
+        assert "report it" not in text.lower(), text

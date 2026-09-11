@@ -49,7 +49,7 @@ def test_an_uploaded_span_carries_its_attributes(
     )
     # The id the run reported to the user has to be the one it filed the spans
     # under, or the summary sends them looking up somebody else's run.
-    printed_run_id = re.search(r"MERGIFY_TEST_RUN_ID=(\w+)", result.stdout.str())
+    printed_run_id = re.search(r"Test run ID: (\w+)", result.stdout.str())
     assert printed_run_id is not None
     assert batch.resource_attributes["test.run.id"] == printed_run_id.group(1)
 
