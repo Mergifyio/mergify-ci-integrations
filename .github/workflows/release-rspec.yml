@@ -123,24 +123,31 @@ jobs:
         env:
           TAG: ${{ needs.resolve-tag.outputs.tag }}
         run: .github/scripts/stage-rspec-release.sh "${TAG}"
-      - uses: oxidize-rb/actions/cross-gem@e5f9a49a7812a078584072f6e3f657ad247c8771 # v1.4.4
-        id: cross-gem
-        with:
-          platform: ${{ matrix.platform }}
-          ruby-versions: "3.1,3.2,3.3,3.4,4.0"
-          working-directory: clients/rspec-mergify
+      # rb-sys-dock run directly, rather than through oxidize-rb/actions/cross-gem
+      # which only wraps it: that action uses actions/cache and
+      # oxidize-rb/actions/cargo-binstall by tag, and this repository admits
+      # only actions pinned to a full SHA -- nested ones included -- so every
+      # leg was refused before its first step. Its cache is not missed: a
+      # cache that any branch can write has no business feeding published gems.
+      #
+      # rb-sys-dock bind-mounts the directory it is started from and works in
+      # --directory. Starting at the repository root is what keeps the crate's
+      # path dependency on crates/ inside the container, so this step must not
+      # get a working-directory of its own.
+      - name: Cross-compile the platform gem
         env:
-          # rake-compiler-dock mounts one directory and works in it, both
-          # defaulting to the current one. That default is wrong for a
-          # monorepo: the crate path-depends on ../../../../crates, which would
-          # be outside a mount of the gem directory and vanish inside the
-          # container. Mount the repository, work in the gem.
-          RCD_MOUNTDIR: ${{ github.workspace }}
-          RCD_WORKDIR: ${{ github.workspace }}/clients/rspec-mergify
+          PLATFORM: ${{ matrix.platform }}
+          BUNDLE_GEMFILE: ${{ github.workspace }}/clients/rspec-mergify/Gemfile
+        run: >-
+          bundle exec rb-sys-dock
+          --platform "${PLATFORM}"
+          --directory clients/rspec-mergify
+          --ruby-versions 3.1,3.2,3.3,3.4,4.0
+          --build
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: gem-${{ matrix.platform }}
-          path: ${{ steps.cross-gem.outputs.gem-path }}
+          path: clients/rspec-mergify/pkg/*-${{ matrix.platform }}.gem
           if-no-files-found: error
 
   build-ruby-gem:
