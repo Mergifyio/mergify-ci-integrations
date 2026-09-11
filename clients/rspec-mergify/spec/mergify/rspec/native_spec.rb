@@ -168,4 +168,72 @@ RSpec.describe Mergify::RSpec::Native do
       end
     end
   end
+
+  describe Mergify::RSpec::Native::Budget, if: Mergify::RSpec::Native.available? do
+    # The arithmetic is the Rust core's and is unit-tested there; what these
+    # pin is the Ruby-facing contract -- that a context Hash goes back in the
+    # shape fetch_flaky_context handed out, and that the plan comes back keyed
+    # for the caller.
+    let(:context) do
+      {
+        'budget_ratio_for_new_tests' => 0.5,
+        'budget_ratio_for_unhealthy_tests' => 0.25,
+        'existing_test_names' => ['old_spec.rb[1:1]'],
+        'existing_tests_mean_duration_ms' => 100,
+        'unhealthy_test_names' => ['flaky_spec.rb[1:1]'],
+        'max_test_execution_count' => 5,
+        'max_test_name_length' => 200,
+        'min_budget_duration_ms' => 1000,
+        'min_test_execution_count' => 2
+      }
+    end
+
+    describe '.should_run' do
+      it 'runs in new-test mode only when there is a baseline to compare against' do
+        expect(described_class.should_run(context, 'new')).to be(true)
+        expect(described_class.should_run(context.merge('existing_test_names' => []), 'new')).to be(false)
+      end
+
+      it 'rejects a mode it does not know' do
+        expect { described_class.should_run(context, 'sideways') }
+          .to raise_error(ArgumentError, /unknown mode/)
+      end
+
+      it 'reports a context missing a required key rather than assuming a default' do
+        expect { described_class.should_run(context.except('min_budget_duration_ms'), 'new') }
+          .to raise_error(KeyError, /min_budget_duration_ms/)
+      end
+
+      it 'accepts a context without the optional retry keys' do
+        expect(described_class.should_run(context, 'unhealthy')).to be(true)
+      end
+    end
+
+    describe '.compute' do
+      it 'plans only the tests the mode is about, minus the opted out' do
+        plan = described_class.compute(
+          context, 'new', ['old_spec.rb[1:1]', 'new_spec.rb[1:1]', 'skip_spec.rb[1:1]'], ['skip_spec.rb[1:1]']
+        )
+
+        expect(plan['tests_to_process']).to eq(['new_spec.rb[1:1]'])
+        expect(plan['available_budget_ms']).to be_a(Float)
+      end
+
+      it 'never plans below the floor the context sets' do
+        plan = described_class.compute(context, 'new', ['new_spec.rb[1:1]'], [])
+
+        expect(plan['available_budget_ms']).to eq(1000.0)
+      end
+    end
+
+    describe '.static_share_ms and .dynamic_share_ms' do
+      it 'splits the budget evenly up front' do
+        expect(described_class.static_share_ms(1000.0, 4)).to eq(250.0)
+      end
+
+      it 'redistributes what is left as the session progresses' do
+        expect(described_class.dynamic_share_ms(1000.0, 400.0, 4, 2)).to eq(300.0)
+      end
+    end
+  end
 end
