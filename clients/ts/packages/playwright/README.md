@@ -123,8 +123,13 @@ shards, so the reduced set is what gets spread across a `--shard` matrix.
 
 ```
 [@mergifyio/playwright] ✂️ Test selection
-  selection: subset (reason: queue_rerun)
-  reduced rerun: executing 2 previously-failing test(s), 5 deselected
+
+The code under test hasn't changed since the previous attempt of this job, where
+2 of its 7 tests failed. Mergify re-executed only those 2 and skipped the 5 that
+had already passed:
+
+  [chromium] > tests/checkout.spec.ts > rejects a negative quantity
+  [chromium] > tests/payment.spec.ts > refunds partially
 ```
 
 The feature can only ever remove work, never coverage. The full suite runs

@@ -43,6 +43,21 @@ async function runSelection(options: {
   return { reporter, sink, executed };
 }
 
+/** Everything the run wrote to stdout -- the Vitest logger's channel -- while `run` was in flight. */
+async function capturingStdout(run: () => Promise<unknown>): Promise<string> {
+  const written: string[] = [];
+  const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
+    written.push(String(chunk));
+    return true;
+  }) as typeof process.stdout.write);
+  try {
+    await run();
+  } finally {
+    stdout.mockRestore();
+  }
+  return written.join('');
+}
+
 function uploadedNames(sink: InMemorySpanSink): string[] {
   return sink
     .getFinishedSpans()
@@ -76,6 +91,25 @@ describe('test selection', () => {
     expect(executed).toEqual(['beta']);
   });
 
+  it('prints the shared block, naming what re-ran (MRGFY-8978)', async () => {
+    // The same prose as pytest-mergify and @mergifyio/playwright: what
+    // happened, why the green is safe, and which tests re-ran -- never an
+    // identifier such as `reduced_rerun`.
+    const out = await capturingStdout(() => runSelection({ testSelection: ['selection > beta'] }));
+
+    expect(out).toContain(
+      '[@mergifyio/vitest] ✂️ Test selection\n' +
+        '\n' +
+        "The code under test hasn't changed since the previous attempt of this job, where\n" +
+        '1 of its 3 tests failed. Mergify re-executed only that one and skipped the 2\n' +
+        'that had already passed:\n' +
+        '\n' +
+        '  selection > beta\n'
+    );
+    expect(out).not.toContain('reduced_rerun');
+    expect(out).not.toContain('reason:');
+  });
+
   it('does not upload the deselected tests', async () => {
     const { reporter, sink } = await runSelection({ testSelection: ['selection > beta'] });
 
@@ -90,11 +124,20 @@ describe('test selection', () => {
   it('narrows the user filter instead of widening it', async () => {
     // The user asked for `gamma` only; the subset asks for `beta`. The
     // intersection is empty, so nothing runs — the union would have run both.
-    const { executed } = await runSelection({
-      testSelection: ['selection > beta'],
-      testNamePattern: 'gamma',
+    let executed: string[] = [];
+    const out = await capturingStdout(async () => {
+      ({ executed } = await runSelection({
+        testSelection: ['selection > beta'],
+        testNamePattern: 'gamma',
+      }));
     });
     expect(executed).toEqual([]);
+    // And the block says that, rather than "0 of its 1 tests failed … skipped
+    // the 1 that had already passed", which would be false twice over.
+    expect(out).toContain(
+      "Mergify asked to re-execute 1 test of this job's previous attempt, and your own filters excluded all of them, so none ran."
+    );
+    expect(out).not.toContain('0 of its');
   });
 
   it('keeps a test both the user and the subset asked for', async () => {
@@ -124,13 +167,20 @@ describe('test selection', () => {
   it('fails the run when the subset matches nothing collected', async () => {
     // A stale subset (every name renamed since the predecessor) would otherwise
     // skip everything and report green, merging untested code.
-    const { reporter, executed } = await runSelection({
-      testSelection: ['selection > renamed-since-the-predecessor'],
+    let result: Awaited<ReturnType<typeof runSelection>> | undefined;
+    const out = await capturingStdout(async () => {
+      result = await runSelection({
+        testSelection: ['selection > renamed-since-the-predecessor'],
+      });
     });
 
-    expect(executed).toEqual([]);
-    expect(reporter.getSession()!.status).toBe('failed');
+    expect(result!.executed).toEqual([]);
+    expect(result!.reporter.getSession()!.status).toBe('failed');
     expect(process.exitCode).toBe(1);
+    // The deliberate failure is the explanation; a block claiming "0 of its 3
+    // tests failed … skipped the 3 that had already passed" right above it
+    // would contradict it.
+    expect(out).not.toContain('✂️ Test selection');
   });
 
   it('never uploads a deselected test, whatever state it carries', async () => {
@@ -259,6 +309,49 @@ describe('the opt-in gate', () => {
       'CI',
       'unit'
     );
+  });
+
+  it('says why the full suite ran when Mergify answered so (MRGFY-8978)', async () => {
+    // A developer whose run was NOT reduced is the one asking why: the block
+    // is printed on a full answer too, with the sentence for its reason and
+    // never the identifier.
+    vi.stubEnv(TEST_SELECTION_ENABLE_ENV, 'true');
+    const apiClient = stubApiClient();
+    (apiClient.fetchTestSelection as ReturnType<typeof vi.fn>).mockResolvedValue({
+      selection: 'full',
+      reason: 'no_predecessor',
+    });
+
+    const out = await capturingStdout(() => runWith(apiClient));
+
+    expect(out).toContain(
+      '[@mergifyio/vitest] ✂️ Test selection\n\nFirst attempt of this batch, so the full suite ran.\n'
+    );
+    expect(out).not.toContain('no_predecessor');
+  });
+
+  it('says an answer it does not understand is one to upgrade for', async () => {
+    // An `empty` answer -- the engine's, once a fingerprint is sent -- is one
+    // this version predates: the run stays full and the block says so.
+    vi.stubEnv(TEST_SELECTION_ENABLE_ENV, 'true');
+    const apiClient = stubApiClient();
+    (apiClient.fetchTestSelection as ReturnType<typeof vi.fn>).mockResolvedValue({
+      selection: 'empty',
+      reason: 'matched_test_session_had_no_gating_failure',
+    });
+
+    const out = await capturingStdout(() => runWith(apiClient));
+
+    expect(out).toContain(
+      "Mergify answered in a way this version of @mergifyio/vitest doesn't understand"
+    );
+    expect(out).not.toContain('matched_test_session_had_no_gating_failure');
+  });
+
+  it('stays silent when the repository is dormant', async () => {
+    vi.stubEnv(TEST_SELECTION_ENABLE_ENV, 'true');
+    const out = await capturingStdout(() => runWith(stubApiClient()));
+    expect(out).not.toContain('✂️ Test selection');
   });
 
   it.each([

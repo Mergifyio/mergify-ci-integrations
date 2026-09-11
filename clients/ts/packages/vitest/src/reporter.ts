@@ -20,6 +20,7 @@ import {
   fetchFlakyDetectionContext,
   fetchQuarantineList,
   fetchTestSelection,
+  formatTestSelectionReport,
   generateTestRunId,
   getRepoName,
   isInCI,
@@ -83,6 +84,10 @@ export class MergifyReporter implements Reporter {
   private _selectionPromise: Promise<void> | undefined;
   private deselectedCount = 0;
   private selectedExecutedCount = 0;
+  // The served tests that actually ran, in result order, for the end-of-run
+  // block to list. `selectedExecutedCount` is its length; both are kept so the
+  // count stays what the tests and `getSelection` already read.
+  private selectedExecuted: string[] = [];
 
   constructor(options?: MergifyReporterOptions) {
     this.options = options ?? {};
@@ -324,6 +329,7 @@ export class MergifyReporter implements Reporter {
       this.selection?.tests.has(testCase.fullName)
     ) {
       this.selectedExecutedCount++;
+      this.selectedExecuted.push(testCase.fullName);
     }
 
     const diagnostic = testCase.diagnostic();
@@ -473,7 +479,11 @@ export class MergifyReporter implements Reporter {
    */
   private _reportSelection(testModules: ReadonlyArray<TestModule>): void {
     const selection = this.selection;
-    if (!selection || selection.selection !== 'subset') return;
+    // Silence is reserved for "we never asked": a dormant repository is the
+    // same as no request, as it is for the Playwright reporter. Once Mergify
+    // answered -- with a reduction, or with a reason not to -- the run says
+    // what it made of it.
+    if (!selection || selection.reason === 'not_requested') return;
 
     const logger = this.vitest?.logger;
     const collected = new Set<string>();
@@ -482,25 +492,53 @@ export class MergifyReporter implements Reporter {
     }
     const matched = [...selection.tests].filter((name) => collected.has(name));
 
+    const executed = this.selectedExecutedCount;
+    const stale = selection.selection === 'subset' && collected.size > 0 && matched.length === 0;
+
     logger?.log('');
-    logger?.log('[@mergifyio/vitest] Test selection report:');
-    logger?.log(`  Selection: subset (reason: ${selection.reason})`);
-    logger?.log(
-      `  Reduced rerun: executed ${this.selectedExecutedCount} previously-failing test(s), ${this.deselectedCount} deselected`
-    );
-    // The two can differ legitimately: a served test the user's own filter
-    // excluded is matched but not executed. Say so rather than let the counts
-    // look inconsistent.
-    if (matched.length !== this.selectedExecutedCount) {
-      logger?.log(
-        `  ${matched.length - this.selectedExecutedCount} served test(s) were excluded by your own filters`
+    if (selection.selection === 'subset' && executed === 0) {
+      // A subset of which nothing ran. The shared block would claim "0 of its
+      // N tests failed … skipped the N that had already passed", which is
+      // false twice over. When the subset matched nothing, the deliberate
+      // failure below is the explanation, and the block stays out of its way;
+      // when it matched tests the user's own filters then excluded, that is
+      // what happened, and the run says so.
+      if (!stale) {
+        logger?.log(
+          '[@mergifyio/vitest] ✂️ Test selection\n\n' +
+            `Mergify asked to re-execute ${matched.length} test${matched.length === 1 ? '' : 's'} of this` +
+            " job's previous attempt, and your own filters excluded all of them, so none ran."
+        );
+      }
+    } else {
+      // What happened, not what was offered: a served test the user's own
+      // filter excluded is matched but never ran, and the block describes the
+      // run.
+      const report = formatTestSelectionReport(
+        {
+          selection: selection.selection,
+          reason: selection.reason,
+          reExecuted: this.selectedExecuted,
+          reExecutedCount: executed,
+          skipped: this.deselectedCount,
+        },
+        '@mergifyio/vitest'
       );
+      logger?.log(`[@mergifyio/vitest] ${report}`);
+      // The two can differ legitimately: a served test the user's own filter
+      // excluded is matched but not executed. Say so rather than let the counts
+      // look inconsistent.
+      if (selection.selection === 'subset' && matched.length !== executed) {
+        logger?.log(
+          `${matched.length - executed} of the tests Mergify asked to re-execute were excluded by your own filters and did not run.`
+        );
+      }
     }
 
     // The stale-subset guard reads `matched`, not the executed count: a subset
     // that matches collected tests the user then filtered out is the user's
     // choice, not a broken selection.
-    if (collected.size > 0 && matched.length === 0) {
+    if (stale) {
       logger?.error(
         `[@mergifyio/vitest] Failing this run deliberately: Mergify served ${selection.tests.size} test(s) to replay, ` +
           'and not one of them matches a test collected here, so the run skipped everything and proves nothing.\n' +

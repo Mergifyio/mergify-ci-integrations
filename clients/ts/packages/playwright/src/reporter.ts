@@ -17,6 +17,7 @@ import {
   generateTestRunId,
   getRepoName,
   isInCI,
+  outcomeOfApplication,
   type SessionSpan,
   startSessionSpan,
   type TestCaseResult,
@@ -608,7 +609,10 @@ export class MergifyReporter implements Reporter {
   private reportTestSelection(): void {
     if (this.testSelection) {
       process.stderr.write(
-        `[@mergifyio/playwright] ${formatTestSelectionReport(this.testSelection)}`
+        `[@mergifyio/playwright] ${formatTestSelectionReport(
+          outcomeOfApplication(this.testSelection),
+          '@mergifyio/playwright'
+        )}`
       );
       return;
     }

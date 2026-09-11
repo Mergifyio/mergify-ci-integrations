@@ -20,12 +20,14 @@ export type {
   TestSelectionApplication,
   TestSelectionClient,
   TestSelectionCoordinates,
+  TestSelectionOutcome,
 } from './test-selection.js';
 export {
   applyToCollected,
   fetchTestSelection,
   formatTestSelectionReport,
   isTestSelectionEnabled,
+  outcomeOfApplication,
   resolveSelectionCoordinates,
   TEST_SELECTION_ENABLE_ENV,
   toTestSelection,

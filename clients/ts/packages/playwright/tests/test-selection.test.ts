@@ -192,9 +192,18 @@ describe('preprocess — reducing the run to the served subset', () => {
     await r.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
 
     const out = log.mock.calls.map((c) => String(c[0])).join('');
-    expect(out).toContain('✂️ Test selection');
-    expect(out).toContain('selection: subset (reason: queue_rerun)');
-    expect(out).toContain('reduced rerun: executing 1 previously-failing test(s), 1 deselected');
+    // The shared block, verbatim (MRGFY-8978): what happened, why it is safe,
+    // and which tests re-ran -- never `reason: queue_rerun`.
+    expect(out).toContain(
+      '[@mergifyio/playwright] ✂️ Test selection\n' +
+        '\n' +
+        "The code under test hasn't changed since the previous attempt of this job, where\n" +
+        '1 of its 2 tests failed. Mergify re-executed only that one and skipped the 1\n' +
+        'that had already passed:\n' +
+        '\n' +
+        '  [proj] > a.spec.ts > kept\n'
+    );
+    expect(out).not.toContain('queue_rerun');
   });
 });
 
@@ -230,7 +239,10 @@ describe('preprocess — the guards that keep the full suite running', () => {
     await r.onEnd({ status: 'passed', startTime: new Date(), duration: 1 });
 
     const out = log.mock.calls.map((c) => String(c[0])).join('');
-    expect(out).toContain('selection: full (reason: subset_matched_no_collected_test)');
+    expect(out).toContain(
+      "Mergify's answer didn't match the tests this run collected, so the full suite\nran."
+    );
+    expect(out).not.toContain('subset_matched_no_collected_test');
   });
 
   it('excludes nothing on a `full` selection', async () => {
