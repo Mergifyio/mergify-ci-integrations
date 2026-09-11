@@ -44,7 +44,6 @@ import {
   resolveIncludeProject,
   toPosix,
 } from './utils.js';
-import { readPluginVersion } from './version.js';
 
 const DEFAULT_API_URL = 'https://api.mergify.com';
 
@@ -272,13 +271,7 @@ export class MergifyReporter implements Reporter {
     const apiClient =
       this.options.apiClient ??
       (token && repoName
-        ? createApiClient({
-            apiUrl,
-            token,
-            repoName,
-            clientName: '@mergifyio/playwright',
-            clientVersion: readPluginVersion(),
-          })
+        ? createApiClient({ apiUrl, token, repoName, clientName: '@mergifyio/playwright' })
         : null);
 
     if (enabled) {

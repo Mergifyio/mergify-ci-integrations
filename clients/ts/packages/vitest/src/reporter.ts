@@ -34,7 +34,6 @@ import type { Reporter, TestCase, TestModule, Vitest } from 'vitest/node';
 import * as vitestResource from './resources/vitest.js';
 import type { MergifyReporterOptions } from './types.js';
 import { extractNamespace } from './utils.js';
-import { readPluginVersion } from './version.js';
 
 const DEFAULT_API_URL = 'https://api.mergify.com';
 
@@ -107,13 +106,7 @@ export class MergifyReporter implements Reporter {
     const apiClient =
       this.options.apiClient ??
       (token && repoName
-        ? createApiClient({
-            apiUrl,
-            token,
-            repoName,
-            clientName: '@mergifyio/vitest',
-            clientVersion: readPluginVersion(),
-          })
+        ? createApiClient({ apiUrl, token, repoName, clientName: '@mergifyio/vitest' })
         : null);
 
     if (enabled) {

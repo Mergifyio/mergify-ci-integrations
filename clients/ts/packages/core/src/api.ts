@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module';
 import type { CiApiClient } from '@mergifyio/ci-native';
 import { createNativeApiClient } from './native.js';
 
@@ -22,10 +23,30 @@ export interface ApiClientConfig {
   token: string;
   /** The repository as `owner/repo`. */
   repoName: string;
-  /** The npm package building the client, e.g. `@mergifyio/vitest`. */
+  /**
+   * The npm package building the client, e.g. `@mergifyio/vitest`, reported in
+   * the `User-Agent`. Its version is not asked for: see [`packageVersion`].
+   */
   clientName: string;
-  /** That package's version, reported in the `User-Agent`. */
-  clientVersion: string;
+}
+
+/**
+ * The version reported in the `User-Agent`, for whichever plugin is calling.
+ *
+ * Read from this package's own package.json rather than the plugin's: the TS
+ * packages release together under one version, and `pnpm pack` pins every
+ * `workspace:*` dependency to it exactly, so `@mergifyio/vitest@X` always runs
+ * on `@mergifyio/ci-core@X`. The checked-in `0.0.0` is a placeholder the release
+ * stamps. `../package.json` resolves the same from `src/` and the bundled
+ * `dist/` — both sit one level below the package root.
+ */
+function packageVersion(): string {
+  try {
+    const pkg = createRequire(import.meta.url)('../package.json') as { version?: string };
+    return pkg.version ?? 'unknown';
+  } catch {
+    return 'unknown';
+  }
 }
 
 /**
@@ -45,7 +66,7 @@ export function createApiClient(config: ApiClientConfig): CiApiClient | null {
     token: config.token,
     repoName: config.repoName,
     clientName: config.clientName,
-    clientVersion: config.clientVersion,
+    clientVersion: packageVersion(),
     nodeVersion: process.versions.node,
   });
 }

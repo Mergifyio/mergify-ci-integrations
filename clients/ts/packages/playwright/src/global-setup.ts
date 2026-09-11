@@ -20,7 +20,6 @@ import {
 
 import type { FullConfig } from '@playwright/test';
 import { type SharedState, stateFilePath, writeStateFile } from './state-file.js';
-import { readPluginVersion } from './version.js';
 
 const DEFAULT_API_URL = 'https://api.mergify.com';
 
@@ -71,12 +70,7 @@ export async function runGlobalSetup(config: FullConfig, deps: RunGlobalSetupDep
 
   const createClient =
     deps.createClient ??
-    ((target) =>
-      createApiClient({
-        ...target,
-        clientName: '@mergifyio/playwright',
-        clientVersion: readPluginVersion(),
-      }));
+    ((target) => createApiClient({ ...target, clientName: '@mergifyio/playwright' }));
   const client = createClient({ apiUrl, token, repoName });
   // No client means no native binding for this platform, or a repository name
   // the client rejected — the fail-open path, same as detection reporting
