@@ -3,6 +3,7 @@
 require 'rspec_mergify'
 require 'webmock/rspec'
 require 'timecop'
+require_relative 'support/stub_api_server'
 
 WebMock.disable_net_connect!
 
@@ -14,6 +15,8 @@ RSpec.configure do |config|
   config.mock_with :rspec do |mocks|
     mocks.verify_partial_doubles = true
   end
+
+  config.include StubApiServer
 
   config.filter_run_when_matching :focus
   config.order = :random

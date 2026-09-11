@@ -70,4 +70,102 @@ RSpec.describe Mergify::RSpec::Native do
       expect(attributes.values).to all(be_a(String).or(be_a(Integer)))
     end
   end
+
+  describe Mergify::RSpec::Native::Client, if: Mergify::RSpec::Native.available? do
+    # WebMock cannot see these requests -- the binding issues them from Rust --
+    # so they go to a real loopback server. WebMock's disable_net_connect! is
+    # lifted for the same reason.
+    around do |example|
+      WebMock.allow_net_connect!
+      example.run
+    ensure
+      WebMock.disable_net_connect!
+    end
+
+    def client(url)
+      described_class.new(url, 'token', 'Mergifyio', 'rspec-mergify', '1.2.3')
+    end
+
+    it 'returns the quarantined test names' do
+      body = '{"quarantined_tests":[{"test_name":"a_spec.rb[1:1]"},{"test_name":"b_spec.rb[1:2]"}]}'
+      with_stub_api(status: 200, body: body) do |url, paths|
+        expect(client(url).fetch_quarantine('main')).to eq(['a_spec.rb[1:1]', 'b_spec.rb[1:2]'])
+        expect(paths.first).to start_with('/v1/ci/Mergifyio/repositories/rspec-mergify/quarantines')
+      end
+    end
+
+    # The two endpoints signal "not enabled" differently, and the difference is
+    # deliberate upstream: quarantine treats 402 (no subscription) as dormant
+    # and a 404 as a genuine failure, while the flaky-detection context does the
+    # opposite. Asserting both here so the asymmetry is visible from Ruby.
+    it 'returns nil when quarantine is not subscribed' do
+      with_stub_api(status: 402, body: '{}') do |url, _paths|
+        expect(client(url).fetch_quarantine('main')).to be_nil
+      end
+    end
+
+    it 'returns nil when flaky detection is not enabled' do
+      with_stub_api(status: 404, body: '{}') do |url, _paths|
+        expect(client(url).fetch_flaky_context).to be_nil
+      end
+    end
+
+    it 'raises rather than reporting nothing quarantined' do
+      with_stub_api(status: 500, body: '{"message":"boom"}') do |url, _paths|
+        expect { client(url).fetch_quarantine('main') }.to raise_error(Mergify::RSpec::Native::ApiError)
+      end
+    end
+
+    # The seam the adoption commits will use: a verifying double stands in for
+    # the client, so specs never need HTTP -- which matters because WebMock
+    # cannot intercept requests the binding makes from Rust. pytest-mergify
+    # replaces its binding's client object the same way.
+    it 'can be stubbed by a verifying double, without any HTTP' do
+      fake = instance_double(described_class, fetch_quarantine: ['a_spec.rb[1:1]'],
+                                              fetch_flaky_context: nil)
+
+      expect(fake.fetch_quarantine('main')).to eq(['a_spec.rb[1:1]'])
+      expect(fake.fetch_flaky_context).to be_nil
+    end
+
+    it 'raises ApiError, not a bare StandardError, so degrading can be precise' do
+      with_stub_api(status: 500, body: '{}') do |url, _paths|
+        expect { client(url).fetch_quarantine('main') }
+          .to raise_error(an_instance_of(Mergify::RSpec::Native::ApiError))
+      end
+    end
+
+    it 'raises when quarantine is missing rather than treating it as dormant' do
+      with_stub_api(status: 404, body: '{}') do |url, _paths|
+        expect { client(url).fetch_quarantine('main') }.to raise_error(Mergify::RSpec::Native::ApiError, /404/)
+      end
+    end
+
+    it 'returns the flaky-detection context keyed as the other clients receive it' do
+      body = '{"budget_ratio_for_new_tests":0.1,"budget_ratio_for_unhealthy_tests":0.2,' \
+             '"existing_test_names":["a"],"existing_tests_mean_duration_ms":12,' \
+             '"unhealthy_test_names":["b"],"budget_ratio_for_test_retries":0.3,' \
+             '"flaky_test_names":["c"],"broken_test_names":["d"],' \
+             '"max_test_execution_count":5,"max_test_name_length":200,' \
+             '"min_budget_duration_ms":1000,"min_test_execution_count":2}'
+      with_stub_api(status: 200, body: body) do |url, _paths|
+        context = client(url).fetch_flaky_context
+
+        expect(context).to eq(
+          'budget_ratio_for_new_tests' => 0.1,
+          'budget_ratio_for_unhealthy_tests' => 0.2,
+          'existing_test_names' => ['a'],
+          'existing_tests_mean_duration_ms' => 12,
+          'unhealthy_test_names' => ['b'],
+          'budget_ratio_for_test_retries' => 0.3,
+          'flaky_test_names' => ['c'],
+          'broken_test_names' => ['d'],
+          'max_test_execution_count' => 5,
+          'max_test_name_length' => 200,
+          'min_budget_duration_ms' => 1000,
+          'min_test_execution_count' => 2
+        )
+      end
+    end
+  end
 end
