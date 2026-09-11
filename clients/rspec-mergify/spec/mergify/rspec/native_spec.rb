@@ -2,7 +2,6 @@
 
 require 'spec_helper'
 require 'mergify/rspec/native'
-require 'mergify/rspec/utils'
 
 RSpec.describe Mergify::RSpec::Native do
   around do |example|
@@ -37,17 +36,22 @@ RSpec.describe Mergify::RSpec::Native do
       expect(described_class.detect_repository_name).to eq('Mergifyio/rspec-mergify')
     end
 
-    it 'agrees with the Ruby detection it replaces' do
+    # These were the parity gate against the Ruby detectors while both existed.
+    # The detectors are gone, so the expectations are now stated outright --
+    # same cases, same answers, no second implementation to compare against.
+    it 'detects each supported provider and its endpoint repository' do
       {
-        { '_RSPEC_MERGIFY_TEST' => 'true' } => :rspec_mergify_suite,
-        { 'GITHUB_ACTIONS' => 'true', 'GITHUB_REPOSITORY' => 'Mergifyio/x' } => :github_actions,
-        { 'BUILDKITE' => 'true', 'BUILDKITE_REPO' => 'git@github.com:Mergifyio/x.git' } => :buildkite
-      }.each do |env, expected|
+        { '_RSPEC_MERGIFY_TEST' => 'true' } =>
+          ['rspec_mergify_suite', 'Mergifyio/rspec-mergify'],
+        { 'GITHUB_ACTIONS' => 'true', 'GITHUB_REPOSITORY' => 'Mergifyio/x' } =>
+          ['github_actions', 'Mergifyio/x'],
+        { 'BUILDKITE' => 'true', 'BUILDKITE_REPO' => 'git@github.com:Mergifyio/x.git' } =>
+          ['buildkite', 'Mergifyio/x']
+      }.each do |env, (provider, repository)|
         ENV.replace(ENV.to_h.merge(env))
 
-        expect(described_class.detect_provider).to eq(expected.to_s)
-        expect(described_class.detect_provider).to eq(Mergify::RSpec::Utils.ci_provider.to_s)
-        expect(described_class.detect_repository_name).to eq(Mergify::RSpec::Utils.repository_name)
+        expect(described_class.detect_provider).to eq(provider)
+        expect(described_class.detect_repository_name).to eq(repository)
 
         env.each_key { |k| ENV.delete(k) }
       end

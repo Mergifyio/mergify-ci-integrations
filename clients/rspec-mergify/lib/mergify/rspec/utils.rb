@@ -1,23 +1,20 @@
 # frozen_string_literal: true
 
-require 'open3'
-
 module Mergify
   module RSpec
     # Utility methods shared across the rspec-mergify gem.
+    #
+    # CI detection used to live here -- the provider table, the git shelling
+    # out, the per-provider environment mappings. It is the Rust core's now, via
+    # the extension in Mergify::RSpec::Native, so that every Mergify test client
+    # detects identically. What is left is what is genuinely Ruby's: parsing a
+    # repository name the API needs split, and deciding whether the plugin
+    # should switch itself on at all.
     module Utils
       module_function
 
       # Raised when a repository full name (owner/repo) is malformed.
       class InvalidRepositoryFullNameError < StandardError; end
-
-      SUPPORTED_CIS = {
-        'GITHUB_ACTIONS' => :github_actions,
-        'CIRCLECI' => :circleci,
-        'JENKINS_URL' => :jenkins,
-        'BUILDKITE' => :buildkite,
-        '_RSPEC_MERGIFY_TEST' => :rspec_mergify_suite
-      }.freeze
 
       TRUTHY_STRINGS = %w[y yes t true on 1].freeze
       FALSY_STRINGS  = %w[n no f false off 0].freeze
@@ -40,42 +37,12 @@ module Mergify
 
       # Returns true when the suite is running inside CI or when
       # RSPEC_MERGIFY_ENABLE is set to a truthy value.
+      #
+      # Deliberately not the core's provider detection: this asks whether the
+      # plugin should run, which an unrecognised CI or a developer setting
+      # RSPEC_MERGIFY_ENABLE both answer yes to.
       def in_ci?
         env_truthy?('CI') || env_truthy?('RSPEC_MERGIFY_ENABLE')
-      end
-
-      # Evaluates whether a CI environment variable should be considered enabled.
-      # rubocop:disable-next Metrics/MethodLength
-      def ci_provider
-        SUPPORTED_CIS.each do |envvar, name|
-          next unless ENV.key?(envvar)
-
-          enabled =
-            begin
-              strtobool(ENV.fetch(envvar, ''))
-            rescue ArgumentError
-              !ENV.fetch(envvar, '').strip.empty?
-            end
-
-          return name if enabled
-        end
-        nil
-      end
-
-      # Parse a git remote URL (SSH or HTTPS) into "owner/repo" form.
-      # Returns nil when the URL cannot be recognised.
-      def repository_name_from_url(url)
-        # SSH: git@github.com:owner/repo.git
-        if (m = url.match(%r{\Agit@[\w.-]+:(?<full_name>[\w.-]+/[\w.-]+?)(?:\.git)?/?$}))
-          return m[:full_name]
-        end
-
-        # HTTPS/HTTP with optional host (and optional port)
-        if (m = url.match(%r{\A(?:https?://[\w.-]+(?::\d+)?/)?(?<full_name>[\w.-]+/[\w.-]+)/?\z}))
-          return m[:full_name]
-        end
-
-        nil
       end
 
       # Split "owner/repo" into [owner, repo].
@@ -85,55 +52,6 @@ module Mergify
         return parts if parts.size == 2
 
         raise InvalidRepositoryFullNameError, "Invalid repository name: #{full_repo_name}"
-      end
-
-      # Run a git subcommand via Open3.
-      # Returns stripped stdout on success, nil on failure.
-      def git(*args)
-        stdout, status = Open3.capture2('git', *args, err: File::NULL)
-        status.success? ? stdout.strip : nil
-      rescue StandardError
-        nil
-      end
-
-      # Build an attribute hash from a mapping of
-      # { attr_name => [cast_method_symbol, env_var_name_or_callable] }.
-      # Attributes whose env var is unset or whose callable returns nil are omitted.
-      def get_attributes(mapping)
-        mapping.each_with_object({}) do |(attr, (cast, env_or_callable)), result|
-          value = env_or_callable.respond_to?(:call) ? env_or_callable.call : ENV.fetch(env_or_callable, nil)
-
-          next if value.nil?
-          next if value.respond_to?(:empty?) && value.empty?
-
-          result[attr] = value.public_send(cast)
-        end
-      end
-
-      # Detect the repository name using CI environment variables or a git
-      # remote fallback.
-      # rubocop:disable-next Metrics/MethodLength,Metrics/CyclomaticComplexity
-      def repository_name
-        provider = ci_provider
-
-        case provider
-        when :jenkins
-          url = ENV.fetch('GIT_URL', nil)
-          return repository_name_from_url(url) if url
-        when :github_actions
-          return ENV.fetch('GITHUB_REPOSITORY', nil)
-        when :circleci
-          url = ENV.fetch('CIRCLE_REPOSITORY_URL', nil)
-          return repository_name_from_url(url) if url
-        when :buildkite
-          url = ENV.fetch('BUILDKITE_REPO', nil)
-          return repository_name_from_url(url) if url
-        when :rspec_mergify_suite
-          return 'Mergifyio/rspec-mergify'
-        end
-
-        url = git('config', '--get', 'remote.origin.url')
-        repository_name_from_url(url) if url
       end
     end
   end
