@@ -109,14 +109,7 @@ def install_fake_api_client(
     """
 
     class _FakeApiClient:
-        def __init__(
-            self,
-            api_url: str,
-            token: str,
-            owner: str,
-            repo: str,
-            client_version: str,
-        ) -> None:
+        def __init__(self, api_url: str, token: str, owner: str, repo: str) -> None:
             pass
 
         def fetch_quarantine(self, branch: str) -> typing.Optional[typing.List[str]]:
@@ -347,6 +340,7 @@ class _OTLPServer(socketserver.TCPServer):
 
     def __init__(self, *args: typing.Any, **kwargs: typing.Any) -> None:
         self.bodies: typing.List[bytes] = []
+        self.user_agents: typing.List[str] = []
         self.test_selection: typing.Optional[typing.Dict[str, typing.Any]] = None
         super().__init__(*args, **kwargs)
 
@@ -355,6 +349,7 @@ class _OTLPRequestHandler(http.server.BaseHTTPRequestHandler):
     server: _OTLPServer
 
     def do_POST(self) -> None:
+        self.server.user_agents.append(self.headers.get("User-Agent", ""))
         body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
         if self.headers.get("Content-Encoding") == "gzip":
             body = gzip.decompress(body)
@@ -365,6 +360,7 @@ class _OTLPRequestHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:
+        self.server.user_agents.append(self.headers.get("User-Agent", ""))
         # Quarantine and test selection share this base URL. Answering 404 keeps
         # them out of the way without pretending they were served -- unless the
         # test asked for a selection to be served, which is the only way a run
@@ -437,6 +433,11 @@ class OTLPCollector:
     @property
     def span_names(self) -> typing.Set[str]:
         return {span.name for batch in self.batches for span in batch.spans}
+
+    @property
+    def user_agents(self) -> typing.List[str]:
+        """The `User-Agent` of every request, fetches and uploads alike."""
+        return list(self._server.user_agents)
 
 
 def configure_upload(

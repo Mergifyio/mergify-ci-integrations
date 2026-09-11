@@ -209,7 +209,7 @@ class MergifyCIInsights:
                 pass
             else:
                 self.api_client = _mergify_ci.CiApiClient(
-                    self.api_url, self.token, owner, repo, utils.get_version()
+                    self.api_url, self.token, owner, repo
                 )
 
         self._load_run_context()

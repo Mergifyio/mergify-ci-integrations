@@ -2,9 +2,7 @@
 //!
 //! Built as a `cdylib` by maturin and packaged *inside* the pytest-mergify
 //! wheel as `pytest_mergify._mergify_ci` — there is no separately published
-//! binding artifact (the bundled model). When the real pytest plugin migrates
-//! in (MRGFY-7766) it replaces the stub Python package next to this file; the
-//! binding wiring stays identical.
+//! binding artifact (the bundled model).
 
 use std::collections::BTreeMap;
 
@@ -18,9 +16,23 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict};
 
 /// The distribution this binding ships inside, as reported in the `User-Agent`.
-/// Its *version* comes from Python (`importlib.metadata`): the crate version is
-/// the build-time `0.0.0` placeholder, while the wheel carries the real one.
 const CLIENT_NAME: &str = "pytest-mergify";
+
+/// The installed version of [`CLIENT_NAME`], as reported in the `User-Agent`.
+///
+/// Read back from the distribution's metadata: the crate version is the
+/// build-time `0.0.0` placeholder, while the release stamps the real one into
+/// the wheel. Looking it up here rather than in the plugin keeps it off the
+/// Python surface — the binding knows which distribution it ships inside.
+fn client_version(py: Python<'_>) -> String {
+    py.import("importlib.metadata")
+        .and_then(|metadata| metadata.call_method1("version", (CLIENT_NAME,)))
+        .and_then(|version| version.extract())
+        // A source tree that was never installed has no metadata. The
+        // User-Agent is telemetry: report that rather than refuse to build the
+        // client the run's quarantine and uploads depend on.
+        .unwrap_or_else(|_| "unknown".to_owned())
+}
 
 /// Detect from the current process environment and working directory.
 fn context() -> CiContext {
@@ -76,10 +88,9 @@ impl CiApiClient {
         token: String,
         owner: String,
         repo: String,
-        client_version: &str,
     ) -> PyResult<Self> {
         let python = py.version_info();
-        let client_info = ClientInfo::new(CLIENT_NAME, client_version).with_runtime(
+        let client_info = ClientInfo::new(CLIENT_NAME, &client_version(py)).with_runtime(
             "python",
             &format!("{}.{}.{}", python.major, python.minor, python.patch),
         );
