@@ -1,0 +1,1 @@
+Alexandre's review: no instruction to contact support in the terminal — the three not-applied shapes are ours to see in our own data. Sentence becomes "Mergify's answer didn't match the tests this run collected, so the full suite ran."; a test now asserts no block mentions support.
