@@ -135,6 +135,56 @@ RSpec.describe Mergify::RSpec::Native do
       end
     end
 
+    describe '#upload_trace' do
+      let(:span) do
+        {
+          'name' => 'spec/foo_spec.rb[1:1]',
+          'trace_id' => ("\x11" * 16).b,
+          'span_id' => ("\x22" * 8).b,
+          'start_unix_nano' => 1_700_000_000_000_000_000,
+          'end_unix_nano' => 1_700_000_001_000_000_000,
+          'attributes' => { 'test.case.result.status' => 'passed', 'cicd.test.rerun_count' => 2 },
+          'status' => 'ok'
+        }
+      end
+
+      it 'sends the trace and returns nothing on success' do
+        with_stub_api(status: 200, body: '{}') do |url, paths|
+          expect(client(url).upload_trace({ 'service.name' => 'rspec' }, [span])).to be_nil
+          expect(paths.first).to include('/v1/ci/Mergifyio/repositories/rspec-mergify/traces')
+        end
+      end
+
+      it 'fails loud, unlike a fetch: an unreported run is not a degraded one' do
+        with_stub_api(status: 500, body: '{}') do |url, _paths|
+          expect { client(url).upload_trace({}, [span]) }
+            .to raise_error(Mergify::RSpec::Native::ApiError)
+        end
+      end
+
+      it 'rejects an id that is not the width OpenTelemetry fixes' do
+        with_stub_api(status: 200, body: '{}') do |url, _paths|
+          expect { client(url).upload_trace({}, [span.merge('trace_id' => 'short')]) }
+            .to raise_error(ArgumentError, /trace_id must be 16 bytes/)
+        end
+      end
+
+      it 'rejects a status it does not know' do
+        with_stub_api(status: 200, body: '{}') do |url, _paths|
+          expect { client(url).upload_trace({}, [span.merge('status' => 'sideways')]) }
+            .to raise_error(ArgumentError, /unknown span status/)
+        end
+      end
+
+      it 'carries an error status and its message' do
+        with_stub_api(status: 200, body: '{}') do |url, _paths|
+          failed = span.merge('status' => 'error', 'status_message' => 'expected true, got false')
+
+          expect(client(url).upload_trace({}, [failed])).to be_nil
+        end
+      end
+    end
+
     it 'raises when quarantine is missing rather than treating it as dormant' do
       with_stub_api(status: 404, body: '{}') do |url, _paths|
         expect { client(url).fetch_quarantine('main') }.to raise_error(Mergify::RSpec::Native::ApiError, /404/)
