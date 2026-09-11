@@ -8,43 +8,47 @@ RSpec.describe Mergify::RSpec::FlakyDetector do
   let(:token) { 'test-token' }
   let(:url) { 'https://api.mergify.com' }
   let(:full_repository_name) { 'owner/repo' }
-  let(:context_url) do
-    'https://api.mergify.com/v1/ci/owner/repositories/repo/flaky-detection-context'
-  end
-
+  # The context arrives from the binding as a string-keyed Hash, which is the
+  # wire model's own shape -- not JSON this spec has to serialise.
   let(:context_response) do
     {
-      budget_ratio_for_new_tests: 0.1,
-      budget_ratio_for_unhealthy_tests: 0.2,
-      existing_test_names: ['./spec/old_spec.rb[1:1]', './spec/another_spec.rb[1:1]'],
-      existing_tests_mean_duration_ms: 100,
-      unhealthy_test_names: ['./spec/flaky_spec.rb[1:1]'],
-      max_test_execution_count: 10,
-      max_test_name_length: 500,
-      min_budget_duration_ms: 5000,
-      min_test_execution_count: 3
-    }.to_json
+      'budget_ratio_for_new_tests' => 0.1,
+      'budget_ratio_for_unhealthy_tests' => 0.2,
+      'existing_test_names' => ['./spec/old_spec.rb[1:1]', './spec/another_spec.rb[1:1]'],
+      'existing_tests_mean_duration_ms' => 100,
+      'unhealthy_test_names' => ['./spec/flaky_spec.rb[1:1]'],
+      'max_test_execution_count' => 10,
+      'max_test_name_length' => 500,
+      'min_budget_duration_ms' => 5000,
+      'min_test_execution_count' => 3
+    }
   end
 
-  def stub_context_request(status: 200, body: context_response)
-    stub_request(:get, context_url)
-      .with(headers: { 'Authorization' => "Bearer #{token}" })
-      .to_return(
-        status: status,
-        body: body,
-        headers: { 'Content-Type' => 'application/json' }
-      )
+  # The fetch happens in Rust, past WebMock's reach, so the seam is the client.
+  def stub_context_request(context: context_response, raises: nil)
+    client = instance_double(Mergify::RSpec::Native::Client)
+    allow(Mergify::RSpec::Native).to receive(:available?).and_return(true)
+    allow(Mergify::RSpec::Native::Client).to receive(:new).and_return(client)
+    if raises
+      allow(client).to receive(:fetch_flaky_context).and_raise(raises)
+    else
+      allow(client).to receive(:fetch_flaky_context).and_return(context)
+    end
+    client
   end
 
   describe '#initialize' do
     context 'when fetching context succeeds' do
       before { stub_context_request }
 
-      it 'fetches context from the API' do
+      it 'fetches the context through the binding' do
+        client = stub_context_request
+
         detector = described_class.new(token: token, url: url, full_repository_name: full_repository_name,
                                        mode: 'new')
+
         expect(detector).not_to be_nil
-        expect(a_request(:get, context_url)).to have_been_made
+        expect(client).to have_received(:fetch_flaky_context)
       end
 
       it 'does not raise in unhealthy mode even with existing tests' do
@@ -57,17 +61,17 @@ RSpec.describe Mergify::RSpec::FlakyDetector do
     context 'when mode is "new" and existing_test_names is empty' do
       before do
         empty_context = {
-          budget_ratio_for_new_tests: 0.1,
-          budget_ratio_for_unhealthy_tests: 0.2,
-          existing_test_names: [],
-          existing_tests_mean_duration_ms: 100,
-          unhealthy_test_names: [],
-          max_test_execution_count: 10,
-          max_test_name_length: 500,
-          min_budget_duration_ms: 5000,
-          min_test_execution_count: 3
-        }.to_json
-        stub_context_request(body: empty_context)
+          'budget_ratio_for_new_tests' => 0.1,
+          'budget_ratio_for_unhealthy_tests' => 0.2,
+          'existing_test_names' => [],
+          'existing_tests_mean_duration_ms' => 100,
+          'unhealthy_test_names' => [],
+          'max_test_execution_count' => 10,
+          'max_test_name_length' => 500,
+          'min_budget_duration_ms' => 5000,
+          'min_test_execution_count' => 3
+        }
+        stub_context_request(context: empty_context)
       end
 
       it 'raises FlakyDetectionDisabledError so the caller skips silently' do
@@ -77,8 +81,8 @@ RSpec.describe Mergify::RSpec::FlakyDetector do
       end
     end
 
-    context 'when the repository has not opted into flaky detection (404)' do
-      before { stub_context_request(status: 404, body: '') }
+    context 'when the repository has not opted into flaky detection' do
+      before { stub_context_request(context: nil) }
 
       it 'raises FlakyDetectionDisabledError so the caller skips silently' do
         expect do
@@ -118,28 +122,53 @@ RSpec.describe Mergify::RSpec::FlakyDetector do
         expect(detector.budget).to be_within(0.01).of(5.0)
       end
 
+      # The budget is sized from the existing tests *this session runs*, not
+      # every existing test the context knows about. Passing both existing
+      # tests: 0.1 * (100000ms/1000) * 2 = 20.0 > the 5.0 floor.
       it 'uses ratio-based budget when it exceeds min_budget' do
-        # To have ratio > min_budget: need budget_ratio * mean * count > 5.0
-        # With 0.1 * (100000ms/1000) * 2 = 20.0 > 5.0
         big_context = {
-          budget_ratio_for_new_tests: 0.1,
-          budget_ratio_for_unhealthy_tests: 0.2,
-          existing_test_names: ['./spec/old_spec.rb[1:1]', './spec/another_spec.rb[1:1]'],
-          existing_tests_mean_duration_ms: 100_000,
-          unhealthy_test_names: [],
-          max_test_execution_count: 10,
-          max_test_name_length: 500,
-          min_budget_duration_ms: 5000,
-          min_test_execution_count: 3
-        }.to_json
-        stub_request(:get, context_url)
-          .with(headers: { 'Authorization' => "Bearer #{token}" })
-          .to_return(status: 200, body: big_context, headers: { 'Content-Type' => 'application/json' })
+          'budget_ratio_for_new_tests' => 0.1,
+          'budget_ratio_for_unhealthy_tests' => 0.2,
+          'existing_test_names' => ['./spec/old_spec.rb[1:1]', './spec/another_spec.rb[1:1]'],
+          'existing_tests_mean_duration_ms' => 100_000,
+          'unhealthy_test_names' => [],
+          'max_test_execution_count' => 10,
+          'max_test_name_length' => 500,
+          'min_budget_duration_ms' => 5000,
+          'min_test_execution_count' => 3
+        }
+        stub_context_request(context: big_context)
 
         big_detector = described_class.new(token: token, url: url, full_repository_name: full_repository_name,
                                            mode: 'new')
-        big_detector.prepare_for_session(['./spec/new_spec.rb[1:1]'])
+        big_detector.prepare_for_session(
+          ['./spec/new_spec.rb[1:1]', './spec/old_spec.rb[1:1]', './spec/another_spec.rb[1:1]']
+        )
+
         expect(big_detector.budget).to be_within(0.01).of(20.0)
+      end
+
+      it 'sizes the budget by the existing tests in this session, not the whole baseline' do
+        big_context = {
+          'budget_ratio_for_new_tests' => 0.1,
+          'budget_ratio_for_unhealthy_tests' => 0.2,
+          'existing_test_names' => ['./spec/old_spec.rb[1:1]', './spec/another_spec.rb[1:1]'],
+          'existing_tests_mean_duration_ms' => 100_000,
+          'unhealthy_test_names' => [],
+          'max_test_execution_count' => 10,
+          'max_test_name_length' => 500,
+          'min_budget_duration_ms' => 5000,
+          'min_test_execution_count' => 3
+        }
+        stub_context_request(context: big_context)
+        detector = described_class.new(token: token, url: url, full_repository_name: full_repository_name,
+                                       mode: 'new')
+
+        # One of the two existing tests runs, so half the baseline duration
+        # counts: 0.1 * 100 * 1 = 10.0, still above the 5.0 floor.
+        detector.prepare_for_session(['./spec/new_spec.rb[1:1]', './spec/old_spec.rb[1:1]'])
+
+        expect(detector.budget).to be_within(0.01).of(10.0)
       end
     end
 

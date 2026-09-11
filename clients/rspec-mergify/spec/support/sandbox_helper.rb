@@ -21,10 +21,14 @@ module SandboxHelper
       detect_attributes: {}
     )
 
-    # The gem's own suite has no repository opted into flaky detection; a 404
-    # makes the detector skip silently instead of reaching the network.
-    stub_request(:get, 'https://api.mergify.com/v1/ci/owner/repositories/repo/flaky-detection-context')
-      .to_return(status: 404)
+    # The gem's own suite has no repository opted into flaky detection. The
+    # client reports dormant, so the detector skips silently -- and nothing
+    # reaches the network, which WebMock could no longer prevent anyway now
+    # that the request would leave from Rust.
+    client = instance_double(Mergify::RSpec::Native::Client, fetch_quarantine: [],
+                                                             fetch_flaky_context: nil)
+    allow(Mergify::RSpec::Native).to receive(:available?).and_return(true)
+    allow(Mergify::RSpec::Native::Client).to receive(:new).and_return(client)
 
     # A clean, predictable resource: the CI attributes now arrive as one hash
     # from the binding, stubbed empty above, leaving only the framework
