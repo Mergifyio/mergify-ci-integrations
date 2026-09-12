@@ -78,7 +78,7 @@ jobs:
         if: matrix.zig
         with:
           version: 0.14.1
-      - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af # v2.87.11
+      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2.87.12
         if: matrix.zig
         with:
           tool: cargo-zigbuild
