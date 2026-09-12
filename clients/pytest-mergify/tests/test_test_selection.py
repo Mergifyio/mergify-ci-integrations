@@ -51,22 +51,29 @@ def test_subset_is_applied_to_the_collection() -> None:
 
     items = [
         FakeItem("tests/a.py::test_broken"),
+        FakeItem("tests/b.py::test_gone"),
         FakeItem("tests/a.py::test_fine"),
         FakeItem("tests/c.py::test_other"),
     ]
     config = FakeConfig()
     selection.filter_items(config, items)  # type: ignore[arg-type]
 
-    assert [item.nodeid for item in items] == ["tests/a.py::test_broken"]
+    assert [item.nodeid for item in items] == [
+        "tests/a.py::test_broken",
+        "tests/b.py::test_gone",
+    ]
     assert [item.nodeid for item in config.hook.deselected] == [
         "tests/a.py::test_fine",
         "tests/c.py::test_other",
     ]
-    assert selection.kept_count == 1
+    assert selection.kept_count == 2
     assert selection.deselected_count == 2
+    # The answer was honoured, so there is nothing for this run to declare
+    # about it.
+    assert selection.not_applied_reason is None
 
 
-def test_subset_matching_nothing_falls_back_to_full() -> None:
+def test_a_subset_matching_nothing_runs_everything() -> None:
     selection = test_selection.TestSelection(
         selection="subset",
         reason="reduced_rerun",
@@ -77,10 +84,48 @@ def test_subset_matching_nothing_falls_back_to_full() -> None:
     config = FakeConfig()
     selection.filter_items(config, items)  # type: ignore[arg-type]
 
-    assert selection.selection == "full"
-    assert selection.reason == "subset_matched_no_collected_test"
+    # What Mergify said survives the run's inability to act on it. The
+    # alternative -- rewriting these two with the client's own verdict, which
+    # is what this used to do -- destroys the record of what was offered in the
+    # single case that would prove the offer was wrong.
+    assert selection.selection == "subset"
+    assert selection.reason == "reduced_rerun"
+    assert selection.not_applied_reason == "subset_matched_no_collected_test"
     assert [item.nodeid for item in items] == ["tests/a.py::test_fine"]
     assert config.hook.deselected == []
+
+
+def test_a_partly_matched_subset_runs_everything_too() -> None:
+    # The shape that used to pass silently: two of the three served tests exist
+    # here, so the run would have executed those two, deselected the rest and
+    # reported an ordinary reduction. Mergify asked for three tests it believed
+    # had failed; a green build over two of them is a verdict nobody gave.
+    selection = test_selection.TestSelection(
+        selection="subset",
+        reason="reduced_rerun",
+        tests=[
+            "tests/a.py::test_broken",
+            "tests/a.py::test_also_broken",
+            "tests/renamed.py::test_gone",
+        ],
+    )
+
+    items = [
+        FakeItem("tests/a.py::test_broken"),
+        FakeItem("tests/a.py::test_also_broken"),
+        FakeItem("tests/a.py::test_fine"),
+    ]
+    config = FakeConfig()
+    selection.filter_items(config, items)  # type: ignore[arg-type]
+
+    assert selection.selection == "subset"
+    assert selection.not_applied_reason == "subset_partly_absent_from_collection"
+    assert len(items) == 3
+    assert config.hook.deselected == []
+    # Left unset rather than set to what a reduction would have kept: nothing
+    # was reduced, and a count here would size a run that did not happen.
+    assert selection.kept_count is None
+    assert selection.deselected_count == 0
 
 
 def test_full_response_leaves_the_collection_untouched() -> None:
@@ -96,16 +141,26 @@ def test_full_response_leaves_the_collection_untouched() -> None:
     assert config.hook.deselected == []
 
 
-def test_subset_without_tests_normalises_to_full() -> None:
-    # A `subset` answer is only honoured with a non-empty list. An engine
-    # predating the polymorphic response still sends `tests: []`; that stays a
-    # plain `full` answer rather than a subset that would deselect everything.
+def test_a_subset_without_tests_runs_everything() -> None:
+    # A `subset` answer is only honoured with a non-empty list. Nothing runs
+    # everything by saying `subset` with no test in it: verified against the
+    # engine, which answers `full` / `job_previously_green` when it has nothing
+    # to replay. So this shape runs everything AND is recorded, rather than
+    # being read as the `full` answer it resembles.
     selection = test_selection.TestSelection(
         selection="subset", reason="reduced_rerun", tests=[]
     )
 
-    assert selection.selection == "full"
+    assert selection.selection == "subset"
+    assert selection.not_applied_reason == "subset_served_without_tests"
     assert selection.tests == []
+
+    items = [FakeItem("tests/a.py::test_fine")]
+    config = FakeConfig()
+    selection.filter_items(config, items)  # type: ignore[arg-type]
+
+    assert [item.nodeid for item in items] == ["tests/a.py::test_fine"]
+    assert config.hook.deselected == []
 
 
 @pytest.mark.parametrize(
@@ -124,7 +179,65 @@ def test_an_unrecognised_selection_runs_everything(served: str) -> None:
     # string (the binding hands over a `Dict[str, Any]`), so this is the shape
     # an out-of-date client actually receives.
     selection = test_selection.TestSelection(selection=served, reason="whatever")  # type: ignore[arg-type]
-    assert selection.selection == "full"
+
+    items = [FakeItem("tests/a.py::test_fine")]
+    config = FakeConfig()
+    selection.filter_items(config, items)  # type: ignore[arg-type]
+
+    assert [item.nodeid for item in items] == ["tests/a.py::test_fine"]
+    assert config.hook.deselected == []
+    # Kept verbatim, unrecognised as it is: it is the only evidence of which
+    # answer this client was too old for, and rewriting it to `full` would make
+    # a plugin left behind by a release indistinguishable from one Mergify told
+    # to run everything.
+    assert selection.selection == served
+    assert selection.not_applied_reason == "unrecognised_selection"
+
+
+def test_a_honoured_reduction_reports_the_reduction_and_nothing_else() -> None:
+    # The feature's happy path, and the block the customer actually reads when
+    # it works. The "could not apply" sentence is chosen by a field that is
+    # None here; a condition widened by one word would replace this block with
+    # that sentence on a run that went perfectly.
+    selection = test_selection.TestSelection(
+        selection="subset",
+        reason="reduced_rerun",
+        tests=["tests/a.py::test_broken"],
+    )
+    items = [FakeItem("tests/a.py::test_broken"), FakeItem("tests/a.py::test_fine")]
+    selection.filter_items(FakeConfig(), items)  # type: ignore[arg-type]
+
+    report = selection.report()
+    assert "Mergify re-executed only that one and skipped the 1" in report
+    assert "  tests/a.py::test_broken\n" in report
+    assert "didn't match" not in report
+
+
+def test_a_duplicated_node_id_cannot_hide_a_missing_served_test() -> None:
+    # `pytest --keep-duplicates` collects the same nodeid more than once, on
+    # purpose. Counting matched ITEMS against distinct SERVED ids then lets one
+    # duplicate cancel one absent test: the run reduces to an arbitrary part of
+    # what Mergify asked for and reports an ordinary reduction -- the exact
+    # outcome the all-or-nothing rule exists to prevent, reached through the
+    # rule's own guard.
+    selection = test_selection.TestSelection(
+        selection="subset",
+        reason="reduced_rerun",
+        tests=["tests/a.py::test_broken", "tests/gone.py::test_renamed"],
+    )
+
+    items = [
+        FakeItem("tests/a.py::test_broken"),
+        FakeItem("tests/a.py::test_broken"),
+        FakeItem("tests/a.py::test_fine"),
+    ]
+    config = FakeConfig()
+    selection.filter_items(config, items)  # type: ignore[arg-type]
+
+    assert selection.not_applied_reason == "subset_partly_absent_from_collection"
+    assert len(items) == 3
+    assert config.hook.deselected == []
+    assert "didn't match the tests this run collected" in selection.report()
 
 
 def test_an_empty_selection_deselects_the_whole_collection() -> None:
@@ -729,6 +842,9 @@ def test_a_served_subset_reports_what_it_ran_out_of_what_it_collected(
     assert reported["test.selection.reason"] == "queue_rerun"
     assert reported["test.selection.kept_count"] == 1
     assert reported["test.collection.count"] == 2
+    # Absent, not "none": counting the runs that could not honour their answer
+    # is counting this key, so an honoured run must not carry it at all.
+    assert "test.selection.not_applied_reason" not in reported
 
 
 def test_a_full_answer_reports_the_whole_collection_as_kept(
@@ -751,6 +867,7 @@ def test_a_full_answer_reports_the_whole_collection_as_kept(
     assert reported["test.selection.reason"] == "no_predecessor"
     assert reported["test.selection.kept_count"] == 2
     assert reported["test.collection.count"] == 2
+    assert "test.selection.not_applied_reason" not in reported
 
 
 def test_a_refusal_reports_that_it_executed_nothing(
@@ -780,31 +897,93 @@ def test_a_refusal_reports_that_it_executed_nothing(
     assert reported["test.collection.count"] == 2
 
 
-def test_a_subset_matching_nothing_reports_the_full_run_it_degraded_to(
+@pytest.mark.parametrize(
+    ("served_tests", "expected_degradation"),
+    [
+        (
+            ["some_other_file.py::test_renamed_since"],
+            "subset_matched_no_collected_test",
+        ),
+        (
+            [
+                "test_a_subset_this_run_cannot_honour_reports_both_halves.py::test_kept",
+                "some_other_file.py::test_renamed_since",
+            ],
+            "subset_partly_absent_from_collection",
+        ),
+        # Not an id mismatch at all, but it reaches the wire through the same
+        # one place, and asserting the three causes together is what keeps that
+        # true.
+        ([], "subset_served_without_tests"),
+    ],
+)
+def test_a_subset_this_run_cannot_honour_reports_both_halves(
     pytester: _pytest.pytester.Pytester,
     monkeypatch: pytest.MonkeyPatch,
+    served_tests: typing.List[str],
+    expected_degradation: str,
 ) -> None:
-    # The served answer and the run that happened part ways here: a subset
-    # naming tests this collection does not hold degrades to running everything.
-    # What is reported is the run, not the offer -- counting this as a served
-    # subset would credit the feature with a reduction that never occurred, and
-    # hide the mismatch that caused it behind a `subset` nobody would question.
-    _, plugin, _ = _run_with_selection(
+    # The served answer and the run that happened part ways here, and BOTH are
+    # reported: Mergify's word untouched, and beside it the run's own account
+    # of why it did something else. Answering `full` here instead -- which is
+    # what this used to do -- erases the only evidence that Mergify named tests
+    # a run could not find, in the one case that evidence matters.
+    #
+    # `kept_count` is what makes the pair readable without a third key: two out
+    # of two collected is the full suite, whatever the answer above it says.
+    result, plugin, _ = _run_with_selection(
         pytester,
         monkeypatch,
         _TWO_TESTS,
         served={
             "selection": "subset",
             "reason": "queue_rerun",
-            "tests": ["some_other_file.py::test_renamed_since"],
+            "tests": served_tests,
+        },
+    )
+
+    # Both tests ran: the answer was declined, not partly applied.
+    result.assert_outcomes(passed=2)
+    # And the one person who can see it is told, in the run's own summary, in
+    # a sentence rather than an identifier. The attributes below reach us only
+    # if the session uploads; this line reaches the developer watching the
+    # build either way.
+    result.stdout.fnmatch_lines(
+        ["*Mergify's answer didn't match the tests this run collected*"]
+    )
+
+    reported = _reported(plugin)
+    assert reported["test.selection.answer"] == "subset"
+    assert reported["test.selection.reason"] == "queue_rerun"
+    assert reported["test.selection.not_applied_reason"] == expected_degradation
+    assert reported["test.selection.kept_count"] == 2
+    assert reported["test.collection.count"] == 2
+
+
+def test_an_answer_this_client_predates_is_reported_as_served(
+    pytester: _pytest.pytester.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The degradation that is expected to happen, and the reason this key is a
+    # word rather than a flag: the day the engine ships a fifth answer, every
+    # published client lands here. A counter that cannot tell this apart from
+    # the three that signal a defect on our side alerts on every release.
+    _, plugin, _ = _run_with_selection(
+        pytester,
+        monkeypatch,
+        _TWO_TESTS,
+        served={
+            "selection": "an-answer-from-a-newer-mergify",
+            "reason": "whatever_the_engine_called_it",
+            "tests": [],
         },
     )
 
     reported = _reported(plugin)
-    assert reported["test.selection.answer"] == "full"
-    assert reported["test.selection.reason"] == "subset_matched_no_collected_test"
+    assert reported["test.selection.answer"] == "an-answer-from-a-newer-mergify"
+    assert reported["test.selection.reason"] == "whatever_the_engine_called_it"
+    assert reported["test.selection.not_applied_reason"] == "unrecognised_selection"
     assert reported["test.selection.kept_count"] == 2
-    assert reported["test.collection.count"] == 2
 
 
 def test_what_was_collected_is_what_this_plugin_collected(
@@ -895,6 +1074,47 @@ def test_an_empty_selection_uploads_a_session_saying_it_ran_none_of_them(
     assert batch.resource_attributes["test.selection.kept_count"] == 0
     # The count is the point: zero executed out of nothing is a job with no
     # tests, zero executed out of two is the reduction this feature just made.
+    assert batch.resource_attributes["test.collection.count"] == 2
+
+
+def test_a_run_that_could_not_apply_its_answer_uploads_both_halves(
+    pytester: _pytest.pytester.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+    otlp_collector: conftest.OTLPCollector,
+) -> None:
+    # The one assertion that says the alert can exist. Everything else here
+    # reads the plugin's own attribute dict; this reads what actually left the
+    # process, because a run can hold the right attributes and upload none of
+    # them -- and a degradation nobody receives is exactly the CI log this
+    # ticket exists to stop dying in.
+    conftest.configure_upload(monkeypatch, otlp_collector)
+    monkeypatch.setenv("GITHUB_HEAD_REF", "queue/main/42")
+    monkeypatch.setenv("GITHUB_SHA", "cafecafe")
+    monkeypatch.setenv("GITHUB_WORKFLOW", "CI")
+    monkeypatch.setenv("GITHUB_JOB", "unit")
+    monkeypatch.setenv(ci_insights.TEST_SELECTION_ENABLE_ENV, "true")
+    otlp_collector.serve_test_selection(
+        {
+            "selection": "subset",
+            "reason": "queue_rerun",
+            "tests": ["nothing_this_run_collected.py::test_gone"],
+        }
+    )
+    pytester.makepyfile(_TWO_TESTS)
+
+    result = pytester.runpytest_subprocess()
+
+    # The customer's run is unharmed: both tests ran and the job is green.
+    assert result.ret == pytest.ExitCode.OK
+    result.assert_outcomes(passed=2)
+    (batch,) = otlp_collector.batches
+    assert batch.resource_attributes["test.selection.answer"] == "subset"
+    assert batch.resource_attributes["test.selection.reason"] == "queue_rerun"
+    assert (
+        batch.resource_attributes["test.selection.not_applied_reason"]
+        == "subset_matched_no_collected_test"
+    )
+    assert batch.resource_attributes["test.selection.kept_count"] == 2
     assert batch.resource_attributes["test.collection.count"] == 2
 
 
@@ -1050,18 +1270,18 @@ def test_the_subset_block_lists_what_was_re_executed() -> None:
     )
 
 
-def test_the_subset_block_lists_only_what_was_collected() -> None:
-    # A served name absent from the collection was not re-executed, so it has
-    # no place in a list titled by what Mergify re-executed.
+def test_a_subset_naming_a_test_this_run_did_not_collect_is_not_applied() -> None:
+    # A served name absent from the collection declines the whole answer: the
+    # full suite runs, and the block says so rather than listing the part that
+    # did match as if Mergify had re-executed it.
     served = ["tests/test_a.py::test_kept", "tests/test_gone.py::test_renamed"]
     collected = ["tests/test_a.py::test_kept", "tests/test_a.py::test_fine"]
-    report = _served_subset(served, collected).report()
-    assert "  tests/test_a.py::test_kept\n" in report
-    assert "test_renamed" not in report
-    assert (
-        "1 of its 2 tests failed. Mergify re-executed only that one and skipped"
-        in report
-    )
+    selection = _served_subset(served, collected)
+    assert selection.not_applied_reason == "subset_partly_absent_from_collection"
+    report = selection.report()
+    assert "didn't match the tests this run collected" in report
+    assert "re-executed" not in report
+    assert "test_kept" not in report and "test_renamed" not in report
 
 
 def test_the_subset_list_is_capped_at_ten() -> None:
@@ -1186,7 +1406,9 @@ def test_a_dormant_repository_gets_a_sentence() -> None:
 
 def test_a_subset_matching_nothing_gets_a_sentence() -> None:
     selection = _served_subset(["tests/test_gone.py::test_renamed"], ["tests/a.py::t"])
-    assert selection.reason == "subset_matched_no_collected_test"
+    # Mergify's word survives; the sentence is chosen by the run's own.
+    assert selection.reason == "reduced_rerun"
+    assert selection.not_applied_reason == "subset_matched_no_collected_test"
     assert selection.report() == (
         "✂️ Test selection\n"
         "\n"
@@ -1208,7 +1430,22 @@ def test_an_answer_that_could_not_be_applied_leaves_the_reader_nothing_to_do(
 ) -> None:
     # Unreachable against a correct engine, and visible in our own data, so the
     # three share a sentence that names the fact and asks nothing of the reader.
-    report = test_selection.TestSelection(selection="full", reason=reason).report()
+    # Built the way each actually arises -- Mergify's `reason` stays its own,
+    # and the client's verdict lands in `not_applied_reason` -- rather than by
+    # writing the client's word into Mergify's field.
+    if reason == "subset_served_without_tests":
+        selection = test_selection.TestSelection(
+            selection="subset", reason="reduced_rerun", tests=[]
+        )
+    elif reason == "subset_matched_no_collected_test":
+        selection = _served_subset(["tests/gone.py::t"], ["tests/a.py::t"])
+    else:
+        selection = _served_subset(
+            ["tests/a.py::t", "tests/gone.py::t"], ["tests/a.py::t"]
+        )
+    assert selection.not_applied_reason == reason
+    assert selection.reason == "reduced_rerun"
+    report = selection.report()
     assert "Mergify's answer didn't match the tests this run collected" in report
     assert "Upgrade" not in report
 
@@ -1217,11 +1454,13 @@ def test_the_two_remedies_are_told_apart_in_the_report() -> None:
     # A `selection` this plugin predates is the normal way the engine grows new
     # answers, and it is the user's to fix: the sentence leads to the upgrade,
     # not to support.
-    report = test_selection.TestSelection(
-        selection="full", reason="unrecognised_selection"
-    ).report()
+    selection = test_selection.TestSelection(selection="a-newer-answer", reason="x")  # type: ignore[arg-type]
+    assert selection.not_applied_reason == "unrecognised_selection"
+    report = selection.report()
     assert "Upgrade it to let Mergify reduce reruns" in report
     assert "support" not in report
+    # And never the raw value: it is Mergify's, and it is unknown here.
+    assert "a-newer-answer" not in report
 
 
 def test_a_failed_request_gets_a_sentence_and_keeps_the_error() -> None:

@@ -313,13 +313,13 @@ class PytestMergify:
                 # collection is still intact here, the refusal having raised
                 # before touching it, while the run goes on to execute none of
                 # it.
-                self.mergify_ci.on_selection_applied(kept_count=0)
+                self.mergify_ci.on_selection_resolved(kept_count=0)
                 raise
 
         # Outside the branch above, so that every run reaches the one place
         # that decides what a run says about its own reduction — including the
         # runs that were never offered one, which say nothing.
-        self.mergify_ci.on_selection_applied(kept_count=len(items))
+        self.mergify_ci.on_selection_resolved(kept_count=len(items))
 
     def pytest_collection_finish(self, session: _pytest.main.Session) -> None:
         detector = self.mergify_ci.flaky_detector
