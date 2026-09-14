@@ -8,6 +8,7 @@ else, so that one running out of budget can never switch off the other.
 """
 
 import dataclasses
+import datetime
 import os
 import typing
 
@@ -16,7 +17,7 @@ import _pytest.main
 import _pytest.nodes
 import _pytest.reports
 
-from pytest_mergify import rerun
+from pytest_mergify import _mergify_ci, rerun
 
 
 @dataclasses.dataclass
@@ -62,46 +63,25 @@ class TestRetrier(rerun.RerunLoop):
         tests_being_detected: typing.AbstractSet[str] = frozenset(),
         detection_gates_failures: bool = False,
     ) -> None:
-        tests_in_session = {item.nodeid for item in session.items}
-        opted_out = {
-            item.nodeid
-            for item in session.items
-            if rerun.mergify_marker_disables(item, "auto_retry")
-        }
-
-        self._eligible_tests = {
-            test
-            for test in self._context.flaky_test_names
-            if test in tests_in_session and test not in opted_out
-        }
-        # `broken_test_names` is deliberately not read: a test that fails every
-        # time is not something a rerun can rescue, and spending the budget
-        # discovering that again on every run buys nothing.
-
-        if detection_gates_failures:
-            # In `new` mode a rerun failure is itself the merge gate -- the one
-            # stopping a newly flaky test from being merged. The server can
-            # call a test both new and flaky at once, when its baseline lags a
-            # rename or a re-parametrization, and absorbing the failure would
-            # silence that gate. The stricter of the two answers wins.
-            self._eligible_tests -= tests_being_detected
-
-        # Flaky detection is already rerunning what is left of the overlap, on
-        # its own budget. Its attempts answer retry's question, so retry reads
-        # their outcomes rather than buying a second set of its own.
-        self._tests_to_process = sorted(self._eligible_tests - tests_being_detected)
-
-        # The whole collected session, not the intersection with the server's
-        # baseline that flaky detection uses: a repository that opted into
-        # retry alone is served no baseline at all, and scaling by it would
-        # collapse every such repository onto the minimum-budget floor.
-        total_duration = self._context.existing_tests_mean_duration * len(
-            tests_in_session
+        # Who is eligible, which of them retry pays to rerun, and why the budget
+        # scales with the whole session are the engine's rules, documented on
+        # `budget::retry_plan` and shared with every other client.
+        plan = _mergify_ci.compute_retry_budget(
+            dataclasses.asdict(self._context),
+            [item.nodeid for item in session.items],
+            [
+                item.nodeid
+                for item in session.items
+                if rerun.mergify_marker_disables(item, "auto_retry")
+            ],
+            sorted(tests_being_detected),
+            detection_gates_failures,
         )
 
-        self._available_budget_duration = max(
-            self._context.budget_ratio_for_test_retries * total_duration,
-            self._context.min_budget_duration,
+        self._eligible_tests = set(plan["eligible_tests"])
+        self._tests_to_process = plan["tests_to_process"]
+        self._available_budget_duration = datetime.timedelta(
+            milliseconds=plan["available_budget_ms"]
         )
 
     def try_fill_metrics_from_report(self, report: _pytest.reports.TestReport) -> None:
