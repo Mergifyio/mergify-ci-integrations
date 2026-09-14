@@ -251,6 +251,38 @@ fn compute_budget(
     Ok(result.into())
 }
 
+/// Select the tests test retry answers for and compute its session budget.
+///
+/// `tests_being_detected` is flaky detection's target set for this session, and
+/// `detection_gates_failures` says a failure of those reruns is itself the merge
+/// gate (`"new"` mode). Returns a dict with `available_budget_ms`,
+/// `eligible_tests` and `tests_to_process` -- the last two differ exactly by
+/// what flaky detection is already rerunning.
+// pyo3 extracts the test lists by value; the budget engine only borrows them.
+#[allow(clippy::needless_pass_by_value)]
+#[pyfunction]
+fn compute_retry_budget(
+    py: Python<'_>,
+    context: &Bound<'_, PyDict>,
+    session_tests: Vec<String>,
+    excluded: Vec<String>,
+    tests_being_detected: Vec<String>,
+    detection_gates_failures: bool,
+) -> PyResult<Py<PyDict>> {
+    let plan = budget::retry_plan(
+        &context_from_dict(context)?,
+        &session_tests,
+        &excluded,
+        &tests_being_detected,
+        detection_gates_failures,
+    );
+    let result = PyDict::new(py);
+    result.set_item("available_budget_ms", plan.available_budget_ms)?;
+    result.set_item("eligible_tests", plan.eligible_tests)?;
+    result.set_item("tests_to_process", plan.tests_to_process)?;
+    Ok(result.into())
+}
+
 /// Whether flaky detection should run for `context` and `mode` (`false` in
 /// `"new"` mode with an empty baseline).
 #[pyfunction]
@@ -393,6 +425,7 @@ fn _mergify_ci(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(detect_repository_name, m)?)?;
     m.add_function(wrap_pyfunction!(detect_attributes, m)?)?;
     m.add_function(wrap_pyfunction!(compute_budget, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_retry_budget, m)?)?;
     m.add_function(wrap_pyfunction!(compute_test_collection_fingerprint, m)?)?;
     m.add_function(wrap_pyfunction!(should_run, m)?)?;
     m.add_function(wrap_pyfunction!(static_share_ms, m)?)?;
