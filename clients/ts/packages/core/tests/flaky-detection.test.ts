@@ -50,6 +50,31 @@ describe('FlakyDetector', () => {
       expect(detector.isCandidate('test.ts > test.ts > new > test D')).toBe(false);
     });
 
+    it('plans a context that predates test retry', () => {
+      // The Playwright state file and the reporter's own options both accept a
+      // context without the retry keys, so the budget engine has to as well —
+      // rejecting one would switch flaky detection off with nothing said.
+      const context = {
+        budget_ratio_for_new_tests: 0.2,
+        budget_ratio_for_unhealthy_tests: 0.1,
+        existing_test_names: ['test.ts > existing > test A'],
+        existing_tests_mean_duration_ms: 100,
+        unhealthy_test_names: [],
+        max_test_execution_count: 10,
+        max_test_name_length: 255,
+        min_budget_duration_ms: 1000,
+        min_test_execution_count: 3,
+      };
+
+      const detector = new FlakyDetector(context, 'new', [
+        'test.ts > existing > test A',
+        'test.ts > new > test D',
+      ]);
+
+      expect(detector.isCandidate('test.ts > new > test D')).toBe(true);
+      expect(detector.getSummary().budgetMs).toBe(1000);
+    });
+
     it('excludes tests with names exceeding max length', () => {
       const longName = 'a'.repeat(256);
       const allTests = [longName];

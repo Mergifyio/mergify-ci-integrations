@@ -1,5 +1,10 @@
 import type { FlakyDetectionContext } from '@mergifyio/ci-native';
 import type { MergifyApiClient } from './api.js';
+import {
+  computeNativeBudget,
+  nativeStaticShareMs,
+  shouldRunNativeFlakyDetection,
+} from './native.js';
 import { describeError } from './utils.js';
 
 /**
@@ -16,10 +21,10 @@ export type FlakyDetectionMode = 'new' | 'unhealthy';
  * run.
  *
  * Null covers three cases the caller treats alike — the repository has not
- * opted in (dormant), the fetch failed (logged), or `mode` is "new" with an
- * empty baseline. That last guard stays here rather than in the client: with no
- * baseline every test looks new and the whole suite would rerun, so the run
- * skips silently instead. It mirrors the Rust budget engine's `should_run`.
+ * opted in (dormant), the fetch failed (logged), or the budget engine says this
+ * context and mode have nothing to do (`"new"` with an empty baseline, where
+ * every test would look new and the whole suite would rerun). The run then
+ * skips silently.
  */
 export async function fetchFlakyDetectionContext(
   client: MergifyApiClient,
@@ -35,7 +40,7 @@ export async function fetchFlakyDetectionContext(
   }
 
   if (context === null) return null;
-  if (mode === 'new' && context.existing_test_names.length === 0) return null;
+  if (!shouldRunNativeFlakyDetection(context, mode)) return null;
   return context;
 }
 
@@ -56,7 +61,6 @@ export class FlakyDetector {
   private context: FlakyDetectionContext;
   private mode: FlakyDetectionMode;
   private candidates: Set<string>;
-  private existingTestsInSession: Set<string>;
   private budgetMs: number;
   private perTestDeadlineMs: number;
   private testMetrics: Map<string, TestMetrics> = new Map();
@@ -66,34 +70,23 @@ export class FlakyDetector {
     this.context = context;
     this.mode = mode;
 
-    const existingSet = new Set(context.existing_test_names);
-    const unhealthySet = new Set(context.unhealthy_test_names);
+    // Which tests this mode targets and how long the session may spend on them
+    // are the shared engine's rules (`budget::plan`), so a vitest suite and a
+    // pytest one facing the same context spend the same budget.
+    const plan = computeNativeBudget(context, mode, allTestNames, []);
 
-    // Count existing tests in this session for budget calculation
-    this.existingTestsInSession = new Set(allTestNames.filter((t) => existingSet.has(t)));
-
-    // Identify candidates based on mode
-    if (mode === 'new') {
-      this.candidates = new Set(
-        allTestNames.filter((t) => !existingSet.has(t) && t.length <= context.max_test_name_length)
-      );
-    } else {
-      this.candidates = new Set(
-        allTestNames.filter((t) => unhealthySet.has(t) && t.length <= context.max_test_name_length)
-      );
-    }
-
-    // Calculate budget
-    const budgetRatio =
-      mode === 'new'
-        ? context.budget_ratio_for_new_tests
-        : context.budget_ratio_for_unhealthy_tests;
-    const totalDurationMs =
-      context.existing_tests_mean_duration_ms * this.existingTestsInSession.size;
-    this.budgetMs = Math.max(budgetRatio * totalDurationMs, context.min_budget_duration_ms);
+    // Over-length names are dropped here rather than by the engine, which keeps
+    // them: pytest-mergify drops them later, inside its rerun loop. Same
+    // session, different candidate count, so the two clients carve the budget
+    // into different shares until that difference is settled.
+    this.candidates = new Set(
+      (plan?.testsToProcess ?? []).filter((t) => t.length <= context.max_test_name_length)
+    );
+    this.budgetMs = plan?.availableBudgetMs ?? 0;
 
     // Static per-test deadline (xdist-style)
-    this.perTestDeadlineMs = this.candidates.size > 0 ? this.budgetMs / this.candidates.size : 0;
+    this.perTestDeadlineMs =
+      this.candidates.size > 0 ? nativeStaticShareMs(this.budgetMs, this.candidates.size) : 0;
   }
 
   isCandidate(testName: string): boolean {

@@ -1,5 +1,10 @@
 import { createRequire } from 'node:module';
-import type { ApiClientOptions, CiApiClient } from '@mergifyio/ci-native';
+import type {
+  ApiClientOptions,
+  BudgetPlan,
+  CiApiClient,
+  FlakyDetectionContext,
+} from '@mergifyio/ci-native';
 
 /**
  * Mirrors mergify-ci-core's `CiResourceAttributes` (otel.rs): the typed OTel
@@ -31,6 +36,14 @@ interface NativeBinding {
   detectProvider(): string | null;
   detectRepositoryName(): string | null;
   detectAttributes(): CiResourceAttributes;
+  shouldRunFlakyDetection(context: FlakyDetectionContext, mode: string): boolean;
+  computeBudget(
+    context: FlakyDetectionContext,
+    mode: string,
+    sessionTests: string[],
+    excluded: string[]
+  ): BudgetPlan;
+  staticShareMs(availableBudgetMs: number, numTests: number): number;
   CiApiClient: new (options: ApiClientOptions) => CiApiClient;
 }
 
@@ -87,6 +100,53 @@ export function detectNativeAttributes(): CiResourceAttributes {
     return binding.detectAttributes();
   } catch {
     return {};
+  }
+}
+
+/**
+ * Whether flaky detection has anything to do this session, per the shared
+ * budget engine. False without a binding: the feature stays off rather than
+ * running on a second copy of the rule.
+ */
+export function shouldRunNativeFlakyDetection(
+  context: FlakyDetectionContext,
+  mode: string
+): boolean {
+  if (!binding) return false;
+  try {
+    return binding.shouldRunFlakyDetection(context, mode);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The tests flaky detection reruns this session and the budget for them, from
+ * the engine pytest-mergify and rspec-mergify also plan with. Null without a
+ * binding, which leaves the caller with nothing to rerun — the fail-open path,
+ * and the reason this package keeps no fallback arithmetic of its own.
+ */
+export function computeNativeBudget(
+  context: FlakyDetectionContext,
+  mode: string,
+  sessionTests: string[],
+  excluded: string[]
+): BudgetPlan | null {
+  if (!binding) return null;
+  try {
+    return binding.computeBudget(context, mode, sessionTests, excluded);
+  } catch {
+    return null;
+  }
+}
+
+/** One test's slice of a budget split evenly up front; 0 without a binding. */
+export function nativeStaticShareMs(availableBudgetMs: number, numTests: number): number {
+  if (!binding) return 0;
+  try {
+    return binding.staticShareMs(availableBudgetMs, numTests);
+  } catch {
+    return 0;
   }
 }
 
