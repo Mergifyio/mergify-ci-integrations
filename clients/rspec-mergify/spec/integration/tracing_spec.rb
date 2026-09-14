@@ -33,7 +33,7 @@ RSpec.describe 'Integration: Tracing' do # rubocop:disable RSpec/DescribeClass
       expect(example_span.attributes['code.lineno']).to be_a(Integer)
       expect(example_span.attributes['test.case.result.status']).to eq('passed')
       expect(example_span.attributes['cicd.test.quarantined']).to be(false)
-      expect(example_span.status.code).to eq(OpenTelemetry::Trace::Status::OK)
+      expect(example_span.status).to eq('ok')
     end
   end
 
@@ -56,7 +56,7 @@ RSpec.describe 'Integration: Tracing' do # rubocop:disable RSpec/DescribeClass
       end
 
       session_span = spans['rspec session start']
-      expect(session_span.status.code).to eq(OpenTelemetry::Trace::Status::OK)
+      expect(session_span.status).to eq('ok')
     end
 
     it 'has ERROR status when any test fails' do
@@ -66,7 +66,7 @@ RSpec.describe 'Integration: Tracing' do # rubocop:disable RSpec/DescribeClass
       end
 
       session_span = spans['rspec session start']
-      expect(session_span.status.code).to eq(OpenTelemetry::Trace::Status::ERROR)
+      expect(session_span.status).to eq('error')
     end
   end
 
@@ -80,7 +80,7 @@ RSpec.describe 'Integration: Tracing' do # rubocop:disable RSpec/DescribeClass
       example_span = spans.values.find { |s| s.attributes['test.scope'] == 'case' }
       expect(example_span).not_to be_nil
       expect(example_span.attributes['test.case.result.status']).to eq('failed')
-      expect(example_span.status.code).to eq(OpenTelemetry::Trace::Status::ERROR)
+      expect(example_span.status).to eq('error')
       expect(example_span.attributes['exception.type']).to be_a(String)
       expect(example_span.attributes['exception.type']).not_to be_empty
       expect(example_span.attributes['exception.message']).to be_a(String)
@@ -125,8 +125,8 @@ RSpec.describe 'Integration: Tracing' do # rubocop:disable RSpec/DescribeClass
         it('passes') { expect(true).to be(true) }
       end
 
-      spans.each_value do |span|
-        test_run_id = span.resource.attribute_enumerator.to_h['test.run.id']
+      spans.each_value do |_span|
+        test_run_id = ci.recorder.resource_attributes['test.run.id']
         expect(test_run_id).to be_a(String)
         expect(test_run_id.length).to eq(16)
         expect { Integer(test_run_id, 16) }.not_to raise_error
@@ -192,9 +192,7 @@ RSpec.describe 'Integration: Tracing' do # rubocop:disable RSpec/DescribeClass
       ENV.delete('_RSPEC_MERGIFY_TEST')
 
       ci = Mergify::RSpec::CIInsights.new
-      expect(ci.tracer).to be_nil
-      expect(ci.tracer_provider).to be_nil
-      expect(ci.exporter).to be_nil
+      expect(ci.recorder).to be_nil
     end
   end
 
@@ -235,8 +233,6 @@ RSpec.describe 'Integration: Tracing' do # rubocop:disable RSpec/DescribeClass
                                             deprecation: nil)
         ex.run(group_instance, reporter)
         formatter.example_finished(RSpec::Core::Notifications::ExampleNotification.for(ex))
-        allow(ci.tracer_provider).to receive(:force_flush) if ci.tracer_provider
-        allow(ci.tracer_provider).to receive(:shutdown) if ci.tracer_provider
         formatter.stop(double('stop'))
       ensure
         RSpec.world.example_groups.delete(group)
@@ -255,7 +251,7 @@ RSpec.describe 'Integration: Tracing' do # rubocop:disable RSpec/DescribeClass
         detect_repository_name: nil, detect_attributes: {}
       )
 
-      empty_resource = OpenTelemetry::SDK::Resources::Resource.create({})
+      empty_resource = {}
       allow(Mergify::RSpec::Resources::RSpec).to receive(:detect).and_return(empty_resource)
 
       ci = Mergify::RSpec::CIInsights.new
@@ -281,8 +277,6 @@ RSpec.describe 'Integration: Tracing' do # rubocop:disable RSpec/DescribeClass
                                             deprecation: nil)
         ex.run(group_instance, reporter)
         formatter.example_finished(RSpec::Core::Notifications::ExampleNotification.for(ex))
-        allow(ci.tracer_provider).to receive(:force_flush) if ci.tracer_provider
-        allow(ci.tracer_provider).to receive(:shutdown) if ci.tracer_provider
         formatter.stop(double('stop'))
       ensure
         RSpec.world.example_groups.delete(group)
