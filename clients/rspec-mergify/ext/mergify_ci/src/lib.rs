@@ -74,6 +74,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     let budget = native.define_module("Budget")?;
     budget.define_singleton_method("should_run", function!(should_run, 2))?;
     budget.define_singleton_method("compute", function!(compute_budget, 4))?;
+    budget.define_singleton_method("compute_retry", function!(compute_retry_budget, 5))?;
     budget.define_singleton_method("static_share_ms", function!(static_share_ms, 2))?;
     budget.define_singleton_method("dynamic_share_ms", function!(dynamic_share_ms, 4))?;
 
@@ -336,7 +337,7 @@ fn span_from_hash(ruby: &Ruby, span: RHash) -> Result<SpanData, Error> {
 }
 
 // ---------------------------------------------------------------------------
-// Flaky-detection budget
+// Rerun budgets: flaky detection's, and test retry's
 //
 // The arithmetic lives in Rust so every client spends its budget the same way.
 // The lifecycle around it stays in Ruby -- the rerun loop, filling metrics from
@@ -430,6 +431,34 @@ fn compute_budget(
     );
     let result = ruby.hash_new();
     result.aset("available_budget_ms", plan.available_budget_ms)?;
+    result.aset("tests_to_process", plan.tests_to_process)?;
+    Ok(result)
+}
+
+/// The tests test retry answers for and the budget it may spend, as
+/// `{ "available_budget_ms" => Float, "eligible_tests" => [String],
+/// "tests_to_process" => [String] }`. The two lists differ by exactly what
+/// flaky detection is already rerunning: retry owns those verdicts without
+/// buying their attempts.
+#[allow(clippy::needless_pass_by_value)]
+fn compute_retry_budget(
+    ruby: &Ruby,
+    context: RHash,
+    session_tests: Vec<String>,
+    excluded: Vec<String>,
+    tests_being_detected: Vec<String>,
+    detection_gates_failures: bool,
+) -> Result<RHash, Error> {
+    let plan = budget::retry_plan(
+        &context_from_hash(ruby, context)?,
+        &session_tests,
+        &excluded,
+        &tests_being_detected,
+        detection_gates_failures,
+    );
+    let result = ruby.hash_new();
+    result.aset("available_budget_ms", plan.available_budget_ms)?;
+    result.aset("eligible_tests", plan.eligible_tests)?;
     result.aset("tests_to_process", plan.tests_to_process)?;
     Ok(result)
 }
