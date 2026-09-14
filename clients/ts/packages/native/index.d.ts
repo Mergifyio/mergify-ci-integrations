@@ -66,6 +66,32 @@ export interface Attribute {
   value: boolean | number | string
 }
 
+/** The tests flaky detection reruns this session, and the budget for them. */
+export interface BudgetPlan {
+  /** Total rerun budget for the session, in milliseconds. */
+  availableBudgetMs: number
+  /** The selected tests, in the order they were given. */
+  testsToProcess: Array<string>
+}
+
+/**
+ * Select the tests flaky detection reruns and compute the session's budget.
+ *
+ * `excluded` holds the tests that opted out. The budget scales with the
+ * baseline tests present in this session, floored at `min_budget_duration_ms`.
+ */
+export declare function computeBudget(context: FlakyDetectionContext, mode: string, sessionTests: Array<string>, excluded: Array<string>): BudgetPlan
+
+/**
+ * Select the tests test retry answers for and compute its session budget.
+ *
+ * `testsBeingDetected` is flaky detection's target set, and
+ * `detectionGatesFailures` says a failure of those reruns is itself the merge
+ * gate (`"new"` mode), where retry gives up the verdict rather than absorbing
+ * it. See `budget::retry_plan` for the rules the two lists encode.
+ */
+export declare function computeRetryBudget(context: FlakyDetectionContext, sessionTests: Array<string>, excluded: Array<string>, testsBeingDetected: Array<string>, detectionGatesFailures: boolean): RetryPlan
+
 /**
  * The OTel resource attributes for this run, as a dotted-key map (`cicd.*`,
  * `vcs.*`, `mergify.test.job.name`) with string or number values — integer
@@ -104,6 +130,9 @@ export declare function detectProvider(): string | null
  */
 export declare function detectRepositoryName(): string | null
 
+/** The per-test slice recomputed from what is left, as the session progresses. */
+export declare function dynamicShareMs(availableBudgetMs: number, usedBudgetMs: number, numTests: number, processed: number): number
+
 /**
  * The flaky-detection context: the server's baseline and budget parameters.
  *
@@ -118,14 +147,34 @@ export interface FlakyDetectionContext {
   existing_test_names: Array<string>
   existing_tests_mean_duration_ms: number
   unhealthy_test_names: Array<string>
-  budget_ratio_for_test_retries: number
-  flaky_test_names: Array<string>
-  broken_test_names: Array<string>
+  budget_ratio_for_test_retries?: number
+  flaky_test_names?: Array<string>
+  broken_test_names?: Array<string>
   max_test_execution_count: number
   max_test_name_length: number
   min_budget_duration_ms: number
   min_test_execution_count: number
 }
+
+/** The tests test retry answers for, and the budget it may spend on them. */
+export interface RetryPlan {
+  /** Total retry budget for the session, in milliseconds. */
+  availableBudgetMs: number
+  /**
+   * Every test whose failure retry owns the verdict for — including the ones
+   * it will not pay to rerun.
+   */
+  eligibleTests: Array<string>
+  /** The eligible tests retry reruns on its own budget. */
+  testsToProcess: Array<string>
+}
+
+/**
+ * Whether flaky detection has anything to do this session — `false` in
+ * `"new"` mode with an empty baseline, where every test would look new and
+ * the whole suite would rerun.
+ */
+export declare function shouldRunFlakyDetection(context: FlakyDetectionContext, mode: string): boolean
 
 /**
  * One finished span, handed over as plain data — no live `OpenTelemetry`
@@ -149,6 +198,9 @@ export interface Span {
   /** The error description; only read when `status` is `"error"`. */
   statusMessage?: string
 }
+
+/** The per-test slice when the budget is split evenly up front. */
+export declare function staticShareMs(availableBudgetMs: number, numTests: number): number
 
 /**
  * Whether this run should execute only a subset of tests.
