@@ -3,6 +3,8 @@
 require 'rspec/core/formatters/base_formatter'
 require_relative 'trace'
 
+require 'mergify/rspec/native'
+
 module Mergify
   module RSpec
     # RSpec formatter that records spans for Mergify Test Insights and
@@ -154,10 +156,19 @@ module Mergify
       def print_configuration_warnings
         output.puts 'WARNING: MERGIFY_TOKEN is not set. Traces will not be sent to Mergify.' unless @ci_insights.token
 
+        return print_native_warning unless Mergify::RSpec::Native.available?
         return if @ci_insights.repo_name
 
         output.puts 'WARNING: Could not detect repository name. ' \
                     'Please set GITHUB_REPOSITORY or configure a git remote.'
+      end
+
+      # The extension is what detects CI, so when it did not load there is no
+      # repository name either, and blaming that would send people hunting for a
+      # git remote that is fine. Say what actually happened instead.
+      def print_native_warning
+        output.puts 'WARNING: the Mergify native extension could not be loaded, so this run reports nothing: ' \
+                    "#{Mergify::RSpec::Native.load_error&.message}"
       end
 
       def print_flaky_report
