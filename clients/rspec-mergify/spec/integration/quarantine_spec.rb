@@ -70,7 +70,7 @@ RSpec.describe 'Integration: Quarantine' do # rubocop:disable RSpec/DescribeClas
       span = find_span_by_function(spans, 'normal_fail')
       expect(span).not_to be_nil
       expect(span.attributes['test.case.result.status']).to eq('failed')
-      expect(span.status.code).to eq(OpenTelemetry::Trace::Status::ERROR)
+      expect(span.status).to eq('error')
       expect(span.attributes['cicd.test.quarantined']).to be(false)
     end
   end
@@ -89,7 +89,7 @@ RSpec.describe 'Integration: Quarantine' do # rubocop:disable RSpec/DescribeClas
       span = find_span_by_function(spans, 'quarantined_pass')
       expect(span).not_to be_nil
       expect(span.attributes['test.case.result.status']).to eq('passed')
-      expect(span.status.code).to eq(OpenTelemetry::Trace::Status::OK)
+      expect(span.status).to eq('ok')
       expect(span.attributes['cicd.test.quarantined']).to be(true)
     end
   end
@@ -114,12 +114,12 @@ RSpec.describe 'Integration: Quarantine' do # rubocop:disable RSpec/DescribeClas
 
       # Non-quarantined passing test
       s = find_span_by_function(spans, 'not_quarantined_pass')
-      expect(s.status.code).to eq(OpenTelemetry::Trace::Status::OK)
+      expect(s.status).to eq('ok')
       expect(s.attributes['cicd.test.quarantined']).to be(false)
 
       # Non-quarantined failing test
       s = find_span_by_function(spans, 'not_quarantined_fail')
-      expect(s.status.code).to eq(OpenTelemetry::Trace::Status::ERROR)
+      expect(s.status).to eq('error')
       expect(s.attributes['cicd.test.quarantined']).to be(false)
 
       # Quarantined failing test (overridden to skipped)
@@ -129,7 +129,7 @@ RSpec.describe 'Integration: Quarantine' do # rubocop:disable RSpec/DescribeClas
 
       # Quarantined passing test
       s = find_span_by_function(spans, 'quarantined_pass')
-      expect(s.status.code).to eq(OpenTelemetry::Trace::Status::OK)
+      expect(s.status).to eq('ok')
       expect(s.attributes['cicd.test.quarantined']).to be(true)
     end
   end

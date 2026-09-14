@@ -1,21 +1,18 @@
 # frozen_string_literal: true
 
 require 'securerandom'
-require 'opentelemetry-sdk'
+require_relative 'trace'
 require_relative 'utils'
 require_relative 'native'
-require_relative 'synchronous_batch_span_processor'
-require_relative 'rust_trace_exporter'
 require_relative 'resources/rspec'
 
 module Mergify
   module RSpec
-    # Central orchestrator for Mergify Test Insights: sets up OpenTelemetry tracing,
+    # Central orchestrator for Mergify Test Insights: sets up span recording,
     # manages the tracer provider, and coordinates flaky detection and quarantine.
-    # rubocop:disable-next Metrics/ClassLength
     class CIInsights
       attr_reader :token, :repo_name, :api_url, :test_run_id,
-                  :tracer_provider, :tracer, :exporter,
+                  :recorder,
                   :branch_name,
                   :flaky_detector, :flaky_detector_error_message, :quarantined_tests
 
@@ -25,15 +22,29 @@ module Mergify
         @repo_name = Native.detect_repository_name
         @api_url = ENV.fetch('MERGIFY_API_URL', 'https://api.mergify.com')
         @test_run_id = SecureRandom.hex(8)
-        @tracer_provider = nil
-        @tracer = nil
-        @exporter = nil
+        @recorder = nil
+        @uploads = false
         @branch_name = nil
         @flaky_detector = nil
         @flaky_detector_error_message = nil
         @quarantined_tests = nil
 
         setup_tracing if Utils.in_ci?
+      end
+
+      # Send the run, once, at the end. Failing to report a run is worth
+      # saying out loud but never worth failing a suite that just passed,
+      # so this answers with a message instead of raising.
+      def flush
+        return nil unless @recorder && @uploads
+        return nil if @recorder.finished_spans.empty?
+
+        owner, repo = Utils.split_full_repo_name(@repo_name)
+        client = Native::Client.new(@api_url, @token, owner, repo, Mergify::RSpec::VERSION)
+        client.upload_trace(@recorder.resource_attributes, @recorder.finished_spans.map(&:to_h))
+        nil
+      rescue Native::ApiError, Utils::InvalidRepositoryFullNameError => e
+        e.message
       end
 
       def mark_test_as_quarantined_if_needed(example_id) # rubocop:disable Naming/PredicateMethod
@@ -45,28 +56,18 @@ module Mergify
 
       private
 
+      # Recording is unconditional; whether the run is *uploaded* is what the
+      # token and repository decide. Debug and test runs keep their spans and
+      # send nothing, which is what they always did -- the difference is that
+      # the collector is the same object either way instead of two processors.
       def setup_tracing
-        processor, exp = build_processor
-        return unless processor
-
-        @exporter = exp
         resource = build_resource
-        @tracer_provider = OpenTelemetry::SDK::Trace::TracerProvider.new(resource: resource)
-        @tracer_provider.add_span_processor(processor)
-        @tracer = @tracer_provider.tracer('rspec-mergify', Mergify::RSpec::VERSION)
-        @branch_name = extract_branch_name(resource)
+        @recorder = Trace::Recorder.new(resource_attributes: resource,
+                                        traceparent: ENV.fetch('MERGIFY_TRACEPARENT', nil))
+        @uploads = uploadable?
+        @branch_name = resource['vcs.ref.base.name'] || resource['vcs.ref.head.name']
         load_flaky_detector
         load_quarantine
-      end
-
-      def build_processor
-        if debug_mode? || test_mode?
-          build_in_memory_processor
-        elsif @token && @repo_name
-          build_otlp_processor
-        else
-          [nil, nil]
-        end
       end
 
       def debug_mode?
@@ -77,42 +78,26 @@ module Mergify
         ENV['_RSPEC_MERGIFY_TEST'] == 'true'
       end
 
-      def build_in_memory_processor
-        exp = OpenTelemetry::SDK::Trace::Export::InMemorySpanExporter.new
-        processor = OpenTelemetry::SDK::Trace::Export::SimpleSpanProcessor.new(exp)
-        [processor, exp]
-      end
-
-      # The endpoint, the gzip, the retries and the size limit belong to the
-      # shared client now; this only has to hand it the spans.
-      def build_otlp_processor
-        return [nil, nil] unless Native.available?
-
-        owner, repo = Utils.split_full_repo_name(@repo_name)
-        client = Native::Client.new(@api_url, @token, owner, repo, Mergify::RSpec::VERSION)
-        exp = RustTraceExporter.new(client)
-        [SynchronousBatchSpanProcessor.new(exp), exp]
-      end
-
       # The cicd.* and vcs.* attributes come from the Rust core, which every
       # Mergify test client shares, so a provider gains them everywhere at once.
       # What stays here is what only Ruby knows: the test framework, and the id
       # this run invented for itself.
-      def build_resource
-        resources = [
-          OpenTelemetry::SDK::Resources::Resource.create(Native.detect_attributes),
-          Resources::RSpec.detect,
-          OpenTelemetry::SDK::Resources::Resource.create('test.run.id' => @test_run_id)
-        ]
-        resources.reduce(OpenTelemetry::SDK::Resources::Resource.create({})) do |merged, r|
-          merged.merge(r)
-        end
+      # The cicd.* and vcs.* attributes come from the Rust core, which every
+      # Mergify test client shares. What stays here is what only Ruby knows:
+      # the test framework, and the id this run invented for itself.
+      # A run is uploaded when there is somewhere to upload it to and nothing
+      # asking us not to: debug and test runs record and keep.
+      def uploadable?
+        return false if debug_mode? || test_mode?
+        return false unless @token && @repo_name && Native.available?
+
+        true
       end
 
-      def extract_branch_name(resource)
-        attrs = resource.attribute_enumerator.to_h
-        @base_branch_name = attrs['vcs.ref.base.name']
-        @base_branch_name || attrs['vcs.ref.head.name']
+      def build_resource
+        Native.detect_attributes
+              .merge(Resources::RSpec.detect)
+              .merge('test.run.id' => @test_run_id)
       end
 
       # rubocop:disable-next Metrics/MethodLength
