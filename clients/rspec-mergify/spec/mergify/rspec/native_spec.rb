@@ -17,6 +17,23 @@ RSpec.describe Mergify::RSpec::Native do
       expect(described_class).to respond_to(:load_error)
     end
 
+    describe '.load_failure_reason' do
+      let(:versioned) { LoadError.new("libc.so.6: version `GLIBC_2.29' not found") }
+      let(:fallback) { LoadError.new('cannot load such file -- mergify_ci') }
+
+      it 'keeps the versioned failure when this Ruby has a packed extension' do
+        allow(Dir).to receive(:glob).and_return(['lib/mergify/rspec/3.4/mergify_ci.so'])
+
+        expect(described_class.load_failure_reason(versioned, fallback)).to be(versioned)
+      end
+
+      it 'keeps the fallback when nothing is packed for this Ruby' do
+        allow(Dir).to receive(:glob).and_return([])
+
+        expect(described_class.load_failure_reason(versioned, fallback)).to be(fallback)
+      end
+    end
+
     it 'records a LoadError, or nothing at all' do
       expect(described_class.load_error).to be_nil.or be_a(LoadError)
       expect(described_class.available?).to be(described_class.load_error.nil?)

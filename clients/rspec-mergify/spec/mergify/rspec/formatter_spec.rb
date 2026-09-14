@@ -364,6 +364,23 @@ RSpec.describe Mergify::RSpec::Formatter do
       end
     end
 
+    context 'when the native extension did not load' do
+      before do
+        allow(ci_insights).to receive(:repo_name).and_return(nil)
+        allow(Mergify::RSpec::Native).to receive_messages(
+          available?: false,
+          load_error: LoadError.new("libc.so.6: version `GLIBC_2.29' not found")
+        )
+      end
+
+      it 'reports why, rather than blaming the repository name' do
+        formatter.stop(build_stop_notification)
+
+        expect(output.string).to include("version `GLIBC_2.29' not found")
+        expect(output.string).not_to include('Could not detect repository name')
+      end
+    end
+
     context 'when token is missing' do
       before do
         allow(ci_insights).to receive(:token).and_return(nil)

@@ -27,21 +27,42 @@ module Mergify
         def available?
           load_error.nil?
         end
+
+        # Which of the two failed requires actually explains the absence.
+        #
+        # A precompiled gem ships lib/mergify/rspec/<ruby>/mergify_ci.<dlext>,
+        # so when one is packed for this Ruby that require is the real attempt:
+        # it fails with something like "version `GLIBC_2.29' not found", and the
+        # fallback that follows only ever adds "cannot load such file", which
+        # sends the reader looking for the wrong thing. With no extension for
+        # this Ruby -- the source gem, or a platform we publish no gem for --
+        # it is the other way round.
+        # Require a file next to this one, returning the LoadError instead of
+        # raising it. Two attempts read better as values than as nested rescues.
+        def attempt_require(path)
+          require_relative path
+          nil
+        rescue LoadError => e
+          e
+        end
+
+        def load_failure_reason(versioned, fallback)
+          packed = Dir.glob(File.join(__dir__, RUBY_VERSION.to_f.to_s, 'mergify_ci.*')).any?
+          packed ? versioned : fallback
+        end
       end
     end
   end
 end
 
-begin
-  # Precompiled gems ship lib/mergify/rspec/<ruby>/mergify_ci.<dlext>.
-  require_relative "#{RUBY_VERSION.to_f}/mergify_ci"
-rescue LoadError
-  begin
-    # Source gem, and any local `rake compile`.
-    require_relative 'mergify_ci'
-  rescue LoadError => e
-    Mergify::RSpec::Native.load_error = e
-  end
+# Precompiled gems ship lib/mergify/rspec/<ruby>/mergify_ci.<dlext>; the source
+# gem and any local `rake compile` put one beside this file instead.
+versioned_error = Mergify::RSpec::Native.attempt_require("#{RUBY_VERSION.to_f}/mergify_ci")
+fallback_error = versioned_error && Mergify::RSpec::Native.attempt_require('mergify_ci')
+
+if fallback_error
+  Mergify::RSpec::Native.load_error =
+    Mergify::RSpec::Native.load_failure_reason(versioned_error, fallback_error)
 end
 
 unless Mergify::RSpec::Native.available?
