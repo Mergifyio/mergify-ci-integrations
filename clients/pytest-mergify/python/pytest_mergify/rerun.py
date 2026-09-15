@@ -16,7 +16,7 @@ import _pytest.main
 import _pytest.nodes
 import _pytest.reports
 
-from pytest_mergify import utils
+from pytest_mergify import _mergify_ci, utils
 
 
 @dataclasses.dataclass
@@ -340,8 +340,10 @@ class RerunLoop:
 
         if self._is_xdist:
             # Static allocation: equal share of total budget per test.
-            per_test_budget = (
-                self._available_budget_duration / self.tests_sharing_budget
+            per_test_budget = datetime.timedelta(
+                milliseconds=_mergify_ci.static_share_ms(
+                    self._available_budget_ms, self.tests_sharing_budget
+                )
             )
             metrics.deadline = (
                 datetime.datetime.now(datetime.timezone.utc) + per_test_budget
@@ -356,21 +358,26 @@ class RerunLoop:
                 )
             )
         else:
-            remaining_budget = self._get_remaining_budget_duration()
-            remaining_tests = self._count_remaining_tests()
-
             # Distribute remaining budget equally across remaining tests.
-            metrics.deadline = datetime.datetime.now(datetime.timezone.utc) + (
-                remaining_budget / remaining_tests
+            per_test_budget = datetime.timedelta(
+                milliseconds=_mergify_ci.dynamic_share_ms(
+                    self._available_budget_ms,
+                    self._get_used_budget_duration().total_seconds() * 1000,
+                    self.tests_sharing_budget,
+                    self._count_processed_tests(),
+                )
+            )
+            metrics.deadline = (
+                datetime.datetime.now(datetime.timezone.utc) + per_test_budget
             )
             self._debug_logs.append(
                 utils.StructuredLog.make(
                     message="Deadline set",
                     test=test,
                     available_budget=str(self._available_budget_duration),
-                    remaining_budget=str(remaining_budget),
+                    remaining_budget=str(self._get_remaining_budget_duration()),
                     all_tests=len(self._tests_to_process),
-                    remaining_tests=remaining_tests,
+                    remaining_tests=self._count_remaining_tests(),
                 )
             )
 
@@ -427,8 +434,7 @@ class RerunLoop:
     def to_serializable_metrics(self) -> typing.Dict[str, typing.Any]:
         """Serialize metrics for transport via xdist workeroutput."""
         return {
-            "available_budget_duration_ms": self._available_budget_duration.total_seconds()
-            * 1000,
+            "available_budget_duration_ms": self._available_budget_ms,
             "test_metrics": {
                 test: {
                     "rerun_count": metrics.rerun_count,
@@ -465,12 +471,17 @@ class RerunLoop:
         """
         return max(len(self._tests_to_process), 1)
 
-    def _count_remaining_tests(self) -> int:
-        already_processed_tests = {
-            test for test, metrics in self._test_metrics.items() if metrics.deadline
-        }
+    @property
+    def _available_budget_ms(self) -> float:
+        """The budget in the milliseconds the shared engine works in."""
+        return self._available_budget_duration.total_seconds() * 1000
 
-        return max(self.tests_sharing_budget - len(already_processed_tests), 1)
+    def _count_processed_tests(self) -> int:
+        """How many targeted tests already had their share carved out."""
+        return sum(1 for metrics in self._test_metrics.values() if metrics.deadline)
+
+    def _count_remaining_tests(self) -> int:
+        return max(self.tests_sharing_budget - self._count_processed_tests(), 1)
 
     def _get_used_budget_duration(self) -> datetime.timedelta:
         return sum(
