@@ -1,1 +1,1 @@
-correctness review: catch every binding error (never fail the run), no verdict on --collect-only/--setup-only, passed only from a call report; -x gap named in the body
+alignment with the engine contract (#40721): sentences for matched_test_session_incomplete / _failures_truncated
