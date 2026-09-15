@@ -1,1 +1,1 @@
-fix: class attribute shadowed the module alias on Python < 3.14 (CI red on 3.8-3.13); intent-review text fixes; truncate in place
+correctness review: catch every binding error (never fail the run), no verdict on --collect-only/--setup-only, passed only from a call report; -x gap named in the body
