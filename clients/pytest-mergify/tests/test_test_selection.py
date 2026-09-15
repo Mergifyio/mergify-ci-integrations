@@ -1191,6 +1191,13 @@ _ENGINE_FULL_REASONS = [
     "matched_test_session_dropped_cases",
     "matched_test_session_declaration_unreadable",
     "matched_test_session_ran_no_test",
+    # Served since the session verdict (MRGFY-9312); the four rows above
+    # them -- `indeterminate_test_session` and the three
+    # `matched_test_session_{partially_processed,dropped_cases,
+    # declaration_unreadable}` -- are what an engine still on the spans
+    # serves, and stay until no such engine is left.
+    "matched_test_session_incomplete",
+    "matched_test_session_failures_truncated",
 ]
 _CLIENT_FULL_REASONS = [
     "not_requested",
@@ -1364,6 +1371,16 @@ _ENGINE_SENTENCES: typing.List[typing.Tuple[str, str]] = [
     (
         "matched_test_session_declaration_unreadable",
         "Mergify didn't have the complete results of the previous attempt, so"
+        " the full suite ran.",
+    ),
+    (
+        "matched_test_session_incomplete",
+        "The previous attempt stopped before running all of its tests, so the"
+        " full suite ran.",
+    ),
+    (
+        "matched_test_session_failures_truncated",
+        "The previous attempt had too many failures for Mergify to list, so"
         " the full suite ran.",
     ),
     (
