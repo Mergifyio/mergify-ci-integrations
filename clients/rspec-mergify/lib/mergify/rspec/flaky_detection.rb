@@ -126,8 +126,7 @@ module Mergify
       def set_test_deadline(test_id, timeout: nil)
         return unless @metrics.key?(test_id)
 
-        remaining_tests = [remaining_tests_count, 1].max
-        per_test_budget = remaining_budget / remaining_tests
+        per_test_budget = next_test_share
 
         allocated =
           if timeout
@@ -198,17 +197,21 @@ module Mergify
         context
       end
 
-      def remaining_budget
-        used = budget_used
-        [@budget - used, 0.0].max
-      end
-
       def budget_used
         @metrics.sum { |_, m| m.total_duration }
       end
 
-      def remaining_tests_count
-        @tests_to_process.count { |id| !@metrics.key?(id) || @metrics[id].deadline.nil? }
+      # What is left of the budget, divided over the tests still waiting for a
+      # share of it. The engine works in milliseconds; RSpec durations are
+      # seconds.
+      def next_test_share
+        Native::Budget.dynamic_share_ms(
+          @budget * 1000, budget_used * 1000, @tests_to_process.size, processed_tests_count
+        ) / 1000.0
+      end
+
+      def processed_tests_count
+        @tests_to_process.count { |id| @metrics.key?(id) && !@metrics[id].deadline.nil? }
       end
     end
   end
