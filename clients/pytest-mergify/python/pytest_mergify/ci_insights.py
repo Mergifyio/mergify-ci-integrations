@@ -8,7 +8,14 @@ import pytest
 
 import pytest_mergify.quarantine
 import pytest_mergify.test_selection
-from pytest_mergify import _mergify_ci, flaky_detection, test_retry, tracing, utils
+from pytest_mergify import (
+    _mergify_ci,
+    flaky_detection,
+    session_verdict,
+    test_retry,
+    tracing,
+    utils,
+)
 
 # OpenTelemetry resource-attribute keys the plugin reads back, kept as literals
 # now that the semantic-convention package is gone with the SDK. They match the
@@ -18,6 +25,8 @@ _VCS_REF_HEAD_NAME = "vcs.ref.head.name"
 _VCS_REF_HEAD_REVISION = "vcs.ref.head.revision"
 _CICD_PIPELINE_NAME = "cicd.pipeline.name"
 _CICD_PIPELINE_TASK_NAME = "cicd.pipeline.task.name"
+_CICD_PIPELINE_RUN_ID = "cicd.pipeline.run.id"
+_CICD_PIPELINE_RUN_ATTEMPT = "cicd.pipeline.run.attempt"
 _MERGIFY_TEST_JOB_NAME = "mergify.test.job.name"
 
 # Resource attribute carrying the identity of the tests this run collected --
@@ -83,6 +92,9 @@ _TEST_SELECTION_NOT_APPLIED_REASON = "test.selection.not_applied_reason"
 # `-x`, under `--maxfail`, or when the interpreter dies mid-suite, and a saving
 # computed from an "executed" count would quietly over-claim on all three.
 _TEST_SELECTION_KEPT_COUNT = "test.selection.kept_count"
+
+# The largest value the engine's counters take (a signed 32-bit int).
+_MAX_COUNT = 2**31 - 1
 
 # The environment variable a job sets to ask for test selection (MRGFY-9208).
 # The same name across every Mergify test client, so one workflow-level `env:`
@@ -174,6 +186,26 @@ class MergifyCIInsights:
     # repository outside the pilot, and every run whose request errored, as a
     # reduction the feature chose not to make.
     test_selection_was_served: bool = dataclasses.field(init=False, default=False)
+    # What the served selection came to once applied, or `None` for a run that
+    # was never answered. Set by `on_selection_applied`, the one place that
+    # derives it; the resource attributes and the session verdict both read
+    # it from here, so the two cannot describe different runs.
+    selection_echo: typing.Optional[typing.Dict[str, typing.Any]] = dataclasses.field(
+        init=False,
+        default=None,
+    )
+
+    # How sending the session verdict went, for the terminal summary. Set by
+    # `send_session_verdict`; its default reads as "nothing was sent".
+    session_verdict_result: session_verdict.SessionVerdictResult = dataclasses.field(
+        init=False,
+        default_factory=session_verdict.SessionVerdictResult,
+    )
+    # In `capture` mode, the body that would have been sent, for tests to
+    # read -- the same rule as the spans, which stay on the plugin there.
+    captured_session_verdict: typing.Optional[typing.Dict[str, typing.Any]] = (
+        dataclasses.field(init=False, default=None)
+    )
 
     # One binding-backed API client for the whole session, shared by the flaky,
     # quarantine, and test-selection fetches and the trace upload. Built once we
@@ -380,13 +412,150 @@ class MergifyCIInsights:
         ):
             return
 
-        self.resource_attributes[_TEST_SELECTION_ANSWER] = self.test_selection.selection
-        self.resource_attributes[_TEST_SELECTION_REASON] = self.test_selection.reason
-        self.resource_attributes[_TEST_SELECTION_KEPT_COUNT] = kept_count
+        self.selection_echo = {
+            "answer": self.test_selection.selection,
+            "reason": self.test_selection.reason,
+            "kept_count": kept_count,
+        }
+        # Present exactly when the answer was not honoured, on the echo as on
+        # the resource: the engine counts the key, not a value.
         if self.test_selection.not_applied_reason is not None:
-            self.resource_attributes[_TEST_SELECTION_NOT_APPLIED_REASON] = (
+            self.selection_echo["not_applied_reason"] = (
                 self.test_selection.not_applied_reason
             )
+        self.resource_attributes[_TEST_SELECTION_ANSWER] = self.selection_echo["answer"]
+        self.resource_attributes[_TEST_SELECTION_REASON] = self.selection_echo["reason"]
+        self.resource_attributes[_TEST_SELECTION_KEPT_COUNT] = kept_count
+        if "not_applied_reason" in self.selection_echo:
+            self.resource_attributes[_TEST_SELECTION_NOT_APPLIED_REASON] = (
+                self.selection_echo["not_applied_reason"]
+            )
+
+    def send_session_verdict(self, verdict: session_verdict.SessionVerdict) -> None:
+        """Write what this session concluded to Mergify, before the spans go.
+
+        Sent exactly when the selection was asked for -- including when that
+        request failed: the API may be back by now, and the verdict is what
+        the NEXT rerun of this job needs, whatever this one was told. A job
+        that never asked (no opt-in, no coordinates, an xdist worker) has no
+        rerun to reduce and sends nothing. The gate is the same as the fetch's
+        by construction: `test_selection` is only ever built past it.
+
+        Never raises. A verdict that did not land costs the next rerun its
+        reduction and is reported in the terminal; it never fails the run.
+        """
+        if (
+            self.test_selection is None
+            or self.resource_attributes is None
+            or self.trace_mode is None
+        ):
+            return
+
+        body = self._session_verdict_body(verdict)
+        if body is None:
+            return
+
+        if self.trace_mode == "capture":
+            self.captured_session_verdict = body
+            self.session_verdict_result = session_verdict.SessionVerdictResult(
+                sent=True
+            )
+            return
+
+        if self.trace_mode == "debug":
+            print(f"MERGIFY SESSION VERDICT: {body}")
+            self.session_verdict_result = session_verdict.SessionVerdictResult(
+                sent=True
+            )
+            return
+
+        if self.api_client is None:
+            return
+
+        try:
+            receipt = self.api_client.send_session_verdict(body)
+        except Exception as exception:
+            # Broader than the `RuntimeError` the binding raises on a failed
+            # request, on purpose: the body is marshalled in Rust, and a value
+            # it cannot take (a provider reporting a negative run attempt) is
+            # an `OverflowError` or a `TypeError` there. Let through, it
+            # would be an INTERNALERROR at session end -- a red exit code on a
+            # green suite, and no trace upload either, since this runs first.
+            # The promise is that a verdict never costs the run anything.
+            self.session_verdict_result = session_verdict.SessionVerdictResult(
+                # The request's own message is already one; a marshalling
+                # error is named, since its text alone says nothing.
+                error=str(exception)
+                if isinstance(exception, RuntimeError)
+                else f"{type(exception).__name__}: {exception}"
+            )
+            return
+
+        if receipt is None:
+            # Dormant: the feature is not enabled for this repository. The
+            # selection block already says so; nothing to add.
+            return
+
+        self.session_verdict_result = session_verdict.SessionVerdictResult(
+            sent=True, truncated=bool(receipt["truncated"])
+        )
+
+    def _session_verdict_body(
+        self, verdict: session_verdict.SessionVerdict
+    ) -> typing.Optional[typing.Dict[str, typing.Any]]:
+        """The request body, from the same values the selection call was keyed on.
+
+        The coordinates are read off the resource attributes exactly as
+        `_load_test_selection` reads them, so a verdict is found by what the
+        asking run knows. The fingerprint and count are the ones reported with
+        the spans; without a fingerprint there was no selection call, and
+        there is no verdict either.
+        """
+        assert self.resource_attributes is not None
+        attributes = self.resource_attributes
+
+        fingerprint = attributes.get(_TEST_COLLECTION_FINGERPRINT)
+        head_sha = attributes.get(_VCS_REF_HEAD_REVISION)
+        pipeline_name = attributes.get(_CICD_PIPELINE_NAME)
+        job_name = attributes.get(_MERGIFY_TEST_JOB_NAME) or attributes.get(
+            _CICD_PIPELINE_TASK_NAME
+        )
+        if not (fingerprint and head_sha and pipeline_name and job_name):
+            return None
+
+        body: typing.Dict[str, typing.Any] = {
+            "test_run_id": self.test_run_id,
+            "head_sha": str(head_sha),
+            "pipeline_name": str(pipeline_name),
+            "job_name": str(job_name),
+            "collection_fingerprint": str(fingerprint),
+            "collection_count": attributes.get(_TEST_COLLECTION_COUNT, 0),
+            "total_test_runtime_ms": verdict.total_test_runtime_ms,
+            "failing_tests": verdict.failing_tests(),
+            "quarantined_failing_tests": verdict.quarantined_failing_tests(),
+            **verdict.counts(),
+        }
+        head_branch = attributes.get(_VCS_REF_HEAD_NAME)
+        if head_branch:
+            body["head_branch"] = str(head_branch)
+        # `run_attempt` only next to a `run_id`: the engine refuses an attempt
+        # of nothing, and a provider that reports no run id (Jenkins without a
+        # build number) reports no attempt either.
+        run_id = attributes.get(_CICD_PIPELINE_RUN_ID)
+        if run_id is not None and run_id != "":
+            body["run_id"] = run_id
+            run_attempt = attributes.get(_CICD_PIPELINE_RUN_ATTEMPT)
+            # An attempt the engine's counter accepts; a provider reporting
+            # something else is reported without one rather than refused.
+            if (
+                isinstance(run_attempt, int)
+                and not isinstance(run_attempt, bool)
+                and 0 <= run_attempt <= _MAX_COUNT
+            ):
+                body["run_attempt"] = run_attempt
+        if self.selection_echo is not None:
+            body["selection"] = dict(self.selection_echo)
+        return body
 
     def _load_test_selection(self, collection_fingerprint: str) -> None:
         # Opt-in, per job, and read before anything else: this feature decides

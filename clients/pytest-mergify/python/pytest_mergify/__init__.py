@@ -1,6 +1,7 @@
 import atexit
 import datetime
 import os
+import textwrap
 import time
 import typing
 
@@ -19,6 +20,7 @@ import pytest_timeout
 
 from pytest_mergify import flaky_detection as _flaky_detection
 from pytest_mergify import rerun as _rerun
+from pytest_mergify import session_verdict as _session_verdict
 from pytest_mergify import test_retry as _test_retry
 from pytest_mergify import tracing, utils
 from pytest_mergify.ci_insights import MergifyCIInsights
@@ -48,6 +50,18 @@ class PytestMergify:
     # A test may reach its call phase several times; only the first says what
     # the test did, the rest say what a rerun made of it.
     _current_test_call_reported: bool = False
+    # Each test's final status, folded from the reports pytest logs, for the
+    # verdict sent to Mergify at session end. `None` until `pytest_configure`
+    # for the same reason as the spans above -- and not a shared class-level
+    # instance, which every hand-wired plugin in the test suite would fold
+    # into.
+    _verdict: typing.Optional[_session_verdict.SessionVerdict] = None
+    # A session that only collects, or only sets up, is not a session a rerun
+    # can be answered from: it holds no test result, yet it would file a
+    # verdict under the same job and run as the real session -- two rows for
+    # one run, which is exactly the ambiguity the engine refuses to guess
+    # between. Such a session sends nothing.
+    _verdict_disabled: bool = False
 
     def pytest_configure(self, config: _pytest.config.Config) -> None:
         config.addinivalue_line(
@@ -69,6 +83,11 @@ class PytestMergify:
         self._finished_spans: typing.List[tracing.Span] = []
         self._session_span = None
         self._current_test_span = None
+        self._verdict = _session_verdict.SessionVerdict()
+        self._verdict_disabled = any(
+            config.getoption(option, default=False)
+            for option in ("collectonly", "setuponly", "setupplan")
+        )
         self.has_error = False
         # Set once the spans are exported at session finish; read by the summary.
         self._export_result = (False, None)
@@ -223,6 +242,9 @@ class PytestMergify:
                 self.mergify_ci.test_selection.report(),
                 yellow=self.mergify_ci.test_selection.init_error_msg is not None,
             )
+            _write_session_verdict_result(
+                terminalreporter, self.mergify_ci.session_verdict_result
+            )
 
         # Mergify Test Insights Traces upload logs
         if self.mergify_ci.trace_mode is None:
@@ -232,7 +254,9 @@ class PytestMergify:
             )
         else:
             uploaded, error = self._export_result
-            if uploaded:
+            # The id is printed whenever anything was filed under it: the
+            # spans, or the verdict, which the engine keys by the same id.
+            if uploaded or self.mergify_ci.session_verdict_result.sent:
                 # A sentence, not an environment variable: nothing reads this
                 # line back (checked across this repository, the monorepo and
                 # the docs, MRGFY-8978), and the one reader it has is a
@@ -241,16 +265,17 @@ class PytestMergify:
                     f"Test run ID: {self.mergify_ci.test_run_id}"
                     " (use it when contacting Mergify support)",
                 )
-            elif error is not None:
-                terminalreporter.write_line(
-                    f"Error while exporting traces: {error}",
-                    red=True,
-                )
-            else:
-                terminalreporter.write_line(
-                    "Mergify's API did not accept the test results; they were not uploaded",
-                    red=True,
-                )
+            if not uploaded:
+                if error is not None:
+                    terminalreporter.write_line(
+                        f"Error while exporting traces: {error}",
+                        red=True,
+                    )
+                else:
+                    terminalreporter.write_line(
+                        "Mergify's API did not accept the test results; they were not uploaded",
+                        red=True,
+                    )
 
     @property
     def _traces_enabled(self) -> bool:
@@ -419,6 +444,13 @@ class PytestMergify:
             self._session_span["status"] = "error" if self.has_error else "ok"
             self._session_span["end_unix_nano"] = time.time_ns()
             self._finished_spans.append(self._session_span)
+
+        # The verdict first, on purpose: it is what the next merge-queue rerun
+        # of this job is answered from, and it must never wait behind the
+        # upload's timeout and retries (up to 211 s). Its own failure does
+        # not stop the upload either -- the two are independent documents.
+        if self._verdict is not None and not self._verdict_disabled:
+            self.mergify_ci.send_session_verdict(self._verdict)
 
         self._export_result = self.mergify_ci.export_spans(self._finished_spans)
 
@@ -779,12 +811,32 @@ class PytestMergify:
         # still deciding what the session will say.
         for mechanism in self._rerun_mechanisms:
             mechanism.try_fill_metrics_from_report(report)
+        # Every attempt's time, logged or not: the verdict's runtime is what
+        # the job spent on its tests, and a retry the session never reported
+        # still cost it.
+        if self._verdict is not None:
+            self._verdict.record_duration(report)
 
         if report.when != "call" or self._current_test_call_reported:
             return
 
         self._current_test_call_reported = True
         self._update_current_span_from_report(report)
+
+    def pytest_runtest_logreport(self, report: _pytest.reports.TestReport) -> None:
+        # The verdict folds the reports pytest LOGS, and only those: this is
+        # where the plugin's own swaps have already happened -- a rescued
+        # first attempt arrives as passed, an `unhealthy` rerun as `rerun`, a
+        # `new`-mode rerun that failed as failed -- so what is folded here is
+        # by construction what pytest exits on.
+        if self._verdict is None:
+            return
+        quarantine = self.mergify_ci.quarantined_tests
+        self._verdict.record_logged_report(
+            report,
+            quarantined=quarantine is not None
+            and report.nodeid in quarantine.quarantine_used_by_tests,
+        )
 
     @property
     def _rerun_mechanisms(self) -> typing.List[_rerun.RerunLoop]:
@@ -950,6 +1002,50 @@ Common issues:
 🔍 Details: {error_message}""",
         yellow=True,
     )
+
+
+def _write_session_verdict_result(
+    terminalreporter: _pytest.terminal.TerminalReporter,
+    result: _session_verdict.SessionVerdictResult,
+) -> None:
+    """Say when the verdict did not reach Mergify whole, under the ✂️ block.
+
+    Nothing on success: the block above already describes the run, and the
+    verdict is how a retry of this batch gets its reduction. What the reader
+    needs to hear is when that reduction is lost, and why -- the same shape as
+    a failed request in the block: the consequence first, the bare error text
+    on its own line for support. Wording validated by Alexandre on 2026-09-15,
+    after two corrections of his: a green batch has no next run, and "the next
+    run of this job" names a batch the reader cannot see -- so both sentences
+    say "if this merge-queue batch is retried". A change here is a product
+    decision.
+    """
+    if result.error is not None:
+        terminalreporter.write_line(
+            textwrap.fill(
+                "Mergify couldn't record this run's results. If this"
+                " merge-queue batch is retried, this job will run its full"
+                " test suite.",
+                80,
+                # "merge-queue" is one word to the reader; a break at its
+                # hyphen is not.
+                break_on_hyphens=False,
+            )
+            + f"\nError: {result.error}\n",
+            red=True,
+        )
+    elif result.truncated:
+        terminalreporter.write_line(
+            textwrap.fill(
+                "Mergify recorded this run's counts but not its failing tests."
+                " If this merge-queue batch is retried, this job will run its"
+                " full test suite.",
+                80,
+                break_on_hyphens=False,
+            )
+            + "\n",
+            yellow=True,
+        )
 
 
 def _is_xdist_controller(config: _pytest.config.Config) -> bool:

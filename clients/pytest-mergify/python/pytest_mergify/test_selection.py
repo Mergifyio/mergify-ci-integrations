@@ -132,6 +132,21 @@ _FULL_RUN_SENTENCES: typing.Dict[str, str] = {
         "Mergify didn't have the complete results of the previous attempt, so"
         " the full suite ran."
     ),
+    # The two reasons the session verdict brought (MRGFY-9312): the answer is
+    # read off what the previous session wrote itself, so what can stop a
+    # reduction is no longer an ingestion accident but the session's own
+    # shape -- it stopped early, or it failed more tests than one request
+    # carries. The three `matched_test_session_*` rows above and
+    # `indeterminate_test_session` are what an engine still on the spans
+    # serves; kept so a client ahead of its engine keeps a sentence for them.
+    "matched_test_session_incomplete": (
+        "The previous attempt stopped before running all of its tests, so the"
+        " full suite ran."
+    ),
+    "matched_test_session_failures_truncated": (
+        "The previous attempt had too many failures for Mergify to list, so"
+        " the full suite ran."
+    ),
     "no_collection_fingerprint": (
         "This version of pytest-mergify doesn't report what it collected, so"
         " the full suite ran. Upgrade it to let Mergify reduce reruns."

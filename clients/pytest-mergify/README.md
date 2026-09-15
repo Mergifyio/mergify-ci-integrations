@@ -83,6 +83,13 @@ suite, so the feature never costs coverage. It is also enabled per organization
 on Mergify's side, so a job that opts in stays inactive until your organization
 is opted in too.
 
+An opted-in job also tells Mergify what it concluded when its session ends —
+which tests failed, how many ran — in one small request sent before the test
+results are uploaded. That is what the next rerun of the job is answered from,
+seconds after this one finished, without waiting for the results to be
+processed. If that request fails, the run's own result is untouched: the
+terminal says so, and the next rerun simply runs the full suite.
+
 ## Development
 
 ### Prerequisites

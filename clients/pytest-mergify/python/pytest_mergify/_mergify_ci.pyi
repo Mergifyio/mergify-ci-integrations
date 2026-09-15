@@ -48,6 +48,9 @@ class CiApiClient:
         job_name: str,
         collection_fingerprint: str,
     ) -> Optional[Dict[str, Any]]: ...
+    def send_session_verdict(
+        self, verdict: Mapping[str, Any]
+    ) -> Optional[Dict[str, Any]]: ...
     def upload_trace(
         self,
         resource_attributes: Mapping[str, Any],
