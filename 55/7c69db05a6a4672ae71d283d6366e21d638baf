@@ -1,0 +1,1 @@
+fix: class attribute shadowed the module alias on Python < 3.14 (CI red on 3.8-3.13); intent-review text fixes; truncate in place
