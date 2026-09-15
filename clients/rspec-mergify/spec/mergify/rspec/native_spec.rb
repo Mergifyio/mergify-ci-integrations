@@ -295,6 +295,40 @@ RSpec.describe Mergify::RSpec::Native do
       end
     end
 
+    describe '.compute_retry' do
+      let(:retry_context) do
+        context.merge(
+          'budget_ratio_for_test_retries' => 0.5,
+          'flaky_test_names' => ['flaky_spec.rb[1:1]']
+        )
+      end
+
+      it 'owns the verdict for a test detection reruns, without buying its attempts' do
+        plan = described_class.compute_retry(
+          retry_context, ['flaky_spec.rb[1:1]', 'old_spec.rb[1:1]'], [], ['flaky_spec.rb[1:1]'], false
+        )
+
+        expect(plan['eligible_tests']).to eq(['flaky_spec.rb[1:1]'])
+        expect(plan['tests_to_process']).to be_empty
+      end
+
+      it 'gives the verdict up where a detection rerun is itself the merge gate' do
+        plan = described_class.compute_retry(
+          retry_context, ['flaky_spec.rb[1:1]'], [], ['flaky_spec.rb[1:1]'], true
+        )
+
+        expect(plan['eligible_tests']).to be_empty
+      end
+
+      it 'sizes the budget from the whole session rather than the baseline' do
+        session = Array.new(30) { |i| "spec_#{i}.rb[1:1]" }
+
+        # 0.5 * 100 ms * 30 tests collected; the lone baseline test does not cap it.
+        expect(described_class.compute_retry(retry_context, session, [], [], false)['available_budget_ms'])
+          .to eq(1500.0)
+      end
+    end
+
     describe '.static_share_ms and .dynamic_share_ms' do
       it 'splits the budget evenly up front' do
         expect(described_class.static_share_ms(1000.0, 4)).to eq(250.0)
