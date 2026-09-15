@@ -701,6 +701,11 @@ if (!nativeBinding) {
 
 module.exports = nativeBinding
 module.exports.CiApiClient = nativeBinding.CiApiClient
+module.exports.computeBudget = nativeBinding.computeBudget
+module.exports.computeRetryBudget = nativeBinding.computeRetryBudget
 module.exports.detectAttributes = nativeBinding.detectAttributes
 module.exports.detectProvider = nativeBinding.detectProvider
 module.exports.detectRepositoryName = nativeBinding.detectRepositoryName
+module.exports.dynamicShareMs = nativeBinding.dynamicShareMs
+module.exports.shouldRunFlakyDetection = nativeBinding.shouldRunFlakyDetection
+module.exports.staticShareMs = nativeBinding.staticShareMs

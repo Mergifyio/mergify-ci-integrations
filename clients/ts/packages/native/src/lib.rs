@@ -16,8 +16,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use mergify_ci_api::{
-    ApiConfig, AttrValue as ApiAttrValue, Client, ClientInfo, Outcome, SpanData, SpanStatus,
-    TestSelection as ApiTestSelection,
+    ApiConfig, AttrValue as ApiAttrValue, Client, ClientInfo, Mode, Outcome, SpanData, SpanStatus,
+    TestSelection as ApiTestSelection, budget,
 };
 use mergify_ci_core::{AttrValue, CiContext};
 use napi::bindgen_prelude::{BigInt, Either, Either3};
@@ -128,12 +128,18 @@ pub struct FlakyDetectionContext {
     // but they are projected anyway: this object is meant to mirror the wire
     // contract, and a field the server sends that stops here is invisible to
     // whoever wires the feature up next.
+    //
+    // Optional the way the wire model defaults them, because this object also
+    // arrives from JS: the Playwright state file and the reporter's own options
+    // both accept a context written before test retry existed. Requiring them
+    // would reject such a context outright, and flaky detection would go quiet
+    // for a repository that did nothing wrong.
     #[napi(js_name = "budget_ratio_for_test_retries")]
-    pub budget_ratio_for_test_retries: f64,
+    pub budget_ratio_for_test_retries: Option<f64>,
     #[napi(js_name = "flaky_test_names")]
-    pub flaky_test_names: Vec<String>,
+    pub flaky_test_names: Option<Vec<String>>,
     #[napi(js_name = "broken_test_names")]
-    pub broken_test_names: Vec<String>,
+    pub broken_test_names: Option<Vec<String>>,
     #[napi(js_name = "max_test_execution_count")]
     pub max_test_execution_count: i64,
     #[napi(js_name = "max_test_name_length")]
@@ -152,15 +158,156 @@ impl From<mergify_ci_api::FlakyDetectionContext> for FlakyDetectionContext {
             existing_test_names: context.existing_test_names,
             existing_tests_mean_duration_ms: context.existing_tests_mean_duration_ms,
             unhealthy_test_names: context.unhealthy_test_names,
-            budget_ratio_for_test_retries: context.budget_ratio_for_test_retries,
-            flaky_test_names: context.flaky_test_names,
-            broken_test_names: context.broken_test_names,
+            budget_ratio_for_test_retries: Some(context.budget_ratio_for_test_retries),
+            flaky_test_names: Some(context.flaky_test_names),
+            broken_test_names: Some(context.broken_test_names),
             max_test_execution_count: context.max_test_execution_count,
             max_test_name_length: context.max_test_name_length,
             min_budget_duration_ms: context.min_budget_duration_ms,
             min_test_execution_count: context.min_test_execution_count,
         }
     }
+}
+
+impl From<FlakyDetectionContext> for mergify_ci_api::FlakyDetectionContext {
+    fn from(context: FlakyDetectionContext) -> Self {
+        Self {
+            budget_ratio_for_new_tests: context.budget_ratio_for_new_tests,
+            budget_ratio_for_unhealthy_tests: context.budget_ratio_for_unhealthy_tests,
+            existing_test_names: context.existing_test_names,
+            existing_tests_mean_duration_ms: context.existing_tests_mean_duration_ms,
+            unhealthy_test_names: context.unhealthy_test_names,
+            budget_ratio_for_test_retries: context.budget_ratio_for_test_retries.unwrap_or_default(),
+            flaky_test_names: context.flaky_test_names.unwrap_or_default(),
+            broken_test_names: context.broken_test_names.unwrap_or_default(),
+            max_test_execution_count: context.max_test_execution_count,
+            max_test_name_length: context.max_test_name_length,
+            min_budget_duration_ms: context.min_budget_duration_ms,
+            min_test_execution_count: context.min_test_execution_count,
+        }
+    }
+}
+
+/// The tests flaky detection reruns this session, and the budget for them.
+#[napi(object)]
+pub struct BudgetPlan {
+    /// Total rerun budget for the session, in milliseconds.
+    pub available_budget_ms: f64,
+    /// The selected tests, in the order they were given.
+    pub tests_to_process: Vec<String>,
+}
+
+/// The tests test retry answers for, and the budget it may spend on them.
+#[napi(object)]
+pub struct RetryPlan {
+    /// Total retry budget for the session, in milliseconds.
+    pub available_budget_ms: f64,
+    /// Every test whose failure retry owns the verdict for — including the ones
+    /// it will not pay to rerun.
+    pub eligible_tests: Vec<String>,
+    /// The eligible tests retry reruns on its own budget.
+    pub tests_to_process: Vec<String>,
+}
+
+fn parse_mode(mode: &str) -> Result<Mode> {
+    match mode {
+        "new" => Ok(Mode::New),
+        "unhealthy" => Ok(Mode::Unhealthy),
+        other => Err(Error::new(
+            Status::InvalidArg,
+            format!("unknown mode: {other}"),
+        )),
+    }
+}
+
+/// Whether flaky detection has anything to do this session — `false` in
+/// `"new"` mode with an empty baseline, where every test would look new and
+/// the whole suite would rerun.
+// napi hands JS arguments over as owned values; the engine only borrows them.
+#[allow(clippy::needless_pass_by_value)]
+#[napi]
+pub fn should_run_flaky_detection(context: FlakyDetectionContext, mode: String) -> Result<bool> {
+    Ok(budget::should_run(&context.into(), parse_mode(&mode)?))
+}
+
+/// Select the tests flaky detection reruns and compute the session's budget.
+///
+/// `excluded` holds the tests that opted out. The budget scales with the
+/// baseline tests present in this session, floored at `min_budget_duration_ms`.
+// napi hands JS arguments over as owned values; the engine only borrows them.
+#[allow(clippy::needless_pass_by_value)]
+#[napi]
+pub fn compute_budget(
+    context: FlakyDetectionContext,
+    mode: String,
+    session_tests: Vec<String>,
+    excluded: Vec<String>,
+) -> Result<BudgetPlan> {
+    let plan = budget::plan(
+        &context.into(),
+        parse_mode(&mode)?,
+        &session_tests,
+        &excluded,
+    );
+    Ok(BudgetPlan {
+        available_budget_ms: plan.available_budget_ms,
+        tests_to_process: plan.tests_to_process,
+    })
+}
+
+/// Select the tests test retry answers for and compute its session budget.
+///
+/// `testsBeingDetected` is flaky detection's target set, and
+/// `detectionGatesFailures` says a failure of those reruns is itself the merge
+/// gate (`"new"` mode), where retry gives up the verdict rather than absorbing
+/// it. See `budget::retry_plan` for the rules the two lists encode.
+// napi hands JS arguments over as owned values; the engine only borrows them.
+#[allow(clippy::needless_pass_by_value)]
+#[napi]
+#[must_use]
+pub fn compute_retry_budget(
+    context: FlakyDetectionContext,
+    session_tests: Vec<String>,
+    excluded: Vec<String>,
+    tests_being_detected: Vec<String>,
+    detection_gates_failures: bool,
+) -> RetryPlan {
+    let plan = budget::retry_plan(
+        &context.into(),
+        &session_tests,
+        &excluded,
+        &tests_being_detected,
+        detection_gates_failures,
+    );
+    RetryPlan {
+        available_budget_ms: plan.available_budget_ms,
+        eligible_tests: plan.eligible_tests,
+        tests_to_process: plan.tests_to_process,
+    }
+}
+
+/// The per-test slice when the budget is split evenly up front.
+#[napi]
+#[must_use]
+pub fn static_share_ms(available_budget_ms: f64, num_tests: u32) -> f64 {
+    budget::static_share_ms(available_budget_ms, num_tests as usize)
+}
+
+/// The per-test slice recomputed from what is left, as the session progresses.
+#[napi]
+#[must_use]
+pub fn dynamic_share_ms(
+    available_budget_ms: f64,
+    used_budget_ms: f64,
+    num_tests: u32,
+    processed: u32,
+) -> f64 {
+    budget::dynamic_share_ms(
+        available_budget_ms,
+        used_budget_ms,
+        num_tests as usize,
+        processed as usize,
+    )
 }
 
 /// Whether this run should execute only a subset of tests.
