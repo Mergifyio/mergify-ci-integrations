@@ -225,9 +225,11 @@ impl Client {
         };
         // A `subset` answer must carry a `tests` list. A *missing* one is a
         // protocol break, surfaced (pytest-mergify raised a KeyError here)
-        // rather than silently running the full suite; a *present* empty list is
-        // a legitimate "subset matched nothing", left for the caller to
-        // normalise.
+        // rather than silently running the full suite. A *present* empty list
+        // decodes rather than failing here, so the caller sees the shape it was
+        // actually served and can report it: the engine answers `full` when it
+        // has nothing to replay, so an empty `subset` is a defect for a client
+        // to declare, not a transport error to swallow.
         if selection.selection == "subset" && selection.tests.is_none() {
             return Outcome::Failed(
                 "Mergify API returned a `subset` test-selection with no `tests` list".to_owned(),
@@ -608,8 +610,10 @@ mod tests {
             .mount(&server)
             .await;
         let client = build_client(&server.uri());
-        // A *present* empty list is legitimate (subset matched nothing), left
-        // for the caller to normalise — not a contract error.
+        // A *present* empty list decodes rather than failing the fetch, so the
+        // caller is handed the shape it was served and can report it. Not a
+        // contract error at this layer, and not an endorsement either: the
+        // engine answers `full` when it has nothing to replay.
         let selection = client
             .fetch_test_selection("queue/main", "cafe", "CI", "unit", Some("f1"))
             .await

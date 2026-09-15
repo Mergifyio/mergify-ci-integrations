@@ -31,29 +31,51 @@ _TEST_COLLECTION_FINGERPRINT = "test.collection.fingerprint"
 # ordinary passing test (MRGFY-8885).
 _TEST_COLLECTION_COUNT = "test.collection.count"
 
-# The served answer as this run applied it. Nothing on the server keeps its own
-# answer -- it is computed, served, and dropped -- so a session that does not
-# describe its own reduction leaves no reduction reportable afterwards, for any
-# surface (MRGFY-8859). "As applied" and not "as sent", because the two differ:
-# a subset matching none of the collected tests degrades to a full run here,
-# and the reporting has to describe the run that happened rather than the one
-# that was offered.
+# What Mergify answered, verbatim. Nothing on the server keeps its own answer
+# -- it is computed, served, and dropped -- so a session that does not describe
+# what it was told leaves no reduction reportable afterwards, for any surface
+# (MRGFY-8859).
+#
+# As SENT, never as applied: what the run did with it is a separate fact, in
+# `_TEST_SELECTION_NOT_APPLIED_REASON` below. A client that answered here with
+# its own verdict would destroy the trace of what we offered in the one case
+# that would prove we offered something wrong (MRGFY-9139).
+#
+# So this value is NOT closed on the reader's side: an answer a published client
+# predates travels verbatim, which is what tells a newer engine answer apart
+# from a malformed one. Whatever persists it has to accept a string it does not
+# know rather than reject the run's whole report.
 #
 # `answer`, not `outcome`: `Outcome` is this repository's word for how an API
 # call went -- `Ready`, `Dormant`, `Failed` (`crates/mergify-ci-api`), and
 # `fetch_test_selection` returns one -- so a key named after it would read as
 # "did the selection work", under which `full` means success. It is the
-# opposite: `full` is what a served full answer and every degradation alike
-# come to.
+# opposite: `full` is the answer that reduces nothing.
 _TEST_SELECTION_ANSWER = "test.selection.answer"
 # The server's own word for why it answered that way, forwarded verbatim and
-# never read here -- except that a degradation replaces it with the client's
-# own (`subset_matched_no_collected_test`), so a reader cannot assume every
-# value came from the server.
+# never read here.
 _TEST_SELECTION_REASON = "test.selection.reason"
-# How many tests the selection left this run to run -- the whole collection on
-# a full run, the served subset on a reduced one, none on an `empty` answer and
-# none on a refusal, which stops the run before any test starts.
+# Why this run did not do what the two keys above say it was told -- the
+# client's own closed vocabulary (`test_selection.NotAppliedReason`, which
+# carries the rule for counting these), absent whenever the answer was
+# honoured. Absent rather than a "none" value so that counting is counting the
+# key, and so that a reader who predates it cannot mistake a sentinel for a
+# cause.
+#
+# It is here rather than derivable because nothing else observes it: the engine
+# knows what it OFFERED, and only the run inside the customer's CI knows what
+# became of the offer.
+_TEST_SELECTION_NOT_APPLIED_REASON = "test.selection.not_applied_reason"
+# How many tests the selection left this run to run: the whole collection on a
+# full run and on a run that could not apply its answer, the served subset on a
+# reduced one, none on an `empty` answer and none on a refusal, which stops the
+# run before any test starts.
+#
+# It is NOT the discriminator between those cases, and nothing should be built
+# as though it were: a subset naming every collected test is honoured and keeps
+# all of them, which on the wire is indistinguishable from a declined one.
+# `_TEST_SELECTION_NOT_APPLIED_REASON` -- present or absent -- is the only
+# reading that separates them.
 #
 # `kept`, the word this module already uses for the quantity, and not
 # `executed`: it is counted in the collection hook, before a single test has
@@ -333,22 +355,23 @@ class MergifyCIInsights:
 
         self._load_test_selection(fingerprint)
 
-    def on_selection_applied(self, kept_count: int) -> None:
-        """Report what the served selection came to, on the run's own session.
+    def on_selection_resolved(self, kept_count: int) -> None:
+        """Report what Mergify answered, and what this run made of it.
 
-        Called once the answer has been applied to the collection, which is the
-        only moment both halves are known: the collection is what the fetch was
-        keyed on, and `kept_count` is what survived it.
+        Called once the answer has been resolved against the collection --
+        applied to it, or declined -- which is the only moment both halves are
+        known: the collection is what the fetch was keyed on, and `kept_count`
+        is what the answer left to run.
 
         Nothing is reported unless the server actually answered. A run that
         never asked -- a job that never opted in, incomplete job coordinates,
         an xdist worker -- and a run whose question went unanswered -- no
-        subscription, or a fetch that errored -- both degrade to a full run
-        locally, and neither was offered a reduction. That absence is the
-        honest signal: recording a `full` answer for them would make a
-        repository outside the pilot, and an API that was down,
-        indistinguishable from a run Mergify looked at and chose not to reduce
-        -- in every count taken afterwards.
+        subscription, or a fetch that errored -- both run the full suite too,
+        but neither was offered anything, so neither carries a
+        `not_applied_reason`. That absence is the honest signal: recording a
+        `full` answer for them would make a repository outside the pilot, and
+        an API that was down, indistinguishable from a run Mergify looked at
+        and chose not to reduce -- in every count taken afterwards.
         """
         if (
             self.resource_attributes is None
@@ -360,6 +383,10 @@ class MergifyCIInsights:
         self.resource_attributes[_TEST_SELECTION_ANSWER] = self.test_selection.selection
         self.resource_attributes[_TEST_SELECTION_REASON] = self.test_selection.reason
         self.resource_attributes[_TEST_SELECTION_KEPT_COUNT] = kept_count
+        if self.test_selection.not_applied_reason is not None:
+            self.resource_attributes[_TEST_SELECTION_NOT_APPLIED_REASON] = (
+                self.test_selection.not_applied_reason
+            )
 
     def _load_test_selection(self, collection_fingerprint: str) -> None:
         # Opt-in, per job, and read before anything else: this feature decides

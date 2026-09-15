@@ -71,9 +71,11 @@ pub struct FlakyDetectionContext {
 /// Polymorphic on `selection`: `tests` is part of a `subset` answer and absent
 /// from a `full` one, so it is `None` when the field is missing — letting the
 /// fetch layer tell a `subset` with no `tests` (a protocol break, surfaced)
-/// apart from a `subset` with an empty `tests` (normalised to full client-side).
-/// The `subset`-matched-nothing normalisation likewise stays client-side, next
-/// to the collected items it compares against.
+/// apart from a `subset` with an empty `tests`, which is handed to the client.
+/// What a client does when it cannot honour an answer — an empty subset, ids it
+/// did not collect, a `selection` it predates — stays client-side, next to the
+/// collected items it compares against: it runs everything and declares why,
+/// and never rewrites this struct's `selection` or `reason` with its own words.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct TestSelection {
     /// Which kind of answer this is — `"full"` (run everything), `"subset"`

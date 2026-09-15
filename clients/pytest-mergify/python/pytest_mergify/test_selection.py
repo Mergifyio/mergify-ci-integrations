@@ -43,6 +43,44 @@ FALLBACK_REFUSAL_MESSAGE = (
 )
 
 
+# Why a run did not do what Mergify answered. Closed on purpose, and named
+# after the shape of the answer rather than after what the run did with it:
+# what it did is always the same, run everything.
+#
+# `not applied` and not `degraded`, which this repository already spends on a
+# wider class -- a run that never asked, one with no subscription, one whose
+# fetch errored all "degrade to a full run" too, and none of them carries a
+# value here. Whoever counts these is counting answers Mergify gave and this
+# run refused, not runs that ended up executing everything.
+#
+# THE COUNTING RULE, stated here once and referred to from everywhere else:
+# `unrecognised_selection` is a normal condition and must be excluded, or the
+# count moves on every engine release. The other three are unreachable against
+# a correct engine -- under the collection fingerprint (MRGFY-8995) predecessor
+# and rerun collected the same set, so every served id exists in this run --
+# which is what makes a non-zero count of them a defect report rather than a
+# statistic. A malformed `selection` also lands in `unrecognised_selection`,
+# and is told apart from a genuinely newer answer by `test.selection.answer`,
+# which carries the raw value: a value outside the engine's own vocabulary was
+# emitted by the engine, not predated by the client.
+NotAppliedReason = typing.Literal[
+    # `subset` with no test in it. An engine that means "run everything" says
+    # `full`; a subset naming nothing is a defect on our side, not an answer.
+    "subset_served_without_tests",
+    # A `selection` value this client predates -- the mechanism by which the
+    # engine grows new answers without breaking the clients already published.
+    "unrecognised_selection",
+    # None of the served ids is in this collection. The two runs share no
+    # vocabulary at all.
+    "subset_matched_no_collected_test",
+    # Some are, some are not. Running the intersection would be a reduced run
+    # over an arbitrary part of what was asked for, green on tests nobody
+    # chose -- and, unlike the value above, it would still look like an
+    # ordinary reduction.
+    "subset_partly_absent_from_collection",
+]
+
+
 # One sentence per reason the full suite was served, for the terminal block.
 # Written for the developer reading their job log, who wants to know what
 # reduced (or did not reduce) their run and whether it was deliberate -- so
@@ -175,8 +213,19 @@ class TestSelection:
     Every error, timeout, and every answer outside that list degrades to
     running the full suite — the feature can remove work, never correctness,
     and a client is routinely older than the server it talks to.
+
+    When an answer cannot be honoured the run executes everything and says so
+    in `not_applied_reason`, never by rewriting `selection` or `reason`: those
+    two carry Mergify's word, and the only moment their value would prove
+    Mergify said something wrong is the moment rewriting them would erase it.
     """
 
+    # The vocabulary the SERVER is meant to use, not a guarantee about what
+    # this field holds: an answer from a newer engine is kept verbatim rather
+    # than rewritten, so at runtime this is any string, and
+    # `not_applied_reason == "unrecognised_selection"` is what says so. Do not
+    # write an exhaustive match on it -- mypy would accept one, and it would be
+    # wrong on exactly the runs this class exists to describe.
     selection: typing.Literal["full", "subset", "empty", "refused"] = "full"
     reason: str = "not_requested"
     tests: typing.List[str] = dataclasses.field(default_factory=list)
@@ -188,6 +237,13 @@ class TestSelection:
     # ask for. The terminal block wraps it in its own sentence about what the
     # failure meant for this run, so it must not already be one.
     init_error_msg: typing.Optional[str] = None
+    # Why this run did not do what Mergify answered, in the client's own closed
+    # vocabulary -- unlike `reason`, which is the server's and open-ended. Set
+    # means the full suite ran whatever `selection` says; `None` means the
+    # answer was honoured exactly. See `NotAppliedReason` for the counting rule.
+    not_applied_reason: typing.Optional[NotAppliedReason] = dataclasses.field(
+        init=False, default=None
+    )
     kept_count: typing.Optional[int] = dataclasses.field(init=False, default=None)
     deselected_count: int = dataclasses.field(init=False, default=0)
     # The node ids a subset actually re-executed -- the served names that were
@@ -195,17 +251,20 @@ class TestSelection:
     kept_tests: typing.List[str] = dataclasses.field(init=False, default_factory=list)
 
     def __post_init__(self) -> None:
-        # `empty` and `refused` are answers in themselves and carry no tests.
-        # A subset is only honoured with a non-empty list; anything else -- a
-        # `full` answer, a `subset` the server sent empty, or a variant this
-        # client predates -- runs everything. Acting on a value we cannot
-        # reason about is the one outcome that loses coverage silently, on a
-        # run that reports green.
-        if self.selection in ("empty", "refused"):
-            self.tests = []
-        elif not (self.selection == "subset" and self.tests):
-            self.selection = "full"
-            self.tests = []
+        # `empty` and `refused` are answers in themselves and carry no tests,
+        # and so does `full`. A subset is only honoured with a non-empty list;
+        # a `subset` the server sent empty, and a variant this client predates,
+        # both run everything. Acting on a value we cannot reason about is the
+        # one outcome that loses coverage silently, on a run that reports green.
+        if self.selection == "subset":
+            if not self.tests:
+                self.not_applied_reason = "subset_served_without_tests"
+            return
+
+        if self.selection not in ("full", "empty", "refused"):
+            self.not_applied_reason = "unrecognised_selection"
+
+        self.tests = []
 
     def filter_items(
         self,
@@ -215,14 +274,20 @@ class TestSelection:
         """Apply the served answer to the collected items, in place.
 
         Matching is by exact nodeid — the identifiers Mergify serves are the
-        ones this plugin previously uploaded. Served names absent from the
-        collection are ignored; if NOTHING matches (e.g. the tests were
-        renamed since the previous attempt), the full suite runs — an empty
-        reduced run would turn green without testing anything.
+        ones this plugin previously uploaded. A subset is honoured all or not
+        at all: one served id this collection does not hold declines the whole
+        answer and runs everything, rather than reducing to the part that did
+        match.
 
         Raises `pytest.UsageError` on a refusal, which is what fails the run,
         carrying the server's explanation of it.
         """
+        if self.not_applied_reason is not None:
+            # Declared at construction: there was an answer, and this client
+            # could not act on it. Leaving the collection alone is the full
+            # suite.
+            return
+
         if self.selection == "refused":
             # Deliberately not the degradation path. Everywhere else, a shape
             # Mergify cannot resolve costs time and nothing else; here it is
@@ -242,9 +307,20 @@ class TestSelection:
 
         subset = set(self.tests)
         kept = [item for item in items if item.nodeid in subset]
-        if not kept:
-            self.selection = "full"
-            self.reason = "subset_matched_no_collected_test"
+        matched = {item.nodeid for item in kept}
+        if matched != subset:
+            # Identities, not counts. `kept` holds collected ITEMS and `subset`
+            # holds distinct ids, and the two stop being comparable as soon as
+            # a nodeid appears twice -- which `pytest --keep-duplicates` does on
+            # purpose. Under a count comparison one duplicate cancels one
+            # missing served id, and the run reduces to an arbitrary part of
+            # what was asked for while reporting an ordinary reduction: exactly
+            # the outcome this branch exists to prevent.
+            self.not_applied_reason = (
+                "subset_matched_no_collected_test"
+                if not matched
+                else "subset_partly_absent_from_collection"
+            )
             return
 
         deselected = [item for item in items if item.nodeid not in subset]
@@ -291,10 +367,14 @@ class TestSelection:
         it -- `reason` is translated, never shown.
 
         `empty` and `subset` describe what was skipped and why it was safe;
-        `full` is one sentence saying why nothing was reduced; a refusal points
-        at the engine's own explanation, which pytest has already printed as
-        the error that stopped the run; and a request that failed says so and
-        keeps the error text, which is what support will ask for.
+        `full` is one sentence saying why nothing was reduced; an answer this
+        run could not apply is one sentence too, chosen by the run's own
+        `not_applied_reason` rather than by Mergify's `reason` -- which
+        describes the answer that was NOT applied, and would read as a
+        reduction; a refusal points at the engine's own explanation, which
+        pytest has already printed as the error that stopped the run; and a
+        request that failed says so and keeps the error text, which is what
+        support will ask for.
         """
         if self.init_error_msg is not None:
             # The error text is appended verbatim on its own line rather than
@@ -324,8 +404,13 @@ class TestSelection:
         if self.selection == "subset" and self.kept_count is not None:
             return self._subset_block()
 
+        # A declined answer keeps Mergify's `reason` verbatim (it is the
+        # server's word, never rewritten), so on that path the sentence is
+        # keyed by what THIS run did with the answer.
         return self._block(
-            _FULL_RUN_SENTENCES.get(self.reason, _UNKNOWN_REASON_SENTENCE)
+            _FULL_RUN_SENTENCES.get(
+                self.not_applied_reason or self.reason, _UNKNOWN_REASON_SENTENCE
+            )
         )
 
     def _empty_block(self) -> str:
