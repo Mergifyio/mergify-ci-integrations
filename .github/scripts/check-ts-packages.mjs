@@ -13,7 +13,8 @@
 // Usage: check-ts-packages.mjs <dist-dir> <expected-version>
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -25,6 +26,19 @@ if (!distDir || !expectedVersion) {
 
 const PLATFORM_PREFIX = '@mergifyio/ci-native-';
 const LOADER = '@mergifyio/ci-native';
+
+// The highest glibc a linux-gnu binary may require. The Rust standard library
+// calls a few newer glibc functions only when they exist, but the linker
+// records a version requirement for each one it finds in the glibc it links
+// against, and the loader enforces those even for symbols the code treats as
+// optional -- so the floor is whatever the build links against, and raising it
+// drops distributions silently: the binary still installs, the loader catches
+// the failure, and the run reports nothing. 0.3.7 was built on the runner's own
+// Ubuntu and required 2.39, which is newer than Ubuntu 22.04, Debian 12 and
+// RHEL 9. Cross-compiling with zig brings it to 2.28 -- statx is the highest
+// version anything reaches for -- which covers the RHEL 8 family and newer.
+const GLIBC_FLOOR = [2, 28];
+const GNU_PLATFORM = /-linux-(x64|arm64)-gnu$/;
 
 const failures = [];
 const fail = (tgz, msg) => failures.push(`${tgz}: ${msg}`);
@@ -39,10 +53,33 @@ function entries(path) {
 }
 
 function read(path, entry) {
-  return execFileSync('tar', ['-xzOf', path, `package/${entry}`]);
+  // The .node binaries are several MB and execFileSync's default cap is 1 MiB,
+  // which fails as ENOBUFS rather than as anything about the package.
+  return execFileSync('tar', ['-xzOf', path, `package/${entry}`], { maxBuffer: 512 * 1024 * 1024 });
 }
 
 const sha = (buf) => createHash('sha256').update(buf).digest('hex');
+
+const cmp = (a, b) => a[0] - b[0] || a[1] - b[1];
+
+/**
+ * The highest glibc version a binary demands at load time, or null when it
+ * demands none. `readelf -V` lists the version-requirements table; these
+ * binaries define no GLIBC_* versions of their own, so every match is
+ * something the loader will insist on.
+ */
+function glibcRequired(binary) {
+  const dir = mkdtempSync(join(tmpdir(), 'ci-native-'));
+  const file = join(dir, 'binary.node');
+  try {
+    writeFileSync(file, binary);
+    const out = execFileSync('readelf', ['-V', file], { encoding: 'utf8' });
+    const versions = [...out.matchAll(/Name: GLIBC_(\d+)\.(\d+)/g)].map((m) => [+m[1], +m[2]]);
+    return versions.length ? versions.reduce((a, b) => (cmp(a, b) >= 0 ? a : b)) : null;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 // Resolved from this file rather than the cwd, so the check behaves the same
 // whichever directory a workflow step happens to run it from.
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -133,6 +170,11 @@ for (const name of tarballs) {
     else if (!files.has(pkg.main)) fail(name, `${pkg.main} is missing -- no native binary packed`);
     if (!Array.isArray(pkg.os) || pkg.os.length === 0) fail(name, 'no os field');
     if (!Array.isArray(pkg.cpu) || pkg.cpu.length === 0) fail(name, 'no cpu field');
+    if (GNU_PLATFORM.test(pkg.name) && files.has(pkg.main)) {
+      const needed = glibcRequired(read(path, pkg.main));
+      if (needed && cmp(needed, GLIBC_FLOOR) > 0)
+        fail(name, `${pkg.main} needs glibc ${needed.join('.')}, above the ${GLIBC_FLOOR.join('.')} floor`);
+    }
   }
 }
 
