@@ -195,8 +195,10 @@ fn flaky_context_dict(py: Python<'_>, context: &FlakyDetectionContext) -> PyResu
 }
 
 /// Marshal a [`TestSelection`] into the dict pytest-mergify's `TestSelection`
-/// lifecycle consumes. The subset-vs-full normalisation stays on the Python
-/// side, so this hands over the server's answer verbatim.
+/// lifecycle consumes. What to do about an answer the run cannot honour is
+/// decided on the Python side, so this hands over the server's answer verbatim
+/// -- including a `selection` this client predates, which the plugin keeps and
+/// declares rather than rewriting.
 fn test_selection_dict(py: Python<'_>, selection: &TestSelection) -> PyResult<Py<PyDict>> {
     let dict = PyDict::new(py);
     dict.set_item("selection", &selection.selection)?;
@@ -206,7 +208,8 @@ fn test_selection_dict(py: Python<'_>, selection: &TestSelection) -> PyResult<Py
     // `subset` without it is rejected upstream. An empty list is the right
     // value for the plugin: it keeps the key present, so `TestSelection(**dict)`
     // never raises, and what the answer then means is decided on the Python
-    // side from `selection` alone, never from the emptiness of this list.
+    // side from `selection` and this list together -- a `subset` arriving empty
+    // is a shape the plugin runs everything for, and declares.
     dict.set_item("tests", selection.tests.clone().unwrap_or_default())?;
     // Unlike `tests`, this one is handed over as-is rather than defaulted: the
     // dict then mirrors the wire, where the key is simply absent from every
