@@ -26,22 +26,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: x86_64-unknown-linux-gnu, runner: ubuntu-latest }
-          # Cross-compiled from x64: GitHub's hosted arm64 runners are not
-          # available on private repos. Pure-Rust crate, so a cross gcc is
-          # only needed as the linker.
-          - {
-              target: aarch64-unknown-linux-gnu,
-              runner: ubuntu-latest,
-              cross-linker: gcc-aarch64-linux-gnu,
-            }
-          - { target: x86_64-unknown-linux-musl, runner: ubuntu-latest, zig: true }
-          - { target: aarch64-unknown-linux-musl, runner: ubuntu-latest, zig: true }
+          # The glibc targets cross-compile with zig too, the host's own
+          # architecture included: linking x86_64 natively against the runner's
+          # glibc is what made these binaries require 2.39, newer than Ubuntu
+          # 22.04, Debian 12 and RHEL 9, where they then failed to load with
+          # nothing reported. zig links against its own glibc stubs instead, so
+          # the floor follows what the code calls rather than what the runner
+          # ships; check-ts-packages.mjs holds it there.
+          - { target: x86_64-unknown-linux-gnu, runner: ubuntu-latest, zig: true, cross: -x }
+          # arm64 is cross-compiled from x64 either way: GitHub's hosted arm64
+          # runners are not available on private repos.
+          - { target: aarch64-unknown-linux-gnu, runner: ubuntu-latest, zig: true, cross: -x }
+          - { target: x86_64-unknown-linux-musl, runner: ubuntu-latest, zig: true, cross: -x }
+          - { target: aarch64-unknown-linux-musl, runner: ubuntu-latest, zig: true, cross: -x }
           - { target: x86_64-apple-darwin, runner: macos-latest }
           - { target: aarch64-apple-darwin, runner: macos-latest }
           - { target: x86_64-pc-windows-msvc, runner: windows-latest }
-    env:
-      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Fetches pnpm as the self-contained native executable for the runner's
@@ -69,9 +69,6 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: ${{ matrix.target }}
-      - name: Install the cross linker
-        if: matrix.cross-linker
-        run: sudo apt-get update && sudo apt-get install --yes ${{ matrix.cross-linker }}
       # Musl toolchain, the napi-rs package-template way: zig as the cross
       # C compiler/linker, driven by `napi build -x` through cargo-zigbuild.
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
@@ -92,7 +89,7 @@ jobs:
       - name: Build the platform binary
         shell: bash
         working-directory: clients/ts/packages/native
-        run: pnpm exec napi build --platform --release --target ${{ matrix.target }} ${{ matrix.zig && '-x' || '' }}
+        run: pnpm exec napi build --platform --release --target ${{ matrix.target }} ${{ matrix.cross }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ts-native-${{ matrix.target }}
