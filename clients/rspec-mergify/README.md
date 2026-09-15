@@ -18,6 +18,23 @@ gem 'rspec-mergify'
 
 Then run `bundle install`.
 
+### Supported platforms
+
+The gem ships precompiled, so nothing is built on your machine. Each platform gem carries an extension for Ruby 3.1 through 4.0:
+
+| Platform | Requirement |
+|---|---|
+| Linux x86_64 / aarch64 (glibc) | **glibc 2.30 or newer** — Debian 11+, Ubuntu 20.04+, RHEL 9+, Amazon Linux 2023 |
+| Linux x86_64 / aarch64 (musl) | Alpine; on Ruby 3.1 also `apk add libgcc` |
+| macOS arm64 / x86_64 | — |
+| Windows x64 (UCRT) | — |
+
+Anywhere else, and on glibc older than 2.30 — RHEL, Rocky, AlmaLinux and Oracle Linux 8, Amazon Linux 2, CentOS 7 — the extension cannot load. The gem still installs and your suite still runs, but nothing is reported to Mergify. Pin the last pure-Ruby release on those systems:
+
+```ruby
+gem 'rspec-mergify', '0.1.4'
+```
+
 ## Configuration
 
 Set the `MERGIFY_TOKEN` environment variable with your Mergify API token.
