@@ -1,4 +1,5 @@
 import dataclasses
+import datetime
 import json
 import os
 import typing
@@ -8,7 +9,7 @@ import _pytest.main
 import _pytest.nodes
 import _pytest.reports
 
-from pytest_mergify import rerun, utils
+from pytest_mergify import _mergify_ci, rerun, utils
 
 
 @dataclasses.dataclass
@@ -42,46 +43,23 @@ class FlakyDetector(rerun.RerunLoop):
         )
 
     def prepare_for_session(self, session: _pytest.main.Session) -> None:
-        tests_in_session = {item.nodeid for item in session.items}
-        existing_tests_in_session = [
-            test
-            for test in self._context.existing_test_names
-            if test in tests_in_session
-        ]
-
-        excluded_tests = {
-            item.nodeid
-            for item in session.items
-            if rerun.mergify_marker_disables(item, "flaky_detection")
-        }
-
-        if self.mode == "new":
-            self._tests_to_process = [
-                test
-                for test in tests_in_session
-                if test not in existing_tests_in_session and test not in excluded_tests
-            ]
-        elif self.mode == "unhealthy":
-            self._tests_to_process = [
-                test
-                for test in tests_in_session
-                if test in self._context.unhealthy_test_names
-                and test not in excluded_tests
-            ]
-
-        if self.mode == "new":
-            budget_ratio = self._context.budget_ratio_for_new_tests
-        elif self.mode == "unhealthy":
-            budget_ratio = self._context.budget_ratio_for_unhealthy_tests
-
-        total_duration = self._context.existing_tests_mean_duration * len(
-            existing_tests_in_session
+        # Which tests this mode targets, and how long the session may spend on
+        # them, are the engine's rules -- documented on `budget::plan` and
+        # shared with rspec-mergify and the TypeScript reporters.
+        plan = _mergify_ci.compute_budget(
+            dataclasses.asdict(self._context),
+            self.mode,
+            [item.nodeid for item in session.items],
+            [
+                item.nodeid
+                for item in session.items
+                if rerun.mergify_marker_disables(item, "flaky_detection")
+            ],
         )
 
-        # We want to ensure a minimum duration even for very short test suites.
-        self._available_budget_duration = max(
-            budget_ratio * total_duration,
-            self._context.min_budget_duration,
+        self._tests_to_process = plan["tests_to_process"]
+        self._available_budget_duration = datetime.timedelta(
+            milliseconds=plan["available_budget_ms"]
         )
 
     def make_report(self) -> str:
