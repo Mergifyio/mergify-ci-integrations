@@ -186,7 +186,7 @@ RSpec.describe 'Integration: Tracing' do # rubocop:disable RSpec/DescribeClass
   end
 
   describe 'when not in CI' do
-    it 'does not create a tracer or any spans' do
+    it 'does not record any spans' do
       allow(Mergify::RSpec::Utils).to receive(:in_ci?).and_return(false)
       ENV.delete('MERGIFY_TOKEN')
       ENV.delete('_RSPEC_MERGIFY_TEST')
@@ -203,15 +203,9 @@ RSpec.describe 'Integration: Tracing' do # rubocop:disable RSpec/DescribeClass
       allow(Mergify::RSpec::Utils).to receive(:in_ci?).and_return(true)
       allow(Mergify::RSpec::Native).to receive(:detect_repository_name).and_return('owner/repo')
 
+      # A run is recorded in CI whether or not there is a token, so the formatter
+      # still runs, and the formatter is what warns about the missing one.
       ci = Mergify::RSpec::CIInsights.new
-      # No token means no tracer in test mode... actually in test mode the exporter
-      # is created regardless. Let me check the logic.
-      # build_in_memory_processor is called when debug_mode? or test_mode?, regardless of token.
-      # So we need to test the warning path differently.
-
-      # The warning is printed by the formatter when ci_insights.token is nil.
-      # Let's create a ci_insights with nil token:
-      ci.instance_variable_set(:@token, nil)
 
       Mergify::RSpec.ci_insights = ci
       output = StringIO.new

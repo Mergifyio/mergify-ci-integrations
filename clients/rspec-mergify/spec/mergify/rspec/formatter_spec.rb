@@ -158,7 +158,7 @@ RSpec.describe Mergify::RSpec::Formatter do
       expect(formatter.instance_variable_get(:@example_spans)).not_to have_key(example.id)
     end
 
-    it 'finishes the span (it appears in exporter)' do
+    it 'finishes the span (the recorder holds it)' do
       formatter.example_finished(notification)
       spans = recorder.finished_spans
       example_span = spans.find { |s| s.name == example.id }
