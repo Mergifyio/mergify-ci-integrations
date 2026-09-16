@@ -11,7 +11,10 @@
 use std::collections::BTreeMap;
 use std::ffi::c_void;
 
-use magnus::{Error, ExceptionClass, RArray, RHash, Ruby, function, method, prelude::*};
+use magnus::value::{Qfalse, Qtrue};
+use magnus::{
+    Error, ExceptionClass, Float, Integer, RArray, RHash, Ruby, function, method, prelude::*,
+};
 use mergify_ci_api::{
     ApiConfig, AttrValue as ApiAttrValue, Client, ClientInfo, FlakyDetectionContext, Mode, Outcome,
     SpanData, SpanStatus, budget,
@@ -254,21 +257,35 @@ fn flaky_context_hash(ruby: &Ruby, context: &FlakyDetectionContext) -> Result<RH
     Ok(hash)
 }
 
-/// Span attributes: strings and integers, as `otel_attributes` produces.
+/// Span attributes, each typed by its Ruby class. A `nil` value is dropped, as
+/// the OpenTelemetry SDK did.
 fn attributes_from_hash(hash: RHash) -> Result<Vec<(String, ApiAttrValue)>, Error> {
     let mut attributes = Vec::new();
     hash.foreach(|key: String, value: magnus::Value| {
-        let value = if let Ok(i) = i64::try_convert(value) {
-            ApiAttrValue::Int(i)
-        } else if let Ok(b) = bool::try_convert(value) {
-            ApiAttrValue::Bool(b)
-        } else {
-            ApiAttrValue::Str(String::try_convert(value)?)
-        };
-        attributes.push((key, value));
+        if !value.is_nil() {
+            attributes.push((key, attr_value(value)?));
+        }
         Ok(magnus::r_hash::ForEach::Continue)
     })?;
     Ok(attributes)
+}
+
+/// The class is checked rather than a conversion attempted, because magnus's
+/// conversions are Ruby's loose ones: `bool::try_convert` accepts any object by
+/// truthiness, so it never fails and turned every String into `true`, and
+/// `i64::try_convert` truncates a Float.
+fn attr_value(value: magnus::Value) -> Result<ApiAttrValue, Error> {
+    if Qtrue::from_value(value).is_some() {
+        Ok(ApiAttrValue::Bool(true))
+    } else if Qfalse::from_value(value).is_some() {
+        Ok(ApiAttrValue::Bool(false))
+    } else if let Some(integer) = Integer::from_value(value) {
+        Ok(ApiAttrValue::Int(integer.to_i64()?))
+    } else if let Some(float) = Float::from_value(value) {
+        Ok(ApiAttrValue::Double(float.to_f64()))
+    } else {
+        Ok(ApiAttrValue::Str(String::try_convert(value)?))
+    }
 }
 
 /// A trace or span id, which Ruby carries as a binary String. OpenTelemetry
