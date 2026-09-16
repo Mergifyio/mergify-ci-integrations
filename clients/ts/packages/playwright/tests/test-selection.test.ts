@@ -135,9 +135,13 @@ function fakeTestRun(options: { readonlyTests?: TestCase[]; skipSharding?: boole
 
 type Answer = { selection: string; reason: string; tests?: string[]; message?: string };
 
-/** The backend as the reporter sees it: one answer for the selection. */
+/**
+ * The backend as the reporter sees it: one answer for the selection, one
+ * receipt for the verdict, and a log of which went out first.
+ */
 function fakeClient(
-  answer: Answer | null | Error = { selection: 'full', reason: 'no_predecessor' }
+  answer: Answer | null | Error = { selection: 'full', reason: 'no_predecessor' },
+  receipt: { truncated: boolean } | null | Error = { truncated: false }
 ) {
   const calls: string[] = [];
   const client = {
@@ -147,6 +151,11 @@ function fakeClient(
       calls.push('fetchTestSelection');
       if (answer instanceof Error) throw answer;
       return answer;
+    }),
+    sendSessionVerdict: vi.fn().mockImplementation(async () => {
+      calls.push('sendSessionVerdict');
+      if (receipt instanceof Error) throw receipt;
+      return receipt;
     }),
     uploadTrace: vi.fn().mockResolvedValue(undefined),
   };
@@ -163,8 +172,8 @@ class OrderedSink extends InMemorySpanSink {
   }
 }
 
-function harness(answer?: Answer | null | Error) {
-  const { client, calls } = fakeClient(answer);
+function harness(answer?: Answer | null | Error, receipt?: { truncated: boolean } | null | Error) {
+  const { client, calls } = fakeClient(answer, receipt);
   const sink = new OrderedSink(calls);
   const reporter = new MergifyReporter({ sink, apiClient: client });
   return { reporter, client, calls, sink };
@@ -188,6 +197,9 @@ beforeEach(() => {
   // head branch from GITHUB_HEAD_REF; clear it so the stubbed ref name wins.
   vi.stubEnv('GITHUB_HEAD_REF', '');
   vi.stubEnv('GITHUB_BASE_REF', '');
+  // Pinned for the same reason: the verdict carries the run id and attempt.
+  vi.stubEnv('GITHUB_RUN_ID', '42');
+  vi.stubEnv('GITHUB_RUN_ATTEMPT', '1');
   vi.stubEnv('GITHUB_SHA', 'cafecafe');
   vi.stubEnv('GITHUB_WORKFLOW', 'CI');
   vi.stubEnv('GITHUB_JOB', 'e2e');
@@ -631,6 +643,300 @@ describe('shardSlice', () => {
 
   it('leaves a leg empty rather than split a unit', () => {
     expect(shardSlice(entries(['a', 'a', 'a']), { current: 2, total: 2 }).size).toBe(0);
+  });
+});
+
+describe('the session verdict', () => {
+  async function run(
+    reporter: MergifyReporter,
+    tests: TestCase[],
+    results: Array<[TestCase, TestResult]>,
+    config = fakeConfig(),
+    result = RUN
+  ) {
+    const suite = suiteWith(tests);
+    await reporter.preprocess({ config, suite, testRun: fakeTestRun().testRun });
+    reporter.onBegin(config, suite);
+    for (const [test, testResult] of results) reporter.onTestEnd(test, testResult);
+    return reporter.onEnd(result);
+  }
+
+  it('is sent before the trace, from what Playwright concluded of every test', async () => {
+    const { reporter, client, calls } = harness({ selection: 'full', reason: 'no_predecessor' });
+    const passed = fakeTest('proj', 'a.spec.ts', 'one', {
+      results: [fakeResult('passed', { duration: 100 })],
+    });
+    const failed = fakeTest('proj', 'a.spec.ts', 'two', {
+      outcome: 'unexpected',
+      retries: 1,
+      results: [
+        fakeResult('failed', { duration: 50 }),
+        fakeResult('failed', { retry: 1, duration: 50 }),
+      ],
+    });
+    const flaky = fakeTest('proj', 'b.spec.ts', 'one', {
+      outcome: 'flaky',
+      retries: 1,
+      results: [
+        fakeResult('failed', { duration: 10 }),
+        fakeResult('passed', { retry: 1, duration: 10 }),
+      ],
+    });
+    // A `test.fail()` that failed as announced: Playwright's exit code is
+    // green on it, so the verdict is too.
+    const expectedFailure = fakeTest('proj', 'b.spec.ts', 'two', {
+      expectedStatus: 'failed',
+      results: [fakeResult('failed', { duration: 5 })],
+    });
+    const skipped = fakeTest('proj', 'b.spec.ts', 'three', {
+      outcome: 'skipped',
+      results: [fakeResult('skipped', { duration: 0 })],
+    });
+    const tests = [passed, failed, flaky, expectedFailure, skipped];
+
+    await run(
+      reporter,
+      tests,
+      tests.flatMap((test) =>
+        test.results.map((result) => [test, result] as [TestCase, TestResult])
+      ),
+      fakeConfig(),
+      { ...RUN, status: 'failed' }
+    );
+
+    expect(calls).toEqual(['fetchTestSelection', 'sendSessionVerdict', 'export']);
+    expect(client.sendSessionVerdict).toHaveBeenCalledWith({
+      testRunId: '0123456789abcdef',
+      headSha: 'cafecafe',
+      headBranch: 'queue/main/42',
+      pipelineName: 'CI',
+      jobName: 'e2e',
+      runId: '42',
+      runAttempt: 1,
+      collectionFingerprint: nativeTestCollectionFingerprint([
+        '[proj] > a.spec.ts > one',
+        '[proj] > a.spec.ts > two',
+        '[proj] > b.spec.ts > one',
+        '[proj] > b.spec.ts > two',
+        '[proj] > b.spec.ts > three',
+      ]),
+      collectionCount: 5,
+      executedCount: 5,
+      passedCount: 3,
+      failedCount: 1,
+      skippedCount: 1,
+      totalTestRuntimeMs: 225,
+      failingTests: ['[proj] > a.spec.ts > two'],
+      quarantinedFailingTests: [],
+      selection: { answer: 'full', reason: 'no_predecessor', keptCount: 5 },
+    });
+  });
+
+  it('replays a test that did not run because something before it failed', async () => {
+    // Playwright reports the rest of a file after a `beforeAll` threw, the
+    // followers of a serial group and the remainder of a crashed worker as
+    // `skipped` without having asked for it. They never ran on this commit:
+    // read as "already passed", a rerun would go green over them.
+    const { reporter, client } = harness();
+    const culprit = fakeTest('proj', 'c.spec.ts', 'first', { outcome: 'unexpected' });
+    const follower = fakeTest('proj', 'c.spec.ts', 'second', {
+      outcome: 'skipped',
+      expectedStatus: 'passed',
+      results: [fakeResult('skipped')],
+    });
+    const asked = fakeTest('proj', 'c.spec.ts', 'third', { outcome: 'skipped' });
+
+    await run(reporter, [culprit, follower, asked], []);
+
+    expect(client.sendSessionVerdict.mock.calls[0]?.[0]).toMatchObject({
+      executedCount: 3,
+      failedCount: 2,
+      skippedCount: 1,
+      failingTests: ['[proj] > c.spec.ts > first', '[proj] > c.spec.ts > second'],
+    });
+  });
+
+  it('does not count a test that never started, so the session reads as incomplete', async () => {
+    // The dependents of a failed setup project: no attempt at all.
+    const { reporter, client } = harness();
+    const setup = fakeTest('setup', 'setup.ts', 'login', { outcome: 'unexpected' });
+    const dependent = fakeTest('e2e', 'a.spec.ts', 'one', { results: [] });
+    const config = fakeConfig();
+    const suite = suiteWith(
+      [setup, dependent],
+      [{ name: 'setup' }, { name: 'e2e', dependencies: ['setup'] }]
+    );
+    await reporter.preprocess({
+      config,
+      suite,
+      testRun: fakeTestRun({ readonlyTests: [setup] }).testRun,
+    });
+    reporter.onBegin(config, suite);
+    await reporter.onEnd({ ...RUN, status: 'failed' });
+
+    expect(client.sendSessionVerdict.mock.calls[0]?.[0]).toMatchObject({
+      collectionCount: 1,
+      executedCount: 0,
+      failingTests: [],
+    });
+  });
+
+  it('reads a retried test off its last word, not off every attempt', async () => {
+    // A `test.fail()` that passed once and then failed as announced is flaky
+    // to Playwright, and the job is green: the verdict must not keep the
+    // first attempt's failure.
+    const { reporter, client } = harness();
+    const healed = fakeTest('proj', 'a.spec.ts', 'one', {
+      outcome: 'flaky',
+      expectedStatus: 'failed',
+      retries: 1,
+      results: [fakeResult('passed'), fakeResult('failed', { retry: 1 })],
+    });
+
+    await run(reporter, [healed], []);
+
+    expect(client.sendSessionVerdict.mock.calls[0]?.[0]).toMatchObject({
+      passedCount: 1,
+      failedCount: 0,
+      failingTests: [],
+    });
+  });
+
+  it('counts a flaky test as failed when the run is configured to fail on it', async () => {
+    const { reporter, client } = harness();
+    const flaky = fakeTest('proj', 'a.spec.ts', 'one', { outcome: 'flaky', retries: 1 });
+
+    await run(reporter, [flaky], [], fakeConfig([{ name: 'proj' }], { failOnFlakyTests: true }));
+
+    expect(client.sendSessionVerdict.mock.calls[0]?.[0]).toMatchObject({
+      failingTests: ['[proj] > a.spec.ts > one'],
+      failedCount: 1,
+    });
+  });
+
+  it('lists a quarantine-absorbed failure apart from the failures', async () => {
+    const { reporter, client } = harness();
+    const absorbed = fakeTest('proj', 'a.spec.ts', 'one', {
+      outcome: 'expected',
+      retries: 1,
+      results: [fakeResult('failed')],
+    });
+    absorbed.annotations.push({ type: 'mergify:quarantined' });
+
+    await run(reporter, [absorbed], [[absorbed, fakeResult('failed')]]);
+
+    expect(client.sendSessionVerdict.mock.calls[0]?.[0]).toMatchObject({
+      failingTests: [],
+      quarantinedFailingTests: ['[proj] > a.spec.ts > one'],
+      failedCount: 1,
+      passedCount: 0,
+    });
+  });
+
+  it('folds a shared identity to its worst status across projects', async () => {
+    vi.stubEnv('PLAYWRIGHT_MERGIFY_INCLUDE_PROJECT_IN_TEST_NAME', 'false');
+    const { reporter, client } = harness();
+    const chromium = fakeTest('chromium', 'a.spec.ts', 'one', { outcome: 'unexpected' });
+    const firefox = fakeTest('firefox', 'a.spec.ts', 'one');
+
+    await run(
+      reporter,
+      [chromium, firefox],
+      [],
+      fakeConfig([{ name: 'chromium' }, { name: 'firefox' }])
+    );
+
+    expect(client.sendSessionVerdict.mock.calls[0]?.[0]).toMatchObject({
+      collectionCount: 1,
+      executedCount: 1,
+      failedCount: 1,
+      failingTests: ['a.spec.ts > one'],
+    });
+  });
+
+  it('echoes the answer and what the run made of it', async () => {
+    const { reporter, client } = harness({
+      selection: 'subset',
+      reason: 'queue_rerun',
+      tests: ['[proj] > a.spec.ts > one', '[proj] > a.spec.ts > gone'],
+    });
+    const test = a1();
+
+    await run(reporter, [test], [[test, fakeResult('passed')]]);
+
+    expect(client.sendSessionVerdict.mock.calls[0]?.[0]).toMatchObject({
+      selection: {
+        answer: 'subset',
+        reason: 'queue_rerun',
+        keptCount: 1,
+        notAppliedReason: 'subset_partly_absent_from_collection',
+      },
+    });
+  });
+
+  it('is sent when the selection request failed: the next rerun still needs it', async () => {
+    const { reporter, client } = harness(new Error('Mergify API returned HTTP 500'));
+    const test = a1();
+
+    await run(reporter, [test], [[test, fakeResult('passed')]]);
+
+    expect(client.sendSessionVerdict).toHaveBeenCalledOnce();
+    // Nothing was served, so nothing is echoed.
+    expect(client.sendSessionVerdict.mock.calls[0]?.[0].selection).toBeUndefined();
+  });
+
+  it('is not sent when the run never asked', async () => {
+    vi.stubEnv('MERGIFY_TEST_SELECTION_ENABLE', '');
+    const { reporter, client } = harness();
+    const test = a1();
+
+    await run(reporter, [test], [[test, fakeResult('passed')]]);
+
+    expect(client.sendSessionVerdict).not.toHaveBeenCalled();
+    expect(output()).not.toContain('✂️');
+  });
+
+  it('never fails the run, and says the reduction is lost, when it does not land', async () => {
+    const { reporter, sink } = harness(undefined, new Error('Mergify API returned HTTP 503'));
+    const test = a1();
+
+    const override = await run(reporter, [test], [[test, fakeResult('passed')]]);
+
+    expect(override).toBeUndefined();
+    expect(sink.getFinishedSpans().length).toBeGreaterThan(0);
+    expect(output()).toContain(
+      "Mergify couldn't record this run's results. If this merge-queue batch is\n" +
+        'retried, this job will run its full test suite.\n' +
+        'Error: Mergify API returned HTTP 503\n'
+    );
+  });
+
+  it('is printed rather than sent in debug mode', async () => {
+    vi.stubEnv('MERGIFY_CI_DEBUG', 'true');
+    const { reporter, client } = harness();
+    const test = a1();
+
+    await run(reporter, [test], [[test, fakeResult('passed')]]);
+
+    expect(client.sendSessionVerdict).not.toHaveBeenCalled();
+    expect(output()).toContain('[mergify] session verdict {"testRunId":"0123456789abcdef"');
+  });
+
+  it('puts the collection and the echo on the session resource', async () => {
+    const { reporter, sink } = harness({ selection: 'empty', reason: 'queue_rerun' });
+    const test = a1();
+
+    await run(reporter, [test], [], fakeConfig(), { ...RUN, status: 'failed' });
+
+    const resource = sink.getFinishedSpans()[0]?.resourceAttributes;
+    expect(resource).toMatchObject({
+      'test.collection.fingerprint': nativeTestCollectionFingerprint(['[proj] > a.spec.ts > one']),
+      'test.collection.count': 1,
+      'test.selection.answer': 'empty',
+      'test.selection.reason': 'queue_rerun',
+      'test.selection.kept_count': 0,
+    });
+    expect(resource).not.toHaveProperty('test.selection.not_applied_reason');
   });
 });
 

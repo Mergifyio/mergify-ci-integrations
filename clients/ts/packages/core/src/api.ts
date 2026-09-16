@@ -17,6 +17,13 @@ export type MergifyApiClient = Pick<
   'fetchQuarantine' | 'fetchFlakyContext' | 'fetchTestSelection' | 'uploadTrace'
 >;
 
+/**
+ * The one call the session verdict needs, kept out of `MergifyApiClient` so a
+ * stand-in written before the verdict existed still type-checks; a reporter
+ * reads it as optional and sends nothing when it is missing.
+ */
+export type SessionVerdictClient = Pick<CiApiClient, 'sendSessionVerdict'>;
+
 export interface ApiClientConfig {
   apiUrl: string;
   token: string;
