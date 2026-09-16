@@ -205,6 +205,12 @@ RSpec.describe Mergify::RSpec::Native do
           expect(body).to include(any_value('a.double', "\x21".b + [1.5].pack('E')))
           expect(body).not_to include('a.nil')
         end
+
+        # The scope is the InstrumentationScope message: field 1 the name, field
+        # 2 the version the gem passed the client.
+        it 'reports the spans under the gem as their instrumentation scope' do
+          expect(uploaded_body({})).to include("\x0A\x0Drspec-mergify\x12\x051.2.3".b)
+        end
       end
 
       # 400 rather than 500 on purpose: the client retries 5xx with backoff, as

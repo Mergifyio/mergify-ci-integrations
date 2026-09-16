@@ -329,6 +329,10 @@ class UploadedBatch:
 
     resource_attributes: typing.Dict[str, typing.Any]
     spans: typing.List[UploadedSpan]
+    # The (name, version) of each instrumentation scope the spans came under.
+    scopes: typing.List[typing.Tuple[str, str]] = dataclasses.field(
+        default_factory=list
+    )
 
     def span(self, name: str) -> UploadedSpan:
         """
@@ -429,6 +433,10 @@ class OTLPCollector:
                             resource_spans.resource.attributes
                         ),
                         spans=spans,
+                        scopes=[
+                            (scope_spans.scope.name, scope_spans.scope.version)
+                            for scope_spans in resource_spans.scope_spans
+                        ],
                     )
                 )
 

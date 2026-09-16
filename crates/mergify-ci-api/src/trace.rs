@@ -11,7 +11,7 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::common::v1::any_value::Value as AnyValueOneof;
-use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
+use opentelemetry_proto::tonic::common::v1::{AnyValue, InstrumentationScope, KeyValue};
 use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::span::SpanKind;
 use opentelemetry_proto::tonic::trace::v1::status::StatusCode;
@@ -175,6 +175,7 @@ fn to_span(span: &SpanData) -> Span {
 }
 
 fn build_request(
+    scope: &InstrumentationScope,
     resource_attributes: &[(String, AttrValue)],
     spans: &[SpanData],
 ) -> ExportTraceServiceRequest {
@@ -185,7 +186,7 @@ fn build_request(
                 ..Resource::default()
             }),
             scope_spans: vec![ScopeSpans {
-                scope: None,
+                scope: Some(scope.clone()),
                 spans: spans.iter().map(to_span).collect(),
                 schema_url: String::new(),
             }],
@@ -200,13 +201,14 @@ fn gzip(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
     encoder.finish()
 }
 
-/// Encode `spans` (under `resource_attributes`) to OTLP protobuf and gzip it,
-/// returning the exact bytes to put on the wire.
+/// Encode `spans` (under `resource_attributes`, reported by `scope`) to OTLP
+/// protobuf and gzip it, returning the exact bytes to put on the wire.
 pub(crate) fn compress_batch(
+    scope: &InstrumentationScope,
     resource_attributes: &[(String, AttrValue)],
     spans: &[SpanData],
 ) -> std::io::Result<Vec<u8>> {
-    gzip(&build_request(resource_attributes, spans).encode_to_vec())
+    gzip(&build_request(scope, resource_attributes, spans).encode_to_vec())
 }
 
 #[cfg(test)]
@@ -239,9 +241,16 @@ mod tests {
         }];
         let resource = vec![("test.run.id".to_owned(), "deadbeef".into())];
 
-        let request = decode(&compress_batch(&resource, &spans).unwrap());
+        let scope = InstrumentationScope {
+            name: "rspec-mergify".to_owned(),
+            version: "0.3.0".to_owned(),
+            ..InstrumentationScope::default()
+        };
+
+        let request = decode(&compress_batch(&scope, &resource, &spans).unwrap());
         let resource_spans = &request.resource_spans[0];
         assert_eq!(resource_spans.resource.as_ref().unwrap().attributes.len(), 1);
+        assert_eq!(resource_spans.scope_spans[0].scope.as_ref(), Some(&scope));
         let proto_spans = &resource_spans.scope_spans[0].spans;
         assert_eq!(proto_spans.len(), 1);
         let span = &proto_spans[0];
