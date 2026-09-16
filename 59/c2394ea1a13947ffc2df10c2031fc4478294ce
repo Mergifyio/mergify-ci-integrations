@@ -1,0 +1,1 @@
+codespell: close the fake API from beforeAll's cleanup instead of afterAll
