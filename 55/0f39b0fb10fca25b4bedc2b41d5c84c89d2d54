@@ -1,0 +1,1 @@
+CI runs inside a pull request: clear GITHUB_HEAD_REF in the test env so the stubbed branch is the one detected
