@@ -71,3 +71,26 @@ export function resolveBranchFromAttributes(attrs: SpanAttributes): string | und
   if (typeof head === 'string' && head.length > 0) return head;
   return undefined;
 }
+
+/**
+ * Fill `text` into lines of at most `width` columns, breaking on whitespace
+ * only -- a hyphenated term ("merge-queue") is one word to the reader, and a
+ * break at its hyphen is not. A word longer than the width gets a line of its
+ * own rather than being split.
+ */
+export function wrapText(text: string, width: number): string {
+  const lines: string[] = [];
+  let line = '';
+  for (const word of text.split(/\s+/).filter((w) => w.length > 0)) {
+    if (line.length === 0) {
+      line = word;
+    } else if (line.length + 1 + word.length <= width) {
+      line += ` ${word}`;
+    } else {
+      lines.push(line);
+      line = word;
+    }
+  }
+  if (line.length > 0) lines.push(line);
+  return lines.join('\n');
+}
