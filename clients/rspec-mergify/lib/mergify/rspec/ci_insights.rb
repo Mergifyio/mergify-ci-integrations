@@ -8,8 +8,8 @@ require_relative 'resources/rspec'
 
 module Mergify
   module RSpec
-    # Central orchestrator for Mergify Test Insights: sets up span recording,
-    # manages the tracer provider, and coordinates flaky detection and quarantine.
+    # Central orchestrator for Mergify Test Insights: records the run's spans,
+    # uploads them, and coordinates flaky detection and quarantine.
     class CIInsights
       attr_reader :token, :repo_name, :api_url, :test_run_id,
                   :recorder,
@@ -83,13 +83,6 @@ module Mergify
         ENV['_RSPEC_MERGIFY_TEST'] == 'true'
       end
 
-      # The cicd.* and vcs.* attributes come from the Rust core, which every
-      # Mergify test client shares, so a provider gains them everywhere at once.
-      # What stays here is what only Ruby knows: the test framework, and the id
-      # this run invented for itself.
-      # The cicd.* and vcs.* attributes come from the Rust core, which every
-      # Mergify test client shares. What stays here is what only Ruby knows:
-      # the test framework, and the id this run invented for itself.
       # A run is uploaded when there is somewhere to upload it to and nothing
       # asking us not to: debug and test runs record and keep.
       def uploadable?
@@ -99,13 +92,16 @@ module Mergify
         true
       end
 
+      # The cicd.* and vcs.* attributes come from the Rust core, which every
+      # Mergify test client shares, so a CI provider added there reaches every
+      # client at once. What stays here is what only Ruby knows: the test
+      # framework and its language, and the id this run invented for itself.
       def build_resource
         Native.detect_attributes
               .merge(Resources::RSpec.detect)
               .merge('test.run.id' => @test_run_id)
       end
 
-      # rubocop:disable-next Metrics/MethodLength
       # rubocop:disable-next Metrics/MethodLength
       def load_flaky_detector
         return unless @token && @repo_name

@@ -8,7 +8,7 @@ require 'mergify/rspec/formatter'
 # recorded spans. Used by integration tests to verify tracing,
 # quarantine, and flaky detection behaviour end-to-end.
 module SandboxHelper
-  # Build a CIInsights instance in test mode with an InMemorySpanExporter.
+  # Build a CIInsights instance in test mode, which records spans and uploads none.
   # Stubs detection so we get a clean, predictable resource.
   def build_test_ci_insights(quarantined_tests: nil)
     ENV['_RSPEC_MERGIFY_TEST'] = 'true'
@@ -76,7 +76,7 @@ module SandboxHelper
       stop_notification = double('stop_notification') # rubocop:disable RSpec/VerifiedDoubles
       formatter.stop(stop_notification)
 
-      spans = ci_exporter_to_hash(insights)
+      spans = recorded_spans_by_name(insights)
       [spans, output.string]
     ensure
       # Clean up the example group from the RSpec world to avoid pollution
@@ -135,7 +135,7 @@ module SandboxHelper
     end
   end
 
-  def ci_exporter_to_hash(insights)
+  def recorded_spans_by_name(insights)
     insights.recorder.finished_spans.to_h { |span| [span.name, span] }
   end
 end
