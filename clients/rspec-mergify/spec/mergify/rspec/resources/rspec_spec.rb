@@ -17,10 +17,14 @@ RSpec.describe Mergify::RSpec::Resources::RSpec do
       expect(attrs['test.framework.version']).to eq(RSpec::Core::Version::STRING)
     end
 
-    it 'returns exactly two attributes' do
+    it 'returns a resource with telemetry.sdk.language set to ruby' do
+      expect(described_class.detect['telemetry.sdk.language']).to eq('ruby')
+    end
+
+    it 'returns exactly three attributes' do
       resource = described_class.detect
       attrs = resource
-      expect(attrs.keys).to contain_exactly('test.framework', 'test.framework.version')
+      expect(attrs.keys).to contain_exactly('test.framework', 'test.framework.version', 'telemetry.sdk.language')
     end
   end
 end
