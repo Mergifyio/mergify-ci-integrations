@@ -58,6 +58,7 @@ describe('native detection wiring', () => {
     // Integer attributes stay integers across the JSON bridge.
     expect(resource['cicd.pipeline.run.id']).toBe(42);
     expect(resource['test.framework']).toBe('vitest');
+    expect(resource['telemetry.sdk.language']).toBe('nodejs');
     expect(resource['test.run.id']).toBe('run-1');
   });
 
