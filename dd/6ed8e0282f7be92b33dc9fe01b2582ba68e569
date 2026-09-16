@@ -1,0 +1,1 @@
+review: parse PWTEST_SHARD_WEIGHTS as Playwright does (colon-separated integers, zero allowed)
