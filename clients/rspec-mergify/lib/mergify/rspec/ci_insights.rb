@@ -65,7 +65,12 @@ module Mergify
         @recorder = Trace::Recorder.new(resource_attributes: resource,
                                         traceparent: ENV.fetch('MERGIFY_TRACEPARENT', nil))
         @uploads = uploadable?
-        @branch_name = resource['vcs.ref.base.name'] || resource['vcs.ref.head.name']
+        # Only a pull request has a base branch, and that is what puts flaky
+        # detection in 'new' mode. GitHub Actions still sets GITHUB_BASE_REF on
+        # every other event, to an empty string, so empty counts as absent.
+        base_branch_name = resource['vcs.ref.base.name']
+        @base_branch_name = base_branch_name unless base_branch_name.to_s.empty?
+        @branch_name = @base_branch_name || resource['vcs.ref.head.name']
         load_flaky_detector
         load_quarantine
       end
