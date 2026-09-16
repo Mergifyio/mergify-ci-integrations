@@ -34,6 +34,7 @@ export interface CiResourceAttributes {
 
 interface NativeBinding {
   detectProvider(): string | null;
+  testCollectionFingerprint(testIds: string[]): string;
   detectRepositoryName(): string | null;
   detectAttributes(): CiResourceAttributes;
   shouldRunFlakyDetection(context: FlakyDetectionContext, mode: string): boolean;
@@ -100,6 +101,23 @@ export function detectNativeAttributes(): CiResourceAttributes {
     return binding.detectAttributes();
   } catch {
     return {};
+  }
+}
+
+/**
+ * The identity of the set of tests a run collected, from the shared Rust
+ * recipe -- the same digest pytest-mergify reports, so the engine can match
+ * a rerun's collection whatever client uploaded the previous attempt's. Null
+ * without a binding, or with one that predates the function: the caller then
+ * does not ask for a selection at all, rather than ask without a fingerprint
+ * and be served the full suite under a reason that tells the user to upgrade.
+ */
+export function nativeTestCollectionFingerprint(testIds: readonly string[]): string | null {
+  if (!binding) return null;
+  try {
+    return binding.testCollectionFingerprint([...testIds]);
+  } catch {
+    return null;
   }
 }
 

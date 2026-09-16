@@ -7,6 +7,9 @@ const dir = process.env.PW_FIXTURE_DIR ?? './tests';
 // project configures retries. Parse to a non-negative integer, falling back to
 // 0 when unset or non-numeric so a bad value never reaches Playwright's config.
 const retries = Math.max(0, Number.parseInt(process.env.PW_FIXTURE_RETRIES ?? '', 10) || 0);
+// One project by default; the test-selection runs ask for two, so the same
+// test collected twice under two identities goes through the real runner.
+const projects = (process.env.PW_FIXTURE_PROJECTS ?? 'node').split(',').map((name) => ({ name }));
 
 export default withMergify(
   defineConfig({
@@ -15,6 +18,6 @@ export default withMergify(
     reporter: 'list',
     retries,
     use: {},
-    projects: [{ name: 'node' }],
+    projects,
   })
 );

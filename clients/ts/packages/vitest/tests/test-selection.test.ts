@@ -116,7 +116,10 @@ describe('test selection', () => {
     const { reporter, executed } = await runSelection({ testSelection: [] });
 
     expect(executed).toEqual(['alpha', 'beta', 'gamma']);
-    expect(reporter.getSelection().selection?.selection).toBe('full');
+    // The answer is kept as served and the run declares why it did not act on
+    // it, rather than rewriting Mergify's word into a `full` it never said.
+    expect(reporter.getSelection().selection?.selection).toBe('subset');
+    expect(reporter.getSelection().selection?.notAppliedReason).toBe('subset_served_without_tests');
     expect(reporter.getSession()!.status).toBe('passed');
     expect(process.exitCode).toBeUndefined();
   });
@@ -253,11 +256,15 @@ describe('the opt-in gate', () => {
 
     await runWith(apiClient);
 
+    // No fingerprint: this reporter never holds the whole collection at the
+    // moment it asks (Vitest collects inside its workers), so it sends none
+    // rather than claim an empty one.
     expect(apiClient.fetchTestSelection).toHaveBeenCalledWith(
       'queue/main/42',
       'cafecafe',
       'CI',
-      'unit'
+      'unit',
+      undefined
     );
   });
 

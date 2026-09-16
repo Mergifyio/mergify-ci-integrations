@@ -5,6 +5,7 @@ export type { FlakyDetectionContext, FlakyDetectionMode } from './flaky-detectio
 // Flaky detection
 export { FlakyDetector, fetchFlakyDetectionContext } from './flaky-detection.js';
 export type { CiResourceAttributes } from './native.js';
+export { nativeTestCollectionFingerprint } from './native.js';
 // Quarantine
 export { fetchQuarantineList } from './quarantine.js';
 // Resource detection
@@ -16,17 +17,25 @@ export { emitTestCaseSpan, endSessionSpan, startSessionSpan } from './spans.js';
 export { buildTestIdentifier, TEST_NAME_SEPARATOR } from './test-identifier.js';
 // Test selection (reduced merge-queue reruns)
 export type {
+  NotAppliedReason,
+  TestCollection,
   TestSelection,
+  TestSelectionAnswer,
   TestSelectionApplication,
   TestSelectionClient,
+  TestSelectionClientIdentity,
   TestSelectionCoordinates,
+  TestSelectionEcho,
 } from './test-selection.js';
 export {
   applyToCollected,
+  fallbackRefusalMessage,
   fetchTestSelection,
   formatTestSelectionReport,
   isTestSelectionEnabled,
   resolveSelectionCoordinates,
+  selectionEcho,
+  selectionResourceAttributes,
   TEST_SELECTION_ENABLE_ENV,
   toTestSelection,
 } from './test-selection.js';
@@ -62,4 +71,5 @@ export {
   isInCI,
   resolveBranchFromAttributes,
   strtobool,
+  wrapText,
 } from './utils.js';
