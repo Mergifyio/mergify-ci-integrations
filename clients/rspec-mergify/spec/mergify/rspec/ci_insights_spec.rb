@@ -162,6 +162,47 @@ RSpec.describe Mergify::RSpec do # rubocop:disable RSpec/SpecFilePathFormat
         expect(insights.flaky_detector).to be_nil
         expect(insights.flaky_detector_error_message).to be_nil
       end
+
+      describe 'mode' do
+        before do
+          stub_native_client(flaky: {
+                               'budget_ratio_for_new_tests' => 0.1,
+                               'budget_ratio_for_unhealthy_tests' => 0.2,
+                               'existing_test_names' => ['./spec/old_spec.rb[1:1]'],
+                               'existing_tests_mean_duration_ms' => 100,
+                               'unhealthy_test_names' => ['./spec/old_spec.rb[1:1]'],
+                               'max_test_execution_count' => 10,
+                               'max_test_name_length' => 500,
+                               'min_budget_duration_ms' => 5000,
+                               'min_test_execution_count' => 3
+                             })
+        end
+
+        it 'detects new tests on a pull request' do
+          allow(Mergify::RSpec::Native).to receive(:detect_attributes)
+            .and_return('vcs.ref.base.name' => 'main', 'vcs.ref.head.name' => 'feature')
+
+          expect(described_class.new.flaky_detector.mode).to eq('new')
+        end
+
+        it 'watches unhealthy tests on a push' do
+          allow(Mergify::RSpec::Native).to receive(:detect_attributes)
+            .and_return('vcs.ref.head.name' => 'main')
+
+          expect(described_class.new.flaky_detector.mode).to eq('unhealthy')
+        end
+
+        # GitHub Actions sets GITHUB_BASE_REF to an empty string outside pull
+        # requests, and the core passes it through as it is.
+        it 'watches unhealthy tests on a push that sets an empty base branch' do
+          allow(Mergify::RSpec::Native).to receive(:detect_attributes)
+            .and_return('vcs.ref.base.name' => '', 'vcs.ref.head.name' => 'main')
+
+          insights = described_class.new
+          expect(insights.flaky_detector.mode).to eq('unhealthy')
+          expect(insights.branch_name).to eq('main')
+        end
+      end
     end
 
     describe 'when in CI with branch_name available' do
