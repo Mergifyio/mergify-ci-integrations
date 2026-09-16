@@ -155,6 +155,12 @@ Four answers are understood, and the end of the run says which one it got:
   Mergify's own explanation printed first. The fix is to give each run its own
   name with `MERGIFY_TEST_JOB_NAME` (see sharding below).
 
+At the end of the run the reporter also files the session's **verdict** with
+Mergify — which tests failed after Playwright's own `retries`, and how many ran
+— before uploading the trace, so the next attempt of the batch can be answered
+seconds after this one ended. A verdict that does not land never fails the run;
+the block says the next attempt will run the full suite.
+
 The feature can only ever remove work, never coverage. The full suite runs
 whenever anything is off-nominal:
 
@@ -167,12 +173,15 @@ whenever anything is off-nominal:
 - the job did not set `MERGIFY_TEST_SELECTION_ENABLE=true` — the opt-in above.
 
 Setup and teardown projects always run in full: Playwright makes their tests
-read-only, and they are not part of the fingerprinted collection.
+read-only. They are not part of the fingerprinted collection, but their results
+are part of the verdict — a setup failure makes the next attempt run
+everything.
 
 #### Sharded jobs
 
 Each `--shard=k/N` leg is its own job for Mergify: it asks with its own
-collection and is answered with its own failures. Two things follow:
+collection, is answered with its own failures, and files its own verdict. Two
+things follow:
 
 - **Naming each leg is recommended, not required.** Mergify tells the legs
   apart by what they collected — two legs of one job run different slices, so
