@@ -1,1 +1,1 @@
-rebased on main with #196; not_applied_reason echoed on the verdict
+address review: selection.answer is Mergify's served answer verbatim, not 'as applied' (#196 semantics)
