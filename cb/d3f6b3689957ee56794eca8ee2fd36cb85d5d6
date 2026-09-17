@@ -1,1 +1,1 @@
-CI runs with a real GITHUB_RUN_ID/ATTEMPT: pin them in the test env, the verdict carries them
+rebased on the amended selection commit
