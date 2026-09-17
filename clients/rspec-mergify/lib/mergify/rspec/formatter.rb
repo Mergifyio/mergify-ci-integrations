@@ -12,12 +12,11 @@ module Mergify
     # test execution.
     # rubocop:disable-next Metrics/ClassLength
     class Formatter < ::RSpec::Core::Formatters::BaseFormatter
-      ::RSpec::Core::Formatters.register self,
-                                         :start,
-                                         :example_started,
-                                         :example_finished,
-                                         :example_pending,
-                                         :stop
+      # What it listens to once attached, `start` excepted: it is attached after
+      # that notification, and handed it directly.
+      NOTIFICATIONS = %i[example_started example_finished example_pending stop].freeze
+
+      ::RSpec::Core::Formatters.register self, :start, *NOTIFICATIONS
 
       def start(notification)
         super
