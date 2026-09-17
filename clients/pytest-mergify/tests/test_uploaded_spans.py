@@ -3,6 +3,7 @@ import re
 import _pytest.pytester
 import pytest
 
+from pytest_mergify import utils
 from tests import conftest
 
 
@@ -22,6 +23,21 @@ def test_a_run_uploads_its_spans(
         "pytest session start",
         "test_a_run_uploads_its_spans.py::test_pass",
     }
+
+
+def test_spans_are_reported_under_the_plugin_scope(
+    pytester: _pytest.pytester.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+    otlp_collector: conftest.OTLPCollector,
+) -> None:
+    conftest.configure_upload(monkeypatch, otlp_collector)
+    pytester.makepyfile("def test_pass(): pass")
+
+    result = pytester.runpytest_subprocess()
+
+    result.assert_outcomes(passed=1)
+    (batch,) = otlp_collector.batches
+    assert batch.scopes == [("pytest-mergify", utils.get_version())]
 
 
 def test_an_uploaded_span_carries_its_attributes(

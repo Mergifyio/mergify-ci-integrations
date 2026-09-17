@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+use opentelemetry_proto::tonic::common::v1::InstrumentationScope;
 use reqwest::StatusCode;
 use reqwest::header::LINK;
 
@@ -44,6 +45,7 @@ pub struct Client {
     config: ApiConfig,
     http: reqwest::Client,
     retry: RetryPolicy,
+    scope: InstrumentationScope,
 }
 
 impl Client {
@@ -65,7 +67,12 @@ impl Client {
             // with it the corporate CA that a proxy-inspected CI depends on.
             .tls_certs_merge(webpki_roots()?)
             .build()?;
-        Ok(Self { config, http, retry: RetryPolicy::default() })
+        Ok(Self {
+            config,
+            http,
+            retry: RetryPolicy::default(),
+            scope: client_info.instrumentation_scope(),
+        })
     }
 
     fn endpoint(&self, suffix: &str) -> String {
@@ -268,9 +275,11 @@ impl Client {
         let mut pending: Vec<&[SpanData]> = vec![spans];
         while let Some(batch) = pending.pop() {
             let compressed =
-                trace::compress_batch(resource_attributes, batch).map_err(|error| UploadError {
-                    status: None,
-                    message: format!("failed to gzip OTLP payload: {error}"),
+                trace::compress_batch(&self.scope, resource_attributes, batch).map_err(|error| {
+                    UploadError {
+                        status: None,
+                        message: format!("failed to gzip OTLP payload: {error}"),
+                    }
                 })?;
             if compressed.len() <= cap || batch.len() <= 1 {
                 self.post_trace(&url, compressed).await?;
@@ -655,6 +664,33 @@ mod tests {
             .upload_trace(&[("test.run.id".to_owned(), "x".into())], &[span(1)])
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn upload_reports_spans_under_the_client_scope() {
+        use flate2::read::GzDecoder;
+        use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+        use prost::Message as _;
+        use std::io::Read as _;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/ci/o/repositories/r/traces"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        // A name the User-Agent has to sanitize, and the scope must not.
+        let info = ClientInfo::new("@mergifyio/vitest", "0.3.8");
+        let client = Client::new(config(&server.uri()), &info).unwrap();
+        client.upload_trace(&[], &[span(1)]).await.unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        let mut body = Vec::new();
+        GzDecoder::new(requests[0].body.as_slice()).read_to_end(&mut body).unwrap();
+        let request = ExportTraceServiceRequest::decode(body.as_slice()).unwrap();
+        let scope = request.resource_spans[0].scope_spans[0].scope.as_ref().unwrap();
+        assert_eq!(scope.name, "@mergifyio/vitest");
+        assert_eq!(scope.version, "0.3.8");
     }
 
     #[tokio::test]

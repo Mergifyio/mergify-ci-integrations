@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use opentelemetry_proto::tonic::common::v1::InstrumentationScope;
+
 /// Default API base URL, used when `MERGIFY_API_URL` is unset.
 pub const DEFAULT_API_URL: &str = "https://api.mergify.com";
 
@@ -65,6 +67,11 @@ impl ApiConfig {
 ///
 /// Rendered as `{name}/{version} ({runtime}; {os}; {arch})` — e.g.
 /// `pytest-mergify/2026.8.5.3 (python/3.12.1; linux; x86_64)`.
+///
+/// The same name and version are the OTLP instrumentation scope the client's
+/// spans are reported under. They are kept as given and only sanitized for the
+/// `User-Agent`: `@mergifyio/vitest` is a valid scope name, but not a valid
+/// header token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientInfo {
     name: String,
@@ -77,7 +84,7 @@ impl ClientInfo {
     /// Identify the client distribution by `name` and `version`.
     #[must_use]
     pub fn new(name: &str, version: &str) -> Self {
-        Self { name: sanitize(name), version: sanitize(version), runtime: None }
+        Self { name: name.to_owned(), version: version.to_owned(), runtime: None }
     }
 
     /// Also report the language runtime the client runs on, e.g.
@@ -87,11 +94,21 @@ impl ClientInfo {
         self.runtime = Some(format!("{}/{}", sanitize(name), sanitize(version)));
         self
     }
+
+    /// The scope a client's spans are reported under. The `OpenTelemetry` SDK
+    /// tracers the clients used before named theirs after the distribution.
+    pub(crate) fn instrumentation_scope(&self) -> InstrumentationScope {
+        InstrumentationScope {
+            name: self.name.clone(),
+            version: self.version.clone(),
+            ..InstrumentationScope::default()
+        }
+    }
 }
 
 impl fmt::Display for ClientInfo {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}/{} (", self.name, self.version)?;
+        write!(formatter, "{}/{} (", sanitize(&self.name), sanitize(&self.version))?;
         if let Some(runtime) = &self.runtime {
             write!(formatter, "{runtime}; ")?;
         }
