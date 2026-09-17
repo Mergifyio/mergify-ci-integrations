@@ -1,0 +1,6 @@
+Revision history for #301:
+
+rev 2 (rebase) 2026-09-17 08:34 UTC
+rev 1 (initial) 2026-09-17 08:34 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":301,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"1588379f1254efe3d543ceb24e3e2da95482cad4","timestamp_iso":"2026-09-17T08:34:09Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"1588379f1254efe3d543ceb24e3e2da95482cad4","new_sha":"27e80ec372bc949b7f86809b5494da7297676ef8","timestamp_iso":"2026-09-17T08:34:09Z","reason":"","replay_sha":null,"compare_url":"https://github.com/Mergifyio/mergify-ci-integrations/compare/1588379f1254efe3d543ceb24e3e2da95482cad4...27e80ec372bc949b7f86809b5494da7297676ef8"}]} -->
