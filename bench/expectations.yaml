@@ -1,0 +1,134 @@
+# What each client's run of the canonical suite must produce.
+#
+# `bench-run-suite` checks the job's own output against `exit_code` and
+# `output`. `bench-verify` checks what Mergify recorded against `recorded` and
+# `tests`, reading them back through the public API.
+#
+# Test names are the exact names each client reports, so they spell out how
+# each framework names a test. Every one contains `mergify_bench`: Mergify
+# quarantines by repository and test name alone, and that is what keeps the
+# bench from ever matching another suite's test. pytest and rspec take it from
+# the file name, vitest and playwright from the `describe` block.
+
+clients:
+  pytest:
+    # Reported as the job name (MERGIFY_TEST_JOB_NAME). Mergify keeps test
+    # history per job name, and verify searches by it.
+    job_name: bench-pytest
+    exit_code: 1
+    output:
+      required:
+        - '^=+ Mergify CI =+$'
+        - '^=+ 1 failed, 2 passed, 1 skipped in [0-9.]+s =+$'
+      forbidden: []
+    recorded:
+      test_framework: pytest
+      test_programming_language: python
+    tests:
+      - name: test_mergify_bench.py::test_passes
+        test_filepath: test_mergify_bench.py
+        test_function_name: test_passes
+        last_conclusion: passed
+      - name: test_mergify_bench.py::test_fails
+        test_filepath: test_mergify_bench.py
+        test_function_name: test_fails
+        last_conclusion: failed
+      - name: test_mergify_bench.py::test_skipped
+        test_filepath: test_mergify_bench.py
+        test_function_name: test_skipped
+        last_conclusion: skipped
+      - name: test_mergify_bench.py::test_évènement
+        test_filepath: test_mergify_bench.py
+        test_function_name: test_évènement
+        last_conclusion: passed
+
+  rspec:
+    job_name: bench-rspec
+    exit_code: 1
+    output:
+      required:
+        - '^--- Mergify CI ---$'
+        - '^4 examples, 1 failure, 1 pending$'
+      forbidden:
+        - native extension could not be loaded
+        - Error while exporting traces
+    recorded:
+      test_framework: rspec
+      test_programming_language: ruby
+    tests:
+      - name: ./spec/mergify_bench_spec.rb[1:1]
+        test_filepath: spec/mergify_bench_spec.rb
+        test_function_name: passes
+        last_conclusion: passed
+      - name: ./spec/mergify_bench_spec.rb[1:2]
+        test_filepath: spec/mergify_bench_spec.rb
+        test_function_name: fails
+        last_conclusion: failed
+      - name: ./spec/mergify_bench_spec.rb[1:3]
+        test_filepath: spec/mergify_bench_spec.rb
+        test_function_name: skipped
+        last_conclusion: skipped
+      - name: ./spec/mergify_bench_spec.rb[1:4]
+        test_filepath: spec/mergify_bench_spec.rb
+        test_function_name: évènement
+        last_conclusion: passed
+
+  vitest:
+    job_name: bench-vitest
+    exit_code: 1
+    output:
+      required:
+        - '^\[@mergifyio/vitest\]'
+        - '^\s*Tests\s+1 failed \| 2 passed \| 1 skipped \(4\)$'
+      forbidden: []
+    recorded:
+      test_framework: vitest
+      test_programming_language: nodejs
+    tests:
+      - name: mergify_bench > passes
+        test_filepath: mergify_bench.test.ts
+        test_function_name: passes
+        last_conclusion: passed
+      - name: mergify_bench > fails
+        test_filepath: mergify_bench.test.ts
+        test_function_name: fails
+        last_conclusion: failed
+      - name: mergify_bench > skipped
+        test_filepath: mergify_bench.test.ts
+        test_function_name: skipped
+        last_conclusion: skipped
+      - name: mergify_bench > évènement
+        test_filepath: mergify_bench.test.ts
+        test_function_name: évènement
+        last_conclusion: passed
+
+  playwright:
+    job_name: bench-playwright
+    exit_code: 1
+    output:
+      required:
+        - '^\[@mergifyio/playwright\]'
+        - '^\s*1 failed$'
+        - '^\s*1 skipped$'
+        - '^\s*2 passed \('
+      forbidden: []
+    recorded:
+      test_framework: playwright
+      test_programming_language: nodejs
+    tests:
+      - name: mergify_bench.spec.ts > mergify_bench > passes
+        test_filepath: mergify_bench.spec.ts
+        test_function_name: passes
+        last_conclusion: passed
+      - name: mergify_bench.spec.ts > mergify_bench > fails
+        test_filepath: mergify_bench.spec.ts
+        test_function_name: fails
+        last_conclusion: failed
+      - name: mergify_bench.spec.ts > mergify_bench > skipped
+        test_filepath: mergify_bench.spec.ts
+        test_function_name: skipped
+        last_conclusion: skipped
+      - name: mergify_bench.spec.ts > mergify_bench > évènement
+        test_filepath: mergify_bench.spec.ts
+        test_function_name: évènement
+        last_conclusion: passed
