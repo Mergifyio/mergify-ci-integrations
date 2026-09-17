@@ -187,3 +187,10 @@ def test_poll_gives_up_at_the_deadline() -> None:
     )
     assert not outcome.ok
     assert len(outcome.waiting) == 2
+
+
+def test_the_real_expectations_file_loads_every_client() -> None:
+    for client in ("pytest", "rspec", "vitest", "playwright"):
+        loaded = expectations.load(client)
+        assert loaded.job_name == f"bench-{client}"
+        assert all("mergify_bench" in test.name for test in loaded.tests)

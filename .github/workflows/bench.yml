@@ -1,0 +1,261 @@
+name: Bench
+
+# Runs the same suite through each client, built from this commit, against
+# Mergify production, then reads back what Mergify recorded. See bench/README.md.
+#
+# Pushes to main only: Mergify builds test details from default-branch runs,
+# so a run anywhere else would have nothing to read back.
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+permissions: {}
+
+# Queued rather than cancelled: every run reports into the same test history,
+# and a cancelled one leaves a commit half reported.
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
+
+jobs:
+  # Until both secrets exist the bench has nowhere to report and nothing to read
+  # with, so it skips with a notice instead of failing every push to main.
+  preflight:
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - id: check
+        env:
+          UPLOAD_TOKEN: ${{ secrets.MERGIFY_BENCH_TOKEN }}
+          ADMIN_TOKEN: ${{ secrets.MERGIFY_BENCH_ADMIN_TOKEN }}
+          REF: ${{ github.ref }}
+        run: |
+          if [ -z "${UPLOAD_TOKEN}" ] || [ -z "${ADMIN_TOKEN}" ]; then
+            echo "::notice::Bench skipped: set both MERGIFY_BENCH_TOKEN (CI key, uploads) and MERGIFY_BENCH_ADMIN_TOKEN (admin key, reads back)."
+            echo "enabled=false" >> "${GITHUB_OUTPUT}"
+          elif [ "${REF}" != "refs/heads/main" ]; then
+            echo "::notice::Bench skipped: Mergify only publishes test details for runs on main."
+            echo "enabled=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "enabled=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+  bench-pytest:
+    needs: preflight
+    if: needs.preflight.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Build the wheel
+        working-directory: clients/pytest-mergify
+        run: uv build --wheel --out-dir "${RUNNER_TEMP}/dist"
+      - name: Run the suite
+        working-directory: bench/pytest
+        env:
+          MERGIFY_TOKEN: ${{ secrets.MERGIFY_BENCH_TOKEN }}
+        run: |
+          echo "BENCH_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_ENV}"
+          wheel="$(echo "${RUNNER_TEMP}"/dist/*.whl)"
+          uv run --locked --project ../tools bench-run-suite --client pytest -- \
+            uv run --no-project --with "${wheel}" --with-requirements requirements.txt pytest
+      - name: Check what Mergify recorded
+        if: ${{ !cancelled() && env.BENCH_STARTED_AT != '' }}
+        working-directory: bench/pytest
+        env:
+          MERGIFY_BENCH_ADMIN_TOKEN: ${{ secrets.MERGIFY_BENCH_ADMIN_TOKEN }}
+        run: |
+          version="$(uv run --no-project --with-requirements requirements.txt python -c 'import pytest; print(pytest.__version__)')"
+          uv run --locked --project ../tools bench-verify --client pytest \
+            --since "${BENCH_STARTED_AT}" --framework-version "${version}"
+
+  bench-rspec:
+    needs: preflight
+    if: needs.preflight.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ruby/setup-ruby@984c0c890880bbf811283d6f09c4607c62d210a4 # v1.323.0
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+          working-directory: clients/rspec-mergify
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      # A platform gem with the extension compiled in, as users install it. The
+      # plain gem would install and load without it, and report nothing.
+      - name: Build the gem
+        working-directory: clients/rspec-mergify
+        run: bundle exec rake native gem
+      - name: Run the suite
+        working-directory: bench/rspec
+        env:
+          MERGIFY_TOKEN: ${{ secrets.MERGIFY_BENCH_TOKEN }}
+          GEM_HOME: ${{ runner.temp }}/gems
+          GEM_PATH: ${{ runner.temp }}/gems
+        run: |
+          # Bundler would otherwise load the client from the source tree
+          # instead of the gem installed below.
+          unset BUNDLE_GEMFILE RUBYOPT
+          gem install --no-document "${GITHUB_WORKSPACE}"/clients/rspec-mergify/pkg/rspec-mergify-*.gem
+          echo "BENCH_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_ENV}"
+          uv run --locked --project ../tools bench-run-suite --client rspec -- \
+            ruby "${GEM_HOME}/bin/rspec" --require rspec_mergify
+      - name: Check what Mergify recorded
+        if: ${{ !cancelled() && env.BENCH_STARTED_AT != '' }}
+        working-directory: bench/rspec
+        env:
+          MERGIFY_BENCH_ADMIN_TOKEN: ${{ secrets.MERGIFY_BENCH_ADMIN_TOKEN }}
+          GEM_HOME: ${{ runner.temp }}/gems
+          GEM_PATH: ${{ runner.temp }}/gems
+        run: |
+          unset BUNDLE_GEMFILE RUBYOPT
+          version="$(ruby -e 'require "rspec/core/version"; puts RSpec::Core::Version::STRING')"
+          uv run --locked --project ../tools bench-verify --client rspec \
+            --since "${BENCH_STARTED_AT}" --framework-version "${version}"
+
+  # Packed the way release-ts.yml packs them, for the runner's own platform only.
+  bench-ts-pack:
+    needs: preflight
+    if: needs.preflight.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: clients/ts
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
+        with:
+          working-directory: clients/ts
+          runtime: node
+          cache: true
+          require-lockfile: true
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: pnpm -r run build
+      - name: Pack the packages
+        run: |
+          # `napi artifacts` wants a binary for every target, so the one built
+          # here goes straight into its platform package.
+          node_file="$(echo packages/native/ci-native.*.node)"
+          platform="${node_file#packages/native/ci-native.}"
+          platform="${platform%.node}"
+          cp "${node_file}" "packages/native/npm/${platform}/"
+          pnpm -r pack --pack-destination "${RUNNER_TEMP}/dist"
+          npm pack "./packages/native/npm/${platform}" --pack-destination "${RUNNER_TEMP}/dist"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: bench-ts-packages
+          path: ${{ runner.temp }}/dist/*.tgz
+          if-no-files-found: error
+
+  bench-vitest:
+    needs: [preflight, bench-ts-pack]
+    if: needs.preflight.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
+        with:
+          working-directory: clients/ts
+          runtime: node
+          cache: true
+          require-lockfile: true
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: bench-ts-packages
+          path: ${{ runner.temp }}/dist
+      - name: Install the suite and the packed clients
+        working-directory: bench/vitest
+        run: |
+          npm ci --no-audit --no-fund
+          npm install --no-save --no-audit --no-fund \
+            "${RUNNER_TEMP}"/dist/mergifyio-ci-native-*.tgz \
+            "${RUNNER_TEMP}"/dist/mergifyio-ci-core-*.tgz \
+            "${RUNNER_TEMP}"/dist/mergifyio-vitest-*.tgz
+      - name: Run the suite
+        working-directory: bench/vitest
+        env:
+          MERGIFY_TOKEN: ${{ secrets.MERGIFY_BENCH_TOKEN }}
+        run: |
+          echo "BENCH_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_ENV}"
+          uv run --locked --project ../tools bench-run-suite --client vitest -- npx vitest run
+      - name: Check what Mergify recorded
+        if: ${{ !cancelled() && env.BENCH_STARTED_AT != '' }}
+        working-directory: bench/vitest
+        env:
+          MERGIFY_BENCH_ADMIN_TOKEN: ${{ secrets.MERGIFY_BENCH_ADMIN_TOKEN }}
+        run: |
+          version="$(node -p 'require("./node_modules/vitest/package.json").version')"
+          uv run --locked --project ../tools bench-verify --client vitest \
+            --since "${BENCH_STARTED_AT}" --framework-version "${version}"
+
+  bench-playwright:
+    needs: [preflight, bench-ts-pack]
+    if: needs.preflight.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
+        with:
+          working-directory: clients/ts
+          runtime: node
+          cache: true
+          require-lockfile: true
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: bench-ts-packages
+          path: ${{ runner.temp }}/dist
+      - name: Install the suite and the packed clients
+        working-directory: bench/playwright
+        run: |
+          npm ci --no-audit --no-fund
+          npm install --no-save --no-audit --no-fund \
+            "${RUNNER_TEMP}"/dist/mergifyio-ci-native-*.tgz \
+            "${RUNNER_TEMP}"/dist/mergifyio-ci-core-*.tgz \
+            "${RUNNER_TEMP}"/dist/mergifyio-playwright-*.tgz
+      # The bench tests never open a page, so no browser is installed.
+      - name: Run the suite
+        working-directory: bench/playwright
+        env:
+          MERGIFY_TOKEN: ${{ secrets.MERGIFY_BENCH_TOKEN }}
+        run: |
+          echo "BENCH_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_ENV}"
+          uv run --locked --project ../tools bench-run-suite --client playwright -- npx playwright test
+      - name: Check what Mergify recorded
+        if: ${{ !cancelled() && env.BENCH_STARTED_AT != '' }}
+        working-directory: bench/playwright
+        env:
+          MERGIFY_BENCH_ADMIN_TOKEN: ${{ secrets.MERGIFY_BENCH_ADMIN_TOKEN }}
+        run: |
+          version="$(node -p 'require("./node_modules/@playwright/test/package.json").version')"
+          uv run --locked --project ../tools bench-verify --client playwright \
+            --since "${BENCH_STARTED_AT}" --framework-version "${version}"
