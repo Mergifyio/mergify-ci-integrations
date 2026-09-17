@@ -172,6 +172,41 @@ RSpec.describe Mergify::RSpec::Native do
         end
       end
 
+      # The body is OTLP protobuf, checked here as bytes rather than decoded, to
+      # keep a protobuf gem out of the suite. An attribute is a KeyValue: the key,
+      # then field 2 holding an AnyValue whose field number is the type --
+      # 1 string, 2 bool, 3 int, 4 double.
+      describe 'attribute types' do
+        def any_value(key, field)
+          key.b + "\x12".b + [field.bytesize].pack('C') + field
+        end
+
+        let(:attributes) do
+          { 'a.string' => 'passed', 'a.true' => true, 'a.false' => false, 'an.int' => 2,
+            'a.double' => 1.5, 'a.nil' => nil }
+        end
+
+        def uploaded_body(attributes)
+          with_stub_api(status: 200, body: '{}') do |url, _paths, bodies|
+            client(url).upload_trace({}, [span.merge('attributes' => attributes)])
+            bodies.first
+          end
+        end
+
+        it 'keeps each Ruby type, and drops nil' do
+          body = uploaded_body(attributes)
+
+          expect(body).to include(any_value('a.string', "\x0A\x06passed".b))
+          expect(body).to include(any_value('a.true', "\x10\x01".b))
+          # A oneof variant is written even when it holds the default, so false
+          # still carries its field.
+          expect(body).to include(any_value('a.false', "\x10\x00".b))
+          expect(body).to include(any_value('an.int', "\x18\x02".b))
+          expect(body).to include(any_value('a.double', "\x21".b + [1.5].pack('E')))
+          expect(body).not_to include('a.nil')
+        end
+      end
+
       # 400 rather than 500 on purpose: the client retries 5xx with backoff, as
       # OTLP asks, so a server error here would spend half a minute proving it.
       it 'fails loud, unlike a fetch: an unreported run is not a degraded one' do
