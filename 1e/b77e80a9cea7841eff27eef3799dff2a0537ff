@@ -1,0 +1,1 @@
+review (kozlek): new-style hook wrapper (wrapper=True) instead of old-style hookwrapper; pluggy>=1.2 declared
