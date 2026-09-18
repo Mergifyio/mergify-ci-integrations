@@ -39,6 +39,13 @@ export declare class CiApiClient {
    */
   fetchTestSelection(branch: string, headSha: string, pipelineName: string, jobName: string, collectionFingerprint?: string | undefined | null): Promise<TestSelection | null>
   /**
+   * Send the session's verdict — what it concluded, for Test Selection to
+   * answer the next rerun from. Resolves to the engine's receipt, `null`
+   * when the feature is not enabled for the repository, and rejects on a
+   * failure the plugin should report; it must never fail the run.
+   */
+  sendSessionVerdict(verdict: SessionVerdict): Promise<SessionVerdictReceipt | null>
+  /**
    * Upload `spans` under `resourceAttributes` as gzipped OTLP protobuf,
    * splitting oversized traces across several uploads. Rejects on failure.
    */
@@ -174,6 +181,84 @@ export interface RetryPlan {
   eligibleTests: Array<string>
   /** The eligible tests retry reruns on its own budget. */
   testsToProcess: Array<string>
+}
+
+/**
+ * What a test session concluded, written to Mergify by the plugin itself
+ * when the session ends, before the trace upload — so Test Selection can
+ * answer the next merge-queue rerun without waiting on trace ingestion. The
+ * field names are the wire contract with the engine, shared with
+ * pytest-mergify (`SessionVerdict` in `crates/mergify-ci-api`).
+ */
+export interface SessionVerdict {
+  /**
+   * The session's own id, the `test.run.id` its trace carries: sixteen hex
+   * digits. The idempotency key of the write.
+   */
+  testRunId: string
+  /** Where the session ran: the same coordinates the selection call names. */
+  headSha: string
+  headBranch?: string
+  pipelineName: string
+  jobName: string
+  /**
+   * The provider's identity for ONE execution of the job, when it reports
+   * one — a string whatever the provider's type. `run_attempt` needs it.
+   */
+  runId?: string
+  runAttempt?: number
+  /**
+   * The identity of what the session collected (`testCollectionFingerprint`)
+   * and how many tests that collection holds.
+   */
+  collectionFingerprint: string
+  collectionCount: number
+  /**
+   * Per test, by its FINAL status in the session, after the framework's own
+   * retries. `executed_count` is `passed + failed + skipped`; `failed_count`
+   * counts the quarantined failures too.
+   */
+  executedCount: number
+  passedCount: number
+  failedCount: number
+  skippedCount: number
+  totalTestRuntimeMs: number
+  /**
+   * The ids whose final status is failed, split by whether the failure was
+   * quarantined. Only the first list gates a rerun.
+   */
+  failingTests: Array<string>
+  quarantinedFailingTests: Array<string>
+  selection?: SessionVerdictSelection
+}
+
+/** The engine's receipt for a verdict that landed. */
+export interface SessionVerdictReceipt {
+  /**
+   * The verdict went out with its counts and no ids, because the ids did
+   * not fit the request bound: the next rerun of this job is served the
+   * full suite, and the plugin should say so.
+   */
+  truncated: boolean
+}
+
+/**
+ * What the session was served when it asked for a selection, and what it did
+ * with it — echoed on the verdict because the selection endpoint keeps no
+ * record of its answers.
+ */
+export interface SessionVerdictSelection {
+  /** The answer as served: `full`, `subset`, `empty` or `refused`. */
+  answer: string
+  /** The engine's own word, forwarded verbatim. */
+  reason: string
+  /** How many tests the selection left the run to run. */
+  keptCount: number
+  /**
+   * Why a served selection could not be applied and the whole suite ran
+   * instead. Absent when it was applied.
+   */
+  notAppliedReason?: string
 }
 
 /**

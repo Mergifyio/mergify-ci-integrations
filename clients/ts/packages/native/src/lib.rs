@@ -16,8 +16,9 @@
 use std::collections::{BTreeMap, HashMap};
 
 use mergify_ci_api::{
-    ApiConfig, AttrValue as ApiAttrValue, Client, ClientInfo, Mode, Outcome, SpanData, SpanStatus,
-    TestSelection as ApiTestSelection, budget,
+    ApiConfig, AttrValue as ApiAttrValue, Client, ClientInfo, Mode, Outcome,
+    SessionVerdict as ApiSessionVerdict, SessionVerdictSelection as ApiSessionVerdictSelection,
+    SpanData, SpanStatus, TestSelection as ApiTestSelection, budget,
 };
 use mergify_ci_core::{AttrValue, CiContext};
 use napi::bindgen_prelude::{BigInt, Either, Either3};
@@ -357,6 +358,106 @@ impl From<ApiTestSelection> for TestSelection {
     }
 }
 
+/// What the session was served when it asked for a selection, and what it did
+/// with it — echoed on the verdict because the selection endpoint keeps no
+/// record of its answers.
+#[napi(object)]
+pub struct SessionVerdictSelection {
+    /// The answer as served: `full`, `subset`, `empty` or `refused`.
+    pub answer: String,
+    /// The engine's own word, forwarded verbatim.
+    pub reason: String,
+    /// How many tests the selection left the run to run.
+    pub kept_count: u32,
+    /// Why a served selection could not be applied and the whole suite ran
+    /// instead. Absent when it was applied.
+    pub not_applied_reason: Option<String>,
+}
+
+/// The engine's receipt for a verdict that landed.
+#[napi(object)]
+pub struct SessionVerdictReceipt {
+    /// The verdict went out with its counts and no ids, because the ids did
+    /// not fit the request bound: the next rerun of this job is served the
+    /// full suite, and the plugin should say so.
+    pub truncated: bool,
+}
+
+/// What a test session concluded, written to Mergify by the plugin itself
+/// when the session ends, before the trace upload — so Test Selection can
+/// answer the next merge-queue rerun without waiting on trace ingestion. The
+/// field names are the wire contract with the engine, shared with
+/// pytest-mergify (`SessionVerdict` in `crates/mergify-ci-api`).
+#[napi(object)]
+pub struct SessionVerdict {
+    /// The session's own id, the `test.run.id` its trace carries: sixteen hex
+    /// digits. The idempotency key of the write.
+    pub test_run_id: String,
+    /// Where the session ran: the same coordinates the selection call names.
+    pub head_sha: String,
+    pub head_branch: Option<String>,
+    pub pipeline_name: String,
+    pub job_name: String,
+    /// The provider's identity for ONE execution of the job, when it reports
+    /// one — a string whatever the provider's type. `run_attempt` needs it.
+    pub run_id: Option<String>,
+    pub run_attempt: Option<u32>,
+    /// The identity of what the session collected (`testCollectionFingerprint`)
+    /// and how many tests that collection holds.
+    pub collection_fingerprint: String,
+    pub collection_count: u32,
+    /// Per test, by its FINAL status in the session, after the framework's own
+    /// retries. `executed_count` is `passed + failed + skipped`; `failed_count`
+    /// counts the quarantined failures too.
+    pub executed_count: u32,
+    pub passed_count: u32,
+    pub failed_count: u32,
+    pub skipped_count: u32,
+    pub total_test_runtime_ms: f64,
+    /// The ids whose final status is failed, split by whether the failure was
+    /// quarantined. Only the first list gates a rerun.
+    pub failing_tests: Vec<String>,
+    pub quarantined_failing_tests: Vec<String>,
+    pub selection: Option<SessionVerdictSelection>,
+}
+
+/// Marshal the plugin's verdict into the crate's, which owns the wire
+/// encoding (sorted ids, gzip) and the request. `total_test_runtime_ms` comes
+/// in as a JS number and is floored: a millisecond total below zero or past
+/// `u64` is not a duration a session reports.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn session_verdict(verdict: SessionVerdict) -> ApiSessionVerdict {
+    ApiSessionVerdict {
+        test_run_id: verdict.test_run_id,
+        head_sha: verdict.head_sha,
+        head_branch: verdict.head_branch,
+        pipeline_name: verdict.pipeline_name,
+        job_name: verdict.job_name,
+        run_id: verdict.run_id,
+        run_attempt: verdict.run_attempt,
+        collection_fingerprint: verdict.collection_fingerprint,
+        collection_count: verdict.collection_count,
+        executed_count: verdict.executed_count,
+        passed_count: verdict.passed_count,
+        failed_count: verdict.failed_count,
+        skipped_count: verdict.skipped_count,
+        total_test_runtime_ms: verdict.total_test_runtime_ms.max(0.0).floor() as u64,
+        failing_tests: verdict.failing_tests,
+        quarantined_failing_tests: verdict.quarantined_failing_tests,
+        // The client decides the flag: it sends every id it has, and the
+        // crate truncates on its own when they do not fit.
+        failing_tests_truncated: false,
+        selection: verdict
+            .selection
+            .map(|selection| ApiSessionVerdictSelection {
+                answer: selection.answer,
+                reason: selection.reason,
+                kept_count: selection.kept_count,
+                not_applied_reason: selection.not_applied_reason,
+            }),
+    }
+}
+
 /// One `OpenTelemetry` attribute, as a key and a JS `boolean | number | string`.
 #[napi(object)]
 pub struct Attribute {
@@ -479,6 +580,28 @@ impl CiApiClient {
             .await
         {
             Outcome::Ready(selection) => Ok(Some(selection.into())),
+            Outcome::Dormant => Ok(None),
+            Outcome::Failed(message) => Err(Error::from_reason(message)),
+        }
+    }
+
+    /// Send the session's verdict — what it concluded, for Test Selection to
+    /// answer the next rerun from. Resolves to the engine's receipt, `null`
+    /// when the feature is not enabled for the repository, and rejects on a
+    /// failure the plugin should report; it must never fail the run.
+    #[napi]
+    pub async fn send_session_verdict(
+        &self,
+        verdict: SessionVerdict,
+    ) -> Result<Option<SessionVerdictReceipt>> {
+        match self
+            .client
+            .send_session_verdict(session_verdict(verdict))
+            .await
+        {
+            Outcome::Ready(receipt) => Ok(Some(SessionVerdictReceipt {
+                truncated: receipt.truncated,
+            })),
             Outcome::Dormant => Ok(None),
             Outcome::Failed(message) => Err(Error::from_reason(message)),
         }

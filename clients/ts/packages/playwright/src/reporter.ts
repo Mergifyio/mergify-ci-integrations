@@ -6,16 +6,19 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import {
   applyToCollected,
+  buildSessionVerdict,
   createApiClient,
   createTracing,
   detectResources,
   emitTestCaseSpan,
   endSessionSpan,
   envToBool,
+  type FinalStatus,
   type FlakyDetectionContext,
   FlakyDetector,
   fallbackRefusalMessage,
   fetchTestSelection,
+  formatSessionVerdictResult,
   formatTestSelectionReport,
   generateTestRunId,
   getRepoName,
@@ -25,9 +28,13 @@ import {
   nativeTestCollectionFingerprint,
   resolveSelectionCoordinates,
   type SessionSpan,
+  type SessionVerdictClient,
+  SessionVerdictFold,
+  type SessionVerdictResult,
   type SpanAttributes,
   selectionEcho,
   selectionResourceAttributes,
+  sendSessionVerdict,
   startSessionSpan,
   type TestCaseResult,
   type TestCollection,
@@ -185,6 +192,37 @@ function isNoTestsFound(error: TestError): boolean {
 }
 
 /**
+ * A test's final status, as Playwright itself concluded it once the run is
+ * over, for the session verdict -- or undefined for a test that never
+ * started, which the verdict then does not count as executed.
+ *
+ * `outcome()` is the verdict Playwright's exit code is built from: `expected`
+ * covers a pass and a `test.fail()` that failed as announced; `unexpected`
+ * covers a failure after every retry and a `test.fail()` that passed -- both
+ * turned the job red, so both must be replayed. A `flaky` test passed on a
+ * retry and did not gate the job, unless `failOnFlakyTests` says it did. A
+ * quarantine-absorbed failure is reconciled as expected by the fixture, so it
+ * is read off the annotation first.
+ *
+ * `skipped` covers two things Playwright tells apart the same way
+ * (`computeTestCaseOutcome`): a test that asked to be skipped, and a test that
+ * DID NOT RUN because something before it failed -- the rest of a file after a
+ * `beforeAll` threw, the followers of a serial group, the remainder of a
+ * crashed worker, an interruption. The second kind never ran on this commit,
+ * so it is failed here: a rerun that skipped it as "already passed" would go
+ * green over tests nobody executed.
+ */
+function finalStatus(test: TestCase, failOnFlakyTests: boolean): FinalStatus | undefined {
+  if (test.annotations.some((a) => a.type === 'mergify:quarantined')) return 'quarantined_failed';
+  if (test.results.length === 0) return undefined;
+  const outcome = test.outcome();
+  if (outcome === 'unexpected') return 'failed';
+  if (outcome === 'flaky') return failOnFlakyTests ? 'failed' : 'passed';
+  if (outcome === 'expected') return 'passed';
+  return test.expectedStatus === 'skipped' ? 'skipped' : 'failed';
+}
+
+/**
  * Every project pulled in by another project *of this run* — as a
  * `dependencies` entry or as its `teardown`.
  *
@@ -256,16 +294,17 @@ export class MergifyReporter implements Reporter {
   /** Whether the running Playwright called `preprocess` — 1.62 and up do. */
   private preprocessCalled = false;
   /**
-   * What this run collected -- the identity Mergify was asked with. Set
-   * exactly when the run asked, including when the answer was dormant or the
-   * request failed.
+   * What this run collected -- the identity Mergify was asked with and the
+   * verdict is filed under. Set exactly when the run asked (including when
+   * the answer was dormant or the request failed): the verdict is what the
+   * NEXT rerun of this job needs, whatever this one was told.
    */
   private collection: TestCollection | undefined;
   /** What `preprocess` decided, once it met the collection. Reported in onEnd. */
   private testSelection: TestSelectionApplication | undefined;
   /** The projects whose tests always run in full, read once in `preprocess`. */
   private readonlyProjects = new Set<string>();
-  /** The suite as Playwright ran it. */
+  /** The suite as Playwright ran it, for the verdict's final fold. */
   private rootSuite: Suite | undefined;
   /**
    * Run-level errors Playwright reported outside any test -- a global
@@ -274,10 +313,13 @@ export class MergifyReporter implements Reporter {
    * these did not fail because Mergify emptied it.
    */
   private runErrors: TestError[] = [];
+  /** Each test's final status, folded once the run is over, for the verdict. */
+  private verdictFold = new SessionVerdictFold();
+  private verdictResult: SessionVerdictResult | undefined;
   /** Memoised state file, read by `onBegin`. */
   private sharedState: SharedState | null | undefined;
   /** Memoised so `preprocess` and `onBegin` build one client, not two. */
-  private apiClient: MergifyApiClient | null | undefined;
+  private apiClient: (MergifyApiClient & Partial<SessionVerdictClient>) | null | undefined;
   private runAttributes: SpanAttributes | undefined;
   private runId: string | undefined;
 
@@ -305,7 +347,7 @@ export class MergifyReporter implements Reporter {
    * binding for this platform -- the fail-open path, on which every backend
    * feature stays off.
    */
-  private client(): MergifyApiClient | null {
+  private client(): (MergifyApiClient & Partial<SessionVerdictClient>) | null {
     if (this.apiClient === undefined) {
       const token = this.options.token ?? process.env.MERGIFY_TOKEN;
       const apiUrl = this.options.apiUrl ?? process.env.MERGIFY_API_URL ?? DEFAULT_API_URL;
@@ -325,7 +367,7 @@ export class MergifyReporter implements Reporter {
     return this.apiClient;
   }
 
-  /** The run's resource attributes, detected once: the selection is keyed on them. */
+  /** The run's resource attributes, detected once: the selection is keyed on them and the verdict filed under them. */
   private attributes(): SpanAttributes {
     this.runAttributes ??= detectResources(playwrightResource.detect(), this.testRunId());
     return this.runAttributes;
@@ -421,7 +463,9 @@ export class MergifyReporter implements Reporter {
 
     // Setup/teardown project tests are readonly here and always run in full,
     // so they take no part in the collection on either side: not in the
-    // fingerprint, never excluded.
+    // fingerprint, never excluded, and not in the verdict either -- a failed
+    // setup leaves the collection's tests unstarted, which the verdict
+    // reports as not executed, and the next attempt runs everything.
     this.readonlyProjects = readonlyProjectNames(params.suite);
     const rootDir = params.config.rootDir ?? '';
     let collected: CollectedTest[] = params.suite
@@ -776,6 +820,12 @@ export class MergifyReporter implements Reporter {
       }
     }
 
+    // The verdict first, on purpose: it is what the next merge-queue rerun of
+    // this job is answered from, and it must never wait behind the upload's
+    // timeout and retries. Its own failure does not stop the upload either --
+    // the two are independent documents.
+    this.foldVerdict();
+    await this.sendVerdict();
     this.reportTestSelection();
 
     if (this.quarantineFetchedCount > 0) {
@@ -854,8 +904,59 @@ export class MergifyReporter implements Reporter {
     return reported;
   }
 
+  /**
+   * Fold every test of the collection to its final status, once the run is
+   * over: what Playwright concluded of it across its attempts, read off the
+   * suite rather than accumulated per attempt -- Playwright retries a test it
+   * skipped for a predecessor's failure and a `test.fail()` that passed, and
+   * only the last word counts. Readonly projects are outside the collection
+   * and stay outside the verdict.
+   */
+  private foldVerdict(): void {
+    if (!this.rootSuite || !this.collection) return;
+    const rootDir = this.config?.rootDir ?? '';
+    const failOnFlakyTests = this.config?.failOnFlakyTests ?? false;
+    const fold = new SessionVerdictFold();
+    for (const test of this.rootSuite.allTests()) {
+      if (this.readonlyProjects.has(projectNameFromTest(test) ?? '')) continue;
+      // Every attempt's time: what the job spent on its tests.
+      for (const result of test.results) fold.recordDuration(result.duration);
+      const status = finalStatus(test, failOnFlakyTests);
+      if (status !== undefined) fold.record(this.testKey(test, rootDir), status);
+    }
+    this.verdictFold = fold;
+  }
+
   private echo() {
     return this.testSelection ? selectionEcho(this.testSelection) : undefined;
+  }
+
+  /**
+   * Write what this session concluded to Mergify. Sent exactly when the run
+   * asked for a selection -- including when that request failed: the API may
+   * be back by now, and the verdict is what the NEXT rerun of this job needs.
+   * A run that never asked has no rerun to reduce and sends nothing. Never
+   * fails the run.
+   */
+  private async sendVerdict(): Promise<void> {
+    if (!this.collection) return;
+    const client = this.client();
+    if (!client) return;
+    const verdict = buildSessionVerdict({
+      testRunId: this.testRunId(),
+      attributes: this.attributes(),
+      collection: this.collection,
+      fold: this.verdictFold,
+      selection: this.echo(),
+    });
+    if (!verdict) return;
+    if (envToBool(process.env.MERGIFY_CI_DEBUG, false)) {
+      // The same switch that dumps the trace to stderr instead of uploading it.
+      process.stderr.write(`[mergify] session verdict ${JSON.stringify(verdict)}\n`);
+      this.verdictResult = { sent: true, truncated: false };
+      return;
+    }
+    this.verdictResult = await sendSessionVerdict(client, verdict);
   }
 
   /**
@@ -864,11 +965,14 @@ export class MergifyReporter implements Reporter {
    * Silence is reserved for "we never asked" (feature off, no client,
    * incomplete run identity). Once the run asked, it reports what it made of
    * the answer — including a subset dropped because its names are not all in
-   * this collection, which is the case a user most needs to see.
+   * this collection, which is the case a user most needs to see — and whether
+   * its verdict reached Mergify.
    */
   private reportTestSelection(): void {
     if (this.testSelection) {
       process.stderr.write(formatTestSelectionReport(this.testSelection, CLIENT));
+      const verdictLine = this.verdictResult && formatSessionVerdictResult(this.verdictResult);
+      if (verdictLine) process.stderr.write(verdictLine);
       return;
     }
     // The job opted in and no `preprocess` ran: this Playwright is older than
@@ -1032,8 +1136,13 @@ export class MergifyReporter implements Reporter {
   getTestSelection(): {
     collection: TestCollection | undefined;
     application: TestSelectionApplication | undefined;
+    verdict: SessionVerdictResult | undefined;
   } {
-    return { collection: this.collection, application: this.testSelection };
+    return {
+      collection: this.collection,
+      application: this.testSelection,
+      verdict: this.verdictResult,
+    };
   }
 
   /** Test hook: exposes the flaky-detection candidates the reporter is tracking. */

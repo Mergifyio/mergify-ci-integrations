@@ -371,8 +371,9 @@ export function applyToCollected(
 
 /**
  * What the session says about its own reduction, echoed on the trace resource
- * — where the engine reads it from, because nothing on the server keeps its
- * own answer (it is computed, served, and dropped). Undefined when Mergify never answered: recording a `full` for
+ * and on the session verdict — the two places the engine reads it from,
+ * because nothing on the server keeps its own answer (it is computed, served,
+ * and dropped). Undefined when Mergify never answered: recording a `full` for
  * a run nobody looked at would make "we never looked" and "we looked and chose
  * not to reduce" indistinguishable in every count taken afterwards.
  *
