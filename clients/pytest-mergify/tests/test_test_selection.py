@@ -2,6 +2,8 @@ import dataclasses
 import textwrap
 import typing
 
+import _pytest.config
+import _pytest.nodes
 import _pytest.pytester
 import pytest
 
@@ -331,6 +333,7 @@ def _run_with_selection(
     served: typing.Optional[typing.Dict[str, typing.Any]] = None,
     error: typing.Optional[str] = None,
     setenv: typing.Optional[typing.Dict[str, typing.Optional[str]]] = None,
+    plugins: typing.Sequence[object] = (),
 ) -> typing.Tuple[
     _pytest.pytester.RunResult,
     pytest_mergify.PytestMergify,
@@ -340,6 +343,13 @@ def _run_with_selection(
 
     Returns the run's result, the plugin instance (for what it ended up holding)
     and the test-selection fetches it made.
+
+    `plugins` are registered AFTER the plugin under test. Two `trylast`
+    implementations of one hook are called in registration order (pluggy
+    inserts each at the front of the list it then walks backwards), so this
+    puts theirs after ours -- which is where pytest-split's stands in a real
+    run, its `pytest_configure` registering `pytestsplitplugin` after this
+    plugin has registered its own instance.
     """
     conftest.set_test_environment(monkeypatch)
     # The coordinates the selection is keyed on. `set_test_environment` gives a
@@ -370,7 +380,7 @@ def _run_with_selection(
 
     pytester.makepyfile(code)
     plugin = pytest_mergify.PytestMergify()
-    result = pytester.runpytest_inprocess(*args, plugins=[plugin])
+    result = pytester.runpytest_inprocess(*args, plugins=[plugin, *plugins])
     return result, plugin, calls
 
 
@@ -410,6 +420,204 @@ def test_the_request_carries_the_fingerprint_of_what_was_collected(
     assert call["head_sha"] == "cafecafe"
     assert call["pipeline_name"] == "CI"
     assert call["job_name"] == "unit"
+
+
+class _Shard:
+    """One leg of a split suite, the way pytest-split and pytest-shard do it.
+
+    A plain `trylast` implementation of the collection hook that narrows the
+    collection to this leg's share -- the exact shape of
+    `pytest_split.plugin.PytestSplitPlugin.pytest_collection_modifyitems`, so
+    the tests below need neither package installed. `trylast` matters: it is
+    what this plugin's own hook used to declare too, and two `trylast`
+    implementations are ordered by registration alone -- nothing a plugin can
+    rely on, and in a real run it put this plugin's first.
+    """
+
+    def __init__(self, group: int, splits: int) -> None:
+        self.group = group
+        self.splits = splits
+
+    @pytest.hookimpl(trylast=True)
+    def pytest_collection_modifyitems(
+        self,
+        config: _pytest.config.Config,
+        items: typing.List[_pytest.nodes.Item],
+    ) -> None:
+        share = len(items) // self.splits
+        start = (self.group - 1) * share
+        kept = items[start : start + share]
+        deselected = [item for item in items if item not in kept]
+        items[:] = kept
+        config.hook.pytest_deselected(items=deselected)
+
+
+_FOUR_TESTS = """
+    def test_1():
+        pass
+
+    def test_2():
+        pass
+
+    def test_3():
+        pass
+
+    def test_4():
+        pass
+"""
+
+
+def test_the_fingerprint_describes_what_a_shard_plugin_left(
+    pytester: _pytest.pytester.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # MRGFY-9417. A split suite (pytest-split, pytest-shard) narrows the
+    # collection from the same hook this plugin fingerprints it in, and at the
+    # same priority -- so which of the two ran first was decided by
+    # registration order, and it was this plugin. Every leg then reported the
+    # fingerprint of the WHOLE suite: twenty legs of one job, one identity,
+    # and the engine could only refuse to guess which one a rerun repeats.
+    # The fingerprint has to be the leg's own, computed after the split.
+    fingerprints = {}
+    for group in (1, 2):
+        result, plugin, calls = _run_with_selection(
+            pytester,
+            monkeypatch,
+            _FOUR_TESTS,
+            served={"selection": "full", "reason": "no_predecessor", "tests": []},
+            plugins=[_Shard(group=group, splits=2)],
+        )
+        result.assert_outcomes(passed=2, deselected=2)
+        (call,) = calls
+        fingerprints[group] = call["collection_fingerprint"]
+        resource = plugin.mergify_ci.resource_attributes
+        assert resource is not None
+        assert resource["test.collection.fingerprint"] == call["collection_fingerprint"]
+        # And the count is the leg's too: it is the denominator the engine
+        # checks a session's completeness against, and a leg that ran 2 of
+        # its 2 tests is complete, not half-missing.
+        assert resource["test.collection.count"] == 2
+
+    prefix = "test_the_fingerprint_describes_what_a_shard_plugin_left.py::"
+    assert fingerprints[1] == conftest.collection_fingerprint(
+        [f"{prefix}test_1", f"{prefix}test_2"]
+    )
+    assert fingerprints[2] == conftest.collection_fingerprint(
+        [f"{prefix}test_3", f"{prefix}test_4"]
+    )
+    assert fingerprints[1] != fingerprints[2]
+
+
+def test_a_served_subset_is_applied_after_a_shard_plugin(
+    pytester: _pytest.pytester.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The other half of MRGFY-9417. Applied BEFORE the split, a served subset
+    # (this leg's failures) got cut into shares like any collection: each leg
+    # re-executed a fraction of its own failures and reported green on the
+    # rest. Applied after, the run executes subset ∩ leg -- every failure the
+    # leg was served, and only those.
+    prefix = "test_a_served_subset_is_applied_after_a_shard_plugin.py::"
+    result, plugin, calls = _run_with_selection(
+        pytester,
+        monkeypatch,
+        _FOUR_TESTS
+        + """
+    def test_5():
+        pass
+
+    def test_6():
+        pass
+""",
+        served={
+            "selection": "subset",
+            "reason": "queue_rerun",
+            "tests": [f"{prefix}test_1", f"{prefix}test_3"],
+        },
+        # Three of the six tests are this leg's; the served subset names two
+        # of them.
+        plugins=[_Shard(group=1, splits=2)],
+    )
+
+    # 3 deselected by the split, 1 by the subset, 2 executed: both served
+    # tests, not one of them.
+    result.assert_outcomes(passed=2, deselected=4)
+    selection = plugin.mergify_ci.test_selection
+    assert selection is not None
+    assert selection.not_applied_reason is None
+    assert selection.kept_tests == [f"{prefix}test_1", f"{prefix}test_3"]
+    assert selection.deselected_count == 1
+    # Asked with the leg's own fingerprint, which is what the engine keyed
+    # the answer on.
+    (call,) = calls
+    assert call["collection_fingerprint"] == conftest.collection_fingerprint(
+        [f"{prefix}test_1", f"{prefix}test_2", f"{prefix}test_3"]
+    )
+
+
+def _passed_node_ids(result: _pytest.pytester.RunResult) -> typing.List[str]:
+    """The node ids a `-v` run reports as passed, in the order it ran them."""
+    return [
+        line.split(" ")[0]
+        for line in result.stdout.lines
+        if "::" in line and line.split(" ")[1:2] == ["PASSED"]
+    ]
+
+
+def test_a_real_pytest_split_leg_is_fingerprinted_and_reduced_on_its_own(
+    pytester: _pytest.pytester.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `_Shard` above is a copy of pytest-split's hook; this is pytest-split
+    # itself, registered the way a user's `pip install` registers it, on the
+    # two legs of `--splits 2`. Which tests each leg gets is pytest-split's
+    # business (an even cut, there being no stored durations), so each leg is
+    # checked against what it actually ran rather than against a guess.
+    pytest.importorskip("pytest_split")
+    shares = {}
+    for group in ("1", "2"):
+        result, plugin, calls = _run_with_selection(
+            pytester,
+            monkeypatch,
+            _FOUR_TESTS,
+            "-v",
+            "--splits",
+            "2",
+            "--group",
+            group,
+            served={"selection": "full", "reason": "no_predecessor", "tests": []},
+        )
+        result.assert_outcomes(passed=2, deselected=2)
+        shares[group] = _passed_node_ids(result)
+        (call,) = calls
+        assert call["collection_fingerprint"] == conftest.collection_fingerprint(
+            shares[group]
+        )
+        resource = plugin.mergify_ci.resource_attributes
+        assert resource is not None
+        assert resource["test.collection.count"] == 2
+    assert len(shares["1"]) == len(shares["2"]) == 2
+    assert not set(shares["1"]) & set(shares["2"])
+
+    # The rerun of leg 1, served the whole of its share as the subset to
+    # re-execute. Cut into two again, it would run one test of the two.
+    result, plugin, calls = _run_with_selection(
+        pytester,
+        monkeypatch,
+        _FOUR_TESTS,
+        "-v",
+        "--splits",
+        "2",
+        "--group",
+        "1",
+        served={"selection": "subset", "reason": "queue_rerun", "tests": shares["1"]},
+    )
+    result.assert_outcomes(passed=2, deselected=2)
+    assert _passed_node_ids(result) == shares["1"]
+    selection = plugin.mergify_ci.test_selection
+    assert selection is not None
+    assert selection.not_applied_reason is None
+    assert selection.kept_tests == shares["1"]
 
 
 def test_the_fingerprint_is_reported_with_the_run(
