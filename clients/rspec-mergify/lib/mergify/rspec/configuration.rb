@@ -4,7 +4,7 @@ require 'set'
 
 module Mergify
   module RSpec
-    # Registers RSpec hooks for quarantine and flaky detection, and adds the
+    # Registers RSpec hooks for quarantine and flaky detection, and attaches the
     # Mergify Test Insights formatter when running inside CI.
     module Configuration
       module_function
@@ -13,8 +13,11 @@ module Mergify
       # rubocop:disable-next Metrics/CyclomaticComplexity,Metrics/PerceivedComplexity
       def setup!
         ::RSpec.configure do |config|
-          # Add formatter when in CI
-          config.add_formatter(Mergify::RSpec::Formatter) if Utils.in_ci?
+          # Attached to the reporter once the suite starts, rather than added with
+          # `add_formatter`: RSpec only sets up its default formatter when no
+          # other was added, so adding this one took the progress output and the
+          # summary line away from every suite that had not chosen a format.
+          config.prepend_before(:suite) { Configuration.attach_formatter(config) } if Utils.in_ci?
 
           # Flaky detection: prepare session with all example IDs
           config.before(:suite) do
@@ -112,6 +115,14 @@ module Mergify
         end
       end
       # rubocop:enable Metrics/MethodLength,Metrics/BlockLength,Metrics/AbcSize
+
+      # The reporter has sent `start` by the time suite hooks run, so the
+      # formatter is handed the same notification directly.
+      def attach_formatter(config)
+        formatter = Formatter.new(config.output_stream)
+        formatter.start(::RSpec::Core::Notifications::StartNotification.new(::RSpec.world.example_count, 0))
+        config.reporter.register_listener(formatter, *Formatter::NOTIFICATIONS)
+      end
     end
   end
 end
