@@ -1,1 +1,1 @@
-per-leg naming is recommended, not required (the fingerprint tells legs apart); honour PWTEST_SHARD_WEIGHTS; state that a leg's slice must stay stable across attempts
+rebased on the amended #281 (aba24ad)
