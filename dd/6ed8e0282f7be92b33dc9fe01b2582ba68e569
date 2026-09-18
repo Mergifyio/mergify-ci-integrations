@@ -1,1 +1,1 @@
-review: parse PWTEST_SHARD_WEIGHTS as Playwright does (colon-separated integers, zero allowed)
+review: the empty override looks past Playwright's own 'No tests found' only — any other run-level error (onError: a global teardown that threw) keeps the run red
