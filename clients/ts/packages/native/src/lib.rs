@@ -85,6 +85,17 @@ pub fn detect_attributes() -> HashMap<String, Either<i64, String>> {
         .collect()
 }
 
+/// The identity of the set of tests a run collected: the same digest
+/// pytest-mergify reports, from the same core recipe
+/// (`mergify_ci_core::test_collection_fingerprint`), so Mergify can match a
+/// rerun's collection against the previous attempt's whatever client uploaded
+/// it. Order-independent; a repeated identifier is a different collection.
+#[napi]
+#[must_use]
+pub fn test_collection_fingerprint(test_ids: Vec<String>) -> String {
+    mergify_ci_core::test_collection_fingerprint(test_ids)
+}
+
 /// How to reach one repository's Mergify backend API, and who is calling.
 ///
 /// The calling *distribution* is named by the plugin rather than fixed here:
@@ -318,31 +329,30 @@ pub fn dynamic_share_ms(
 /// binding's job is to deliver the answer, not to interpret it.
 #[napi(object)]
 pub struct TestSelection {
-    /// `"full"` (run everything) or `"subset"` (run only `tests`).
+    /// `"full"` (run everything), `"subset"` (run only `tests`), `"empty"`
+    /// (run nothing: the previous attempt of this job ran these tests and they
+    /// passed), `"refused"` (Mergify will not guess between several candidate
+    /// sessions; the run must fail), or a value this client predates. Handed
+    /// over verbatim: what to do with an answer the run cannot honour is
+    /// decided by the plugin, which declares it rather than rewriting it.
     pub selection: String,
     /// Why the server chose this selection — surfaced in the plugin report.
     pub reason: String,
-    /// The test identifiers to run; absent on a `full` answer.
+    /// The test identifiers to run; absent on every answer but a `subset`.
     pub tests: Option<Vec<String>>,
+    /// The server's own explanation to show the CI user, when the answer has
+    /// one — today only a refusal does. Shown verbatim: the copy is the
+    /// server's so it can be corrected without publishing a client.
+    pub message: Option<String>,
 }
 
-// A plain comment, not a doc one: `napi` copies `///` into the generated
-// `index.d.ts`, and this says nothing a caller of that interface needs.
-//
-// `ApiTestSelection` also carries `message` -- the server's own explanation of
-// a `refused` answer -- and it is deliberately NOT mirrored here. These clients
-// collapse anything that is not a `subset` to a full run and never show the
-// user a reason, so the field would be dead weight on the interface. Whoever
-// wires the refusal path here (test selection is off for vitest and playwright
-// during the pilot, MRGFY-8906) should carry it over rather than write the
-// wording client-side: the copy is the server's so it can be corrected without
-// publishing a client.
 impl From<ApiTestSelection> for TestSelection {
     fn from(selection: ApiTestSelection) -> Self {
         Self {
             selection: selection.selection,
             reason: selection.reason,
             tests: selection.tests,
+            message: selection.message,
         }
     }
 }
@@ -441,6 +451,13 @@ impl CiApiClient {
     /// The test selection for a run, identified by its own `branch`,
     /// `headSha` and job coordinates, or `null` when test selection is not
     /// enabled for the repository.
+    ///
+    /// `collectionFingerprint` is the identity of what this run collected
+    /// (`testCollectionFingerprint`): a subset is only safe to serve to a run
+    /// that collects the same tests the previous attempt did, so a request
+    /// without one is answered with the full suite. Optional so a caller that
+    /// holds no collection at the moment it asks (Vitest collects inside its
+    /// workers) sends no parameter at all rather than claiming an empty one.
     #[napi]
     pub async fn fetch_test_selection(
         &self,
@@ -448,18 +465,17 @@ impl CiApiClient {
         head_sha: String,
         pipeline_name: String,
         job_name: String,
+        collection_fingerprint: Option<String>,
     ) -> Result<Option<TestSelection>> {
         match self
             .client
-            // No fingerprint from here. Vitest collects inside its workers in
-            // batches (`onCollected` sees one worker's files, never the run's
-            // whole collection) and Playwright's `preprocess` hook runs before
-            // `onBegin`, where the full suite becomes available -- so neither
-            // runner holds its own collection at the moment it asks. Sending
-            // none is what makes the server answer for a run it cannot
-            // identify; sending an empty value would claim a collection.
-            // Resolving that ordering is open work, not tracked work.
-            .fetch_test_selection(&branch, &head_sha, &pipeline_name, &job_name, None)
+            .fetch_test_selection(
+                &branch,
+                &head_sha,
+                &pipeline_name,
+                &job_name,
+                collection_fingerprint.as_deref(),
+            )
             .await
         {
             Outcome::Ready(selection) => Ok(Some(selection.into())),

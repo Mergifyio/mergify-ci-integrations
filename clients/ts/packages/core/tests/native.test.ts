@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { nativeTestCollectionFingerprint } from '../src/native.js';
 import { detectResources } from '../src/resources/index.js';
 import { getCIProvider, getRepoName } from '../src/utils.js';
 
@@ -75,5 +76,25 @@ describe('native detection wiring', () => {
     expect(resource['cicd.provider.name']).toBeUndefined();
     expect(resource['test.run.id']).toBe('run-2');
     expect(getCIProvider()).toBeNull();
+  });
+});
+
+describe('native collection fingerprint wiring', () => {
+  it('computes the digest pytest-mergify and the engine compute', () => {
+    // The value pinned in `crates/mergify-ci-core/src/fingerprint.rs`
+    // (`ONE_TEST`): a fingerprint two clients compute differently is not a
+    // fingerprint, so the JS side must reach the Rust recipe, not reimplement it.
+    expect(nativeTestCollectionFingerprint(['tests/test_a.py::test_x'])).toBe(
+      'e34981c3d93045c70c9e6d00ff46ef54ff4211cb84e7eb79d54aa449ecf5aff6'
+    );
+  });
+
+  it('is order-independent and duplicate-sensitive, like the recipe', () => {
+    expect(nativeTestCollectionFingerprint(['a', 'b'])).toBe(
+      nativeTestCollectionFingerprint(['b', 'a'])
+    );
+    expect(nativeTestCollectionFingerprint(['a', 'a'])).not.toBe(
+      nativeTestCollectionFingerprint(['a'])
+    );
   });
 });

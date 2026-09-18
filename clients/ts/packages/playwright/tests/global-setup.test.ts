@@ -272,12 +272,12 @@ describe('runGlobalSetup — test selection', () => {
     vi.stubEnv('GITHUB_REF_NAME', 'queue/main/42');
   });
 
-  it('asks for nothing when the job did not opt in', async () => {
-    // The property MRGFY-9172 rests on: a job that never opted in leaves no
-    // selection answer on its session, which is how Mergify tells a repository
-    // that has not asked from one that has. Asking in order to be told "not
-    // opted in" would answer that question everywhere and erase it.
-    delete process.env[TEST_SELECTION_ENABLE_ENV];
+  it('never asks: the request carries the collection, which only the reporter holds', async () => {
+    // The answer is keyed on the fingerprint of what the run collected, and
+    // globalSetup runs before any test file is loaded. The reporter's
+    // `preprocess` asks, with its own client; nothing about the selection
+    // crosses the state file any more.
+    vi.stubEnv(TEST_SELECTION_ENABLE_ENV, 'true');
     const client = stubClient();
     const { deps } = depsWith(client, cacheRoot);
 
@@ -290,39 +290,5 @@ describe('runGlobalSetup — test selection', () => {
     // The rest of the plugin is untouched by the opt-in: it gates this feature
     // alone, not the reporting a repository already pays for.
     expect(client.fetchQuarantine).toHaveBeenCalled();
-  });
-
-  it('asks, and carries the answer to the reporter, when the job opted in', async () => {
-    vi.stubEnv(TEST_SELECTION_ENABLE_ENV, 'true');
-    const client = stubClient({
-      fetchTestSelection: vi.fn().mockResolvedValue({
-        selection: 'subset',
-        reason: 'queue_rerun',
-        tests: ['tests/a.spec.ts > x'],
-      }),
-    });
-    const { deps } = depsWith(client, cacheRoot);
-
-    await runGlobalSetup(fakeConfig('/repo'), deps);
-
-    expect(client.fetchTestSelection).toHaveBeenCalledWith(
-      'queue/main/42',
-      'cafecafe',
-      'CI',
-      'unit'
-    );
-    const id = process.env.MERGIFY_TEST_RUN_ID!;
-    const state = JSON.parse(readFileSync(stateFilePath(cacheRoot, id), 'utf8'));
-    expect(state.testSelection.selection).toBe('subset');
-  });
-
-  it('asks for nothing on a value it cannot read as a yes', async () => {
-    vi.stubEnv(TEST_SELECTION_ENABLE_ENV, 'probably');
-    const client = stubClient();
-    const { deps } = depsWith(client, cacheRoot);
-
-    await runGlobalSetup(fakeConfig('/repo'), deps);
-
-    expect(client.fetchTestSelection).not.toHaveBeenCalled();
   });
 });

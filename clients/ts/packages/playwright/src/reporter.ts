@@ -8,20 +8,32 @@ import {
   applyToCollected,
   createApiClient,
   createTracing,
+  detectResources,
   emitTestCaseSpan,
   endSessionSpan,
   envToBool,
   type FlakyDetectionContext,
   FlakyDetector,
+  fallbackRefusalMessage,
+  fetchTestSelection,
   formatTestSelectionReport,
   generateTestRunId,
   getRepoName,
   isInCI,
+  isTestSelectionEnabled,
+  type MergifyApiClient,
+  nativeTestCollectionFingerprint,
+  resolveSelectionCoordinates,
   type SessionSpan,
+  type SpanAttributes,
+  selectionEcho,
+  selectionResourceAttributes,
   startSessionSpan,
   type TestCaseResult,
+  type TestCollection,
   type TestRunSession,
   type TestSelectionApplication,
+  type TestSelectionClientIdentity,
   type TracingContext,
 } from '@mergifyio/ci-core';
 import type {
@@ -30,6 +42,7 @@ import type {
   Reporter,
   Suite,
   TestCase,
+  TestError,
   TestResult,
 } from '@playwright/test/reporter';
 import * as playwrightResource from './resources/playwright.js';
@@ -48,6 +61,18 @@ import { readPluginVersion } from './version.js';
 
 const DEFAULT_API_URL = 'https://api.mergify.com';
 
+/** How the terminal block names this client, in the two sentences that do. */
+const CLIENT: TestSelectionClientIdentity = {
+  name: '@mergifyio/playwright',
+  docsUrl: 'https://docs.mergify.com/ci-insights/test-frameworks/playwright/',
+};
+
+/** One collected test, with the identity Mergify knows it by. */
+interface CollectedTest {
+  test: TestCase;
+  key: string;
+}
+
 /**
  * The slice of Playwright's `TestRun` this reporter uses, declared structurally
  * instead of imported. `TestRun` only exists in `@playwright/test` 1.62+, while
@@ -56,8 +81,107 @@ const DEFAULT_API_URL = 'https://api.mergify.com';
  */
 interface PlaywrightTestRun {
   exclude(test: TestCase | Suite): void;
-  /** Hands sharding to the reporter. Optional so a stub need not provide it. */
+  /**
+   * Hands sharding to the reporter: Playwright then runs whatever `exclude`
+   * left, without partitioning it. Optional so a stub need not provide it.
+   */
   skipSharding?(): void;
+}
+
+/**
+ * This leg's share of a sharded run, decided here rather than by Playwright.
+ *
+ * The selection is keyed on what a leg collected -- its fingerprint and count
+ * are what the engine matches the previous attempt's session on, and what it
+ * judges the session complete against. Playwright partitions AFTER
+ * `preprocess`, so the only moment the reporter can ask is a moment where it
+ * does not know Playwright's slice; and letting Playwright partition a served
+ * subset spreads one leg's failures over every leg, so that most of them are
+ * replayed by nobody. So once a leg asks, the partition is the reporter's on
+ * every attempt: the same collection, the same shard index, the same slice --
+ * which is what makes the fingerprint match.
+ *
+ * The unit is the file within a project (and a `repeatEach` index): a serial
+ * describe, a `beforeAll`, a worker-scoped fixture never span two files, so a
+ * partition that keeps files whole is one Playwright's own grouping would
+ * allow. The arithmetic is Playwright's `filterForShard` with equal weights:
+ * contiguous ranges of the collection, sized by the legs' weights
+ * (`PWTEST_SHARD_WEIGHTS`, colon-separated as Playwright reads it, equal by
+ * default) with the remainder on the first
+ * legs, and a unit assigned to the leg its first test falls in.
+ */
+export function shardSlice<T extends { unit: string }>(
+  entries: readonly T[],
+  shard: { current: number; total: number },
+  weights: readonly number[] = Array.from({ length: shard.total }, () => 1)
+): Set<T> {
+  // Playwright's `filterForShard`: each leg gets `floor(weight * total /
+  // totalWeight)` entries, the remainder one by one from the first leg on.
+  const totalWeight = weights.reduce((a, b) => a + b, 0);
+  const sizes = weights.map((w) => Math.floor((w * entries.length) / totalWeight));
+  const remainder = entries.length - sizes.reduce((a, b) => a + b, 0);
+  for (let i = 0; i < remainder; i++) sizes[i % sizes.length] += 1;
+  let from = 0;
+  for (let i = 0; i < shard.current - 1; i++) from += sizes[i];
+  const to = from + sizes[shard.current - 1];
+
+  // Units in collection order, each with the index of its first entry.
+  const firstIndex = new Map<string, number>();
+  entries.forEach((entry, index) => {
+    if (!firstIndex.has(entry.unit)) firstIndex.set(entry.unit, index);
+  });
+  const kept = new Set<T>();
+  for (const entry of entries) {
+    const start = firstIndex.get(entry.unit) ?? 0;
+    if (start >= from && start < to) kept.add(entry);
+  }
+  return kept;
+}
+
+/**
+ * The per-leg weights Playwright reads from `PWTEST_SHARD_WEIGHTS`, when they
+ * are well-formed for this run; undefined otherwise, which is equal weights.
+ * Playwright itself aborts the run on a count mismatch; here the partition is
+ * ours, so the same run keeps going on the default and says so.
+ */
+function shardWeights(total: number, log: (msg: string) => void): number[] | undefined {
+  const raw = process.env.PWTEST_SHARD_WEIGHTS;
+  if (!raw) return undefined;
+  // Playwright's own reading (`resolveShardWeightsOption`): colon-separated
+  // integers, zero allowed, negative or unparsable refused.
+  const weights = raw.split(':').map((w) => Number.parseInt(w, 10));
+  const totalWeight = weights.reduce((a, b) => a + b, 0);
+  if (
+    weights.length === total &&
+    weights.every((w) => !Number.isNaN(w) && w >= 0) &&
+    totalWeight > 0
+  ) {
+    return weights;
+  }
+  log(
+    `PWTEST_SHARD_WEIGHTS="${raw}" does not name ${total} non-negative weights; the legs are weighted equally`
+  );
+  return undefined;
+}
+
+/**
+ * Which unit of the partition a test belongs to. `test.location.file` rather
+ * than the file suite's title, which is relative and project-independent;
+ * the project keeps two projects' copies of one file apart, as Playwright's
+ * worker hash does.
+ */
+function shardUnit(test: TestCase): string {
+  return `${projectNameFromTest(test) ?? ''}\0${test.location?.file ?? ''}\0${test.repeatEachIndex ?? 0}`;
+}
+
+/**
+ * Playwright's own complaint about an empty suite (`loadTask`: "No tests
+ * found"), which an `empty` answer produces by design on an unsharded job.
+ * Matched on the message: the error carries no code, and it is the one
+ * run-level error the `empty` override may look past.
+ */
+function isNoTestsFound(error: TestError): boolean {
+  return /\bNo tests found\b/.test(error.message ?? '');
 }
 
 /**
@@ -131,14 +255,80 @@ export class MergifyReporter implements Reporter {
   // Reduced merge-queue reruns.
   /** Whether the running Playwright called `preprocess` — 1.62 and up do. */
   private preprocessCalled = false;
+  /**
+   * What this run collected -- the identity Mergify was asked with. Set
+   * exactly when the run asked, including when the answer was dormant or the
+   * request failed.
+   */
+  private collection: TestCollection | undefined;
   /** What `preprocess` decided, once it met the collection. Reported in onEnd. */
   private testSelection: TestSelectionApplication | undefined;
-  /** Memoised state file: `preprocess` needs it before `onBegin` reads it. */
+  /** The projects whose tests always run in full, read once in `preprocess`. */
+  private readonlyProjects = new Set<string>();
+  /** The suite as Playwright ran it. */
+  private rootSuite: Suite | undefined;
+  /**
+   * Run-level errors Playwright reported outside any test -- a global
+   * teardown that threw, a worker that died -- and the one it prints for an
+   * empty suite. Read by the `empty` override: a run that failed for one of
+   * these did not fail because Mergify emptied it.
+   */
+  private runErrors: TestError[] = [];
+  /** Memoised state file, read by `onBegin`. */
   private sharedState: SharedState | null | undefined;
+  /** Memoised so `preprocess` and `onBegin` build one client, not two. */
+  private apiClient: MergifyApiClient | null | undefined;
+  private runAttributes: SpanAttributes | undefined;
+  private runId: string | undefined;
 
   constructor(options?: MergifyReporterOptions) {
     this.options = options ?? {};
     this.includeProject = resolveIncludeProject();
+  }
+
+  /** `MERGIFY_TEST_RUN_ID` from globalSetup, or one minted here, once. */
+  private testRunId(): string {
+    this.runId ??= process.env.MERGIFY_TEST_RUN_ID ?? generateTestRunId();
+    return this.runId;
+  }
+
+  /** Whether this run reports to Mergify at all -- CI, an explicit opt-in, or an injected sink. */
+  private reportingEnabled(): boolean {
+    return (
+      isInCI() || envToBool(process.env.PLAYWRIGHT_MERGIFY_ENABLE, false) || !!this.options.sink
+    );
+  }
+
+  /**
+   * The backend client, built once from the injected one or from the
+   * environment. Null when there is no token, no detected repository, or no
+   * binding for this platform -- the fail-open path, on which every backend
+   * feature stays off.
+   */
+  private client(): MergifyApiClient | null {
+    if (this.apiClient === undefined) {
+      const token = this.options.token ?? process.env.MERGIFY_TOKEN;
+      const apiUrl = this.options.apiUrl ?? process.env.MERGIFY_API_URL ?? DEFAULT_API_URL;
+      const repoName = getRepoName();
+      this.apiClient =
+        this.options.apiClient ??
+        (token && repoName
+          ? createApiClient({
+              apiUrl,
+              token,
+              repoName,
+              clientName: '@mergifyio/playwright',
+              clientVersion: readPluginVersion(),
+            })
+          : null);
+    }
+    return this.apiClient;
+  }
+
+  /** The run's resource attributes, detected once: the selection is keyed on them. */
+  private attributes(): SpanAttributes {
+    this.runAttributes ??= detectResources(playwrightResource.detect(), this.testRunId());
+    return this.runAttributes;
   }
 
   /** Project-qualifier prefix for a test's identity, honoring the env flag. */
@@ -171,18 +361,21 @@ export class MergifyReporter implements Reporter {
   }
 
   /**
-   * Reduce this run to the tests Mergify says failed on the previous attempt.
+   * Ask Mergify what this run should execute, and make the run do it.
    *
    * `preprocess` is the only Playwright hook that sees the whole collection
    * while it can still be changed. It runs after `--project`, `--grep` and
    * `.only` have been applied — so the subset can only ever narrow what the
-   * user asked for, never widen it — and before Playwright shards, so the
-   * reduced set is what gets spread across a `--shard` matrix rather than each
-   * shard reducing its own slice.
+   * user asked for, never widen it — and before Playwright shards. It is also
+   * where the request is made: it carries the fingerprint of what this run
+   * collected, so it cannot happen before there is one. Playwright calls it
+   * from 1.62 onwards; older runners ignore the method entirely and run the
+   * full suite, and `onEnd` says so.
    *
-   * Playwright calls it from 1.62 onwards. Older runners ignore the method
-   * entirely and run the full suite; `onEnd` says so rather than leaving a user
-   * wondering why nothing was reduced.
+   * Nothing thrown here reaches Playwright: it would abort the whole run,
+   * the one outcome reduced reruns must never cause. A failure part-way
+   * through leaves tests un-excluded, which runs MORE than intended, never
+   * fewer.
    */
   async preprocess(params: {
     config: FullConfig;
@@ -196,46 +389,112 @@ export class MergifyReporter implements Reporter {
     // is not set yet — onBegin runs after this hook.
     if (process.env.MERGIFY_RERUN_FILE) return;
 
-    // The state file is a process boundary — global-setup writes JSON, which
-    // cannot carry the `ReadonlySet` the shared module works in. `readStateFile`
-    // owns both halves of that conversion, so what comes back here is already a
-    // `TestSelection` with a real Set.
-    const selection = this.loadSharedState()?.testSelection;
-    if (!selection) return;
+    // Opt-in, per job, and read before anything else: a job that has not
+    // asked makes no request at all (see `isTestSelectionEnabled`).
+    if (!isTestSelectionEnabled() || !this.reportingEnabled()) return;
 
     try {
-      // Setup/teardown project tests are readonly here and always run in full,
-      // so they take no part in the reduction on either side: kept out of the
-      // match, so they can never stand in for a real hit, and never excluded.
-      const readonlyProjects = readonlyProjectNames(params.suite);
-      const rootDir = params.config.rootDir ?? '';
-      const collected = params.suite
-        .allTests()
-        .filter((test) => !readonlyProjects.has(projectNameFromTest(test) ?? ''))
-        .map((test) => ({ test, key: this.testKey(test, rootDir) }));
-
-      const applied = applyToCollected(
-        selection,
-        collected.map((entry) => entry.key)
-      );
-      this.testSelection = applied;
-      if (applied.selection !== 'subset') {
-        this.coverForDivergentShards(applied, params);
-        return;
-      }
-
-      for (const { test, key } of collected) {
-        if (!applied.keep.has(key)) params.testRun.exclude(test);
-      }
+      await this.selectTests(params);
     } catch (err) {
-      // Letting this throw would abort the whole run — the one outcome reduced
-      // reruns must never cause. A failure part-way through the loop leaves the
-      // remaining tests un-excluded, which runs MORE tests than intended, never
-      // fewer.
       this.testSelection = undefined;
       process.stderr.write(
         `[@mergifyio/playwright] test selection could not be applied, tests it did not deselect will run: ${String(err)}\n`
       );
+    }
+  }
+
+  private async selectTests(params: {
+    config: FullConfig;
+    suite: Suite;
+    testRun: PlaywrightTestRun;
+  }): Promise<void> {
+    const client = this.client();
+    if (!client) return;
+    // The selection is keyed on the run's OWN identity: the head branch and
+    // revision (a merge-queue draft branch on reruns) plus the job coordinates
+    // — the exact values reported with each uploaded test. Without all four
+    // there is nothing the server can match.
+    const coordinates = resolveSelectionCoordinates(this.attributes());
+    if (!coordinates) return;
+
+    const log = (msg: string) => process.stderr.write(`[@mergifyio/playwright] ${msg}\n`);
+
+    // Setup/teardown project tests are readonly here and always run in full,
+    // so they take no part in the collection on either side: not in the
+    // fingerprint, never excluded.
+    this.readonlyProjects = readonlyProjectNames(params.suite);
+    const rootDir = params.config.rootDir ?? '';
+    let collected: CollectedTest[] = params.suite
+      .allTests()
+      .filter((test) => !this.readonlyProjects.has(projectNameFromTest(test) ?? ''))
+      .map((test) => ({ test, key: this.testKey(test, rootDir) }));
+
+    if (params.config.shard) {
+      if (typeof params.testRun.skipSharding !== 'function') {
+        log(
+          'this Playwright cannot hand sharding to a reporter; the shard runs without a test selection'
+        );
+        return;
+      }
+      // Throws when another reporter already took sharding over: caught by
+      // `preprocess`, and the run then executes whatever that reporter left.
+      params.testRun.skipSharding();
+      const slice = shardSlice(
+        collected.map((entry) => ({ ...entry, unit: shardUnit(entry.test) })),
+        params.config.shard,
+        shardWeights(params.config.shard.total, log)
+      );
+      const inSlice = new Set([...slice].map((entry) => entry.test));
+      for (const entry of collected) {
+        if (!inSlice.has(entry.test)) params.testRun.exclude(entry.test);
+      }
+      collected = collected.filter((entry) => inSlice.has(entry.test));
+    }
+
+    // Distinct identities, in collection order: with project prefixing off, a
+    // test collected in two browser projects is one identity the engine
+    // stores once, so it is one entry of the collection -- kept in every
+    // project on a subset, counted once everywhere.
+    const ids = [...new Set(collected.map((entry) => entry.key))];
+    const fingerprint = nativeTestCollectionFingerprint(ids);
+    if (fingerprint === null) {
+      log('the bundled binding cannot fingerprint the collection; the full suite runs');
+      return;
+    }
+    this.collection = { fingerprint, count: ids.length };
+
+    const selection = await fetchTestSelection(client, coordinates, log, fingerprint);
+    const application = applyToCollected(selection, ids);
+    this.testSelection = application;
+
+    switch (application.outcome) {
+      case 'refused':
+        // Deliberately not the degradation path. Everywhere else, a shape
+        // Mergify cannot resolve costs time and nothing else; here it is
+        // Mergify saying it holds several candidate predecessors for this
+        // job, which means one job name is standing for several runs. That
+        // keeps the reporting wrong for every future attempt, so it has to be
+        // seen and fixed rather than absorbed into a full run nobody notices.
+        // The message is the server's, printed now so it is the first thing
+        // in the log; the run is failed from `onEnd`.
+        process.stderr.write(
+          `${application.selection.message ?? fallbackRefusalMessage(CLIENT)}\n`
+        );
+        for (const entry of collected) params.testRun.exclude(entry.test);
+        return;
+      case 'empty':
+        // Excluding rather than skipping is what keeps the session the same
+        // shape as pytest-mergify's: no test ran, none is reported, and the
+        // session still uploads.
+        for (const entry of collected) params.testRun.exclude(entry.test);
+        return;
+      case 'subset':
+        for (const entry of collected) {
+          if (!application.keep.has(entry.key)) params.testRun.exclude(entry.test);
+        }
+        return;
+      case 'full':
+        return;
     }
   }
 
@@ -245,6 +504,7 @@ export class MergifyReporter implements Reporter {
 
   onBegin(config: FullConfig, suite: Suite): void {
     this.config = config;
+    this.rootSuite = suite;
 
     // Subprocess "rerun mode" — short-circuits the entire pipeline. The
     // parent reporter set `MERGIFY_RERUN_FILE` to the path of a JSONL file
@@ -258,28 +518,12 @@ export class MergifyReporter implements Reporter {
       return;
     }
 
-    const envId = process.env.MERGIFY_TEST_RUN_ID;
-    const testRunId = envId ?? generateTestRunId();
-    const token = this.options.token ?? process.env.MERGIFY_TOKEN;
-    const apiUrl = this.options.apiUrl ?? process.env.MERGIFY_API_URL ?? DEFAULT_API_URL;
-    const repoName = getRepoName();
-
-    const enabled =
-      isInCI() || envToBool(process.env.PLAYWRIGHT_MERGIFY_ENABLE, false) || !!this.options.sink;
+    const testRunId = this.testRunId();
+    const enabled = this.reportingEnabled();
 
     // The reporter only uploads: quarantine and the flaky context were already
     // fetched in globalSetup and reach it through the state file.
-    const apiClient =
-      this.options.apiClient ??
-      (token && repoName
-        ? createApiClient({
-            apiUrl,
-            token,
-            repoName,
-            clientName: '@mergifyio/playwright',
-            clientVersion: readPluginVersion(),
-          })
-        : null);
+    const apiClient = this.client();
 
     if (enabled) {
       this.tracing = createTracing({
@@ -291,15 +535,25 @@ export class MergifyReporter implements Reporter {
     }
 
     if (!this.tracing && enabled) {
-      if (!token) {
+      if (!(this.options.token ?? process.env.MERGIFY_TOKEN)) {
         process.stderr.write(
           '[@mergifyio/playwright] MERGIFY_TOKEN not set, skipping CI Insights reporting\n'
         );
-      } else if (!repoName) {
+      } else if (!getRepoName()) {
         process.stderr.write(
           '[@mergifyio/playwright] Could not detect repository name, skipping CI Insights reporting\n'
         );
       }
+    }
+
+    // What the run collected, and what Mergify made of it, travel on the
+    // session's resource -- the fingerprint and count on every run that asked,
+    // the answer only when Mergify actually answered.
+    if (this.tracing && this.collection) {
+      Object.assign(
+        this.tracing.resourceAttributes,
+        selectionResourceAttributes(this.collection, this.echo())
+      );
     }
 
     let flakyContext: FlakyDetectionContext | null = null;
@@ -327,6 +581,10 @@ export class MergifyReporter implements Reporter {
       const allTestNames = suite.allTests().map((tc) => this.testKey(tc, config.rootDir ?? ''));
       this.flakyDetector = new FlakyDetector(flakyContext, this.flakyMode, allTestNames);
     }
+  }
+
+  onError(error: TestError): void {
+    this.runErrors.push(error);
   }
 
   onTestEnd(test: TestCase, result: TestResult): void {
@@ -448,18 +706,15 @@ export class MergifyReporter implements Reporter {
     }
   }
 
-  async onEnd(result: FullResult): Promise<void> {
+  async onEnd(result: FullResult): Promise<{ status?: FullResult['status'] } | undefined> {
     // Rerun mode: nothing to do — outcomes were appended in onTestEnd.
     if (this.rerunFile) return;
 
     if (!this.session) return;
 
+    const runStatus = this.finalRunStatus(result.status);
     const reason: 'passed' | 'failed' | 'interrupted' =
-      result.status === 'passed'
-        ? 'passed'
-        : result.status === 'interrupted'
-          ? 'interrupted'
-          : 'failed';
+      runStatus === 'passed' ? 'passed' : runStatus === 'interrupted' ? 'interrupted' : 'failed';
 
     this.session.endTime = Date.now();
     this.session.status = reason;
@@ -563,61 +818,65 @@ export class MergifyReporter implements Reporter {
         process.stderr.write(`[@mergifyio/playwright] Failed to flush spans: ${detail}\n`);
       }
     }
+
+    return runStatus === result.status ? undefined : { status: runStatus };
   }
 
   /**
-   * Take over sharding when this shard could not reduce but its siblings could.
+   * The status the run ends with, once the selection has had its say.
    *
-   * `--shard=i/N` is N separate processes, each fetching its own selection, and
-   * Playwright partitions the collection *after* `preprocess`. So a shard whose
-   * fetch failed partitions the FULL list while its siblings partition the
-   * reduced one: the reduced slice this shard was responsible for is then run by
-   * nobody, and every shard exits green. Reproduced on Playwright 1.62 — two
-   * shards, a served subset of two, one shard 500ing: one previously-failing
-   * test was executed by neither, both exit 0.
-   *
-   * `skipSharding()` makes this shard run the whole suite instead of its slice,
-   * so the union covers everything again. Bounded waste in exchange for no
-   * coverage hole — the same trade the ticket makes for a CI matrix.
-   *
-   * Only on the failure path. A *served* `full` is deterministic for a given run
-   * identity, so every shard agrees and the partitions already line up; firing
-   * here would make every ordinary build run its suite N times over.
+   * A refusal fails the run whatever Playwright made of the empty suite it
+   * was left -- green on a shard, "No tests found" otherwise. An `empty`
+   * answer is the opposite: the run executed nothing because Mergify asked
+   * for exactly that, so Playwright's "No tests found" is turned into a pass
+   * -- but only that. A setup project test that ran and failed by
+   * Playwright's own reading (`ok()`, and `failOnFlakyTests`) keeps the run
+   * red; so does an interruption, and so does any run-level error other than
+   * "No tests found" itself -- a global teardown still runs on an emptied
+   * suite, and its failure reaches the reporter through `onError` alone.
    */
-  private coverForDivergentShards(
-    applied: TestSelectionApplication,
-    params: { config: FullConfig; testRun: PlaywrightTestRun }
-  ): void {
-    if (applied.reason !== 'fetch_failed' || !params.config.shard) return;
-    if (typeof params.testRun.skipSharding !== 'function') return;
-    params.testRun.skipSharding();
-    process.stderr.write(
-      '[@mergifyio/playwright] the test selection could not be fetched during a sharded run; ' +
-        'this shard runs the whole suite so no previously-failing test is missed by every shard.\n'
-    );
+  private finalRunStatus(reported: FullResult['status']): FullResult['status'] {
+    const outcome = this.testSelection?.outcome;
+    if (outcome === 'refused') return 'failed';
+    if (
+      outcome === 'empty' &&
+      reported === 'failed' &&
+      this.testSelection!.deselectedCount > 0 &&
+      this.runErrors.every(isNoTestsFound) &&
+      !this.rootSuite?.allTests().some((test) => !test.ok()) &&
+      !(
+        this.config?.failOnFlakyTests &&
+        this.rootSuite?.allTests().some((t) => t.outcome() === 'flaky')
+      )
+    ) {
+      return 'passed';
+    }
+    return reported;
+  }
+
+  private echo() {
+    return this.testSelection ? selectionEcho(this.testSelection) : undefined;
   }
 
   /**
    * Say what the reduction did, or why it did not happen.
    *
-   * Silence is reserved for "we never asked" (feature off, dormant repository,
-   * incomplete run identity). Once a selection was served, the run reports what
-   * it made of it — including a subset dropped because none of its names is in
+   * Silence is reserved for "we never asked" (feature off, no client,
+   * incomplete run identity). Once the run asked, it reports what it made of
+   * the answer — including a subset dropped because its names are not all in
    * this collection, which is the case a user most needs to see.
    */
   private reportTestSelection(): void {
     if (this.testSelection) {
-      process.stderr.write(
-        `[@mergifyio/playwright] ${formatTestSelectionReport(this.testSelection)}`
-      );
+      process.stderr.write(formatTestSelectionReport(this.testSelection, CLIENT));
       return;
     }
-    // A served subset with no `preprocess` behind it: this Playwright is older
-    // than 1.62 and never offered the hook. The suite ran in full, correctly,
-    // but the user should know why nothing was reduced.
-    if (!this.preprocessCalled && this.loadSharedState()?.testSelection?.selection === 'subset') {
+    // The job opted in and no `preprocess` ran: this Playwright is older than
+    // 1.62 and never offered the hook. The suite ran in full, correctly, but
+    // the user should know why nothing was reduced.
+    if (!this.preprocessCalled && isTestSelectionEnabled() && this.reportingEnabled()) {
       process.stderr.write(
-        '[@mergifyio/playwright] Mergify served a reduced rerun, but this Playwright does not support ' +
+        '[@mergifyio/playwright] this job asked for Mergify Test Selection, but this Playwright does not support ' +
           'Reporter.preprocess() (added in 1.62) — the full test suite ran. Upgrade @playwright/test to reduce reruns.\n'
       );
     }
@@ -767,6 +1026,14 @@ export class MergifyReporter implements Reporter {
 
   getSession(): TestRunSession | undefined {
     return this.session;
+  }
+
+  /** Test hook: what the run collected and what it was told. */
+  getTestSelection(): {
+    collection: TestCollection | undefined;
+    application: TestSelectionApplication | undefined;
+  } {
+    return { collection: this.collection, application: this.testSelection };
   }
 
   /** Test hook: exposes the flaky-detection candidates the reporter is tracking. */
