@@ -99,6 +99,9 @@ def install_fake_api_client(
     flaky_error: typing.Optional[str] = None,
     test_selection_error: typing.Optional[str] = None,
     test_selection_calls: typing.Optional[typing.List[typing.Dict[str, str]]] = None,
+    session_verdict_error: typing.Optional[str] = None,
+    session_verdict_receipt: typing.Optional[typing.Dict[str, typing.Any]] = None,
+    session_verdicts: typing.Optional[typing.List[typing.Dict[str, typing.Any]]] = None,
 ) -> None:
     """Replace the binding's `CiApiClient` with a fake returning injected data.
 
@@ -152,6 +155,15 @@ def install_fake_api_client(
             if test_selection_error is not None:
                 raise RuntimeError(test_selection_error)
             return test_selection
+
+        def send_session_verdict(
+            self, verdict: typing.Dict[str, typing.Any]
+        ) -> typing.Optional[typing.Dict[str, typing.Any]]:
+            if session_verdicts is not None:
+                session_verdicts.append(verdict)
+            if session_verdict_error is not None:
+                raise RuntimeError(session_verdict_error)
+            return session_verdict_receipt
 
     monkeypatch.setattr(_mergify_ci, "CiApiClient", _FakeApiClient)
 
@@ -351,6 +363,12 @@ class _OTLPServer(socketserver.TCPServer):
 
     def __init__(self, *args: typing.Any, **kwargs: typing.Any) -> None:
         self.bodies: typing.List[bytes] = []
+        # Every request's path in arrival order, so a test can say which of
+        # the two documents the plugin sent first.
+        self.posted_paths: typing.List[str] = []
+        self.session_verdicts: typing.List[typing.Dict[str, typing.Any]] = []
+        self.session_verdict_status: int = 200
+        self.trace_status: int = 200
         self.test_selection: typing.Optional[typing.Dict[str, typing.Any]] = None
         super().__init__(*args, **kwargs)
 
@@ -362,9 +380,22 @@ class _OTLPRequestHandler(http.server.BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
         if self.headers.get("Content-Encoding") == "gzip":
             body = gzip.decompress(body)
+        path = self.path.split("?")[0]
+        self.server.posted_paths.append(path)
+
+        if path.endswith("/test-session-verdicts"):
+            # Its own store: a verdict is JSON, and feeding it to the protobuf
+            # parser below would make `batches` lie about what was uploaded.
+            self.server.session_verdicts.append(json.loads(body))
+            self.send_response(self.server.session_verdict_status)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"{}")
+            return
+
         self.server.bodies.append(body)
 
-        self.send_response(200)
+        self.send_response(self.server.trace_status)
         self.send_header("Content-Type", "application/x-protobuf")
         self.end_headers()
 
@@ -408,6 +439,24 @@ class OTLPCollector:
     def serve_test_selection(self, payload: typing.Dict[str, typing.Any]) -> None:
         """Answer the test-selection endpoint with `payload` from now on."""
         self._server.test_selection = payload
+
+    def refuse_session_verdicts(self, status: int) -> None:
+        """Answer every session verdict with `status` from now on."""
+        self._server.session_verdict_status = status
+
+    def refuse_traces(self, status: int) -> None:
+        """Answer every trace upload with `status` from now on."""
+        self._server.trace_status = status
+
+    @property
+    def session_verdicts(self) -> typing.List[typing.Dict[str, typing.Any]]:
+        """The verdict bodies received, decoded, in arrival order."""
+        return list(self._server.session_verdicts)
+
+    @property
+    def posted_paths(self) -> typing.List[str]:
+        """The path of every POST, in arrival order."""
+        return list(self._server.posted_paths)
 
     @property
     def batches(self) -> typing.List[UploadedBatch]:

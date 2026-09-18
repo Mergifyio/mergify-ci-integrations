@@ -9,8 +9,8 @@
 use std::collections::BTreeMap;
 
 use mergify_ci_api::{
-    ApiConfig, AttrValue, Client, ClientInfo, FlakyDetectionContext, Mode, Outcome, SpanData,
-    SpanStatus, TestSelection, budget,
+    ApiConfig, AttrValue, Client, ClientInfo, FlakyDetectionContext, Mode, Outcome, SessionVerdict,
+    SessionVerdictSelection, SpanData, SpanStatus, TestSelection, budget,
 };
 use mergify_ci_core::{AttrValue as CoreAttrValue, CiContext};
 use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyTypeError, PyValueError};
@@ -60,7 +60,8 @@ fn detect_attributes(py: Python<'_>) -> PyResult<Py<PyDict>> {
 /// each call drives the future to completion on an owned single-threaded
 /// runtime with the GIL released (`Python::detach`). Fetches resolve to a
 /// value, `None` when the feature is not enabled for the repository, or raise
-/// `RuntimeError` on a genuine failure. Trace upload fails loud.
+/// `RuntimeError` on a genuine failure. Trace upload fails loud; the session
+/// verdict, sent before it, follows the fetches' rule.
 #[pyclass]
 struct CiApiClient {
     runtime: tokio::runtime::Runtime,
@@ -140,6 +141,40 @@ impl CiApiClient {
         });
         match outcome {
             Outcome::Ready(selection) => Ok(Some(test_selection_dict(py, &selection)?)),
+            Outcome::Dormant => Ok(None),
+            Outcome::Failed(message) => Err(PyRuntimeError::new_err(message)),
+        }
+    }
+
+
+    /// Send the session verdict, the document Test Selection answers the next
+    /// merge-queue rerun from. Sent BEFORE `upload_trace`, so it never waits
+    /// behind the upload's timeout and retries.
+    ///
+    /// `verdict` is a dict shaped like the wire body (see `SessionVerdict` in
+    /// mergify-ci-api): the run coordinates, the collection fingerprint and
+    /// count, the five counts, `failing_tests` and
+    /// `quarantined_failing_tests` as lists of node ids, and an optional
+    /// `selection` dict (`answer`, `reason`, `kept_count`, optional
+    /// `not_applied_reason`). Returns `{"truncated": bool}` once the engine
+    /// has it -- `truncated` when the ids did not fit the request bound and
+    /// only the counts went out -- or `None` when the feature is not enabled
+    /// for the repository. Raises `RuntimeError` on a failure the plugin
+    /// should report; it never fails the run.
+    fn send_session_verdict(
+        &self,
+        py: Python<'_>,
+        verdict: &Bound<'_, PyDict>,
+    ) -> PyResult<Option<Py<PyDict>>> {
+        let verdict = verdict_from_dict(verdict)?;
+        let outcome =
+            py.detach(|| self.runtime.block_on(self.client.send_session_verdict(verdict)));
+        match outcome {
+            Outcome::Ready(receipt) => {
+                let dict = PyDict::new(py);
+                dict.set_item("truncated", receipt.truncated)?;
+                Ok(Some(dict.into()))
+            }
             Outcome::Dormant => Ok(None),
             Outcome::Failed(message) => Err(PyRuntimeError::new_err(message)),
         }
@@ -345,6 +380,49 @@ fn context_from_dict(dict: &Bound<'_, PyDict>) -> PyResult<FlakyDetectionContext
         max_test_name_length: req_item(dict, "max_test_name_length")?.extract()?,
         min_budget_duration_ms: req_item(dict, "min_budget_duration_ms")?.extract()?,
         min_test_execution_count: req_item(dict, "min_test_execution_count")?.extract()?,
+    })
+}
+
+/// Marshal the plugin's verdict dict into the wire model. Every required key
+/// is a `KeyError` here rather than a 422 from the engine: the dict is built
+/// by our own code, so a missing key is a plugin bug and should read as one.
+fn verdict_from_dict(dict: &Bound<'_, PyDict>) -> PyResult<SessionVerdict> {
+    let selection = match opt_item(dict, "selection")? {
+        Some(value) => {
+            let selection = value.cast::<PyDict>()?;
+            Some(SessionVerdictSelection {
+                answer: req_item(selection, "answer")?.extract()?,
+                reason: req_item(selection, "reason")?.extract()?,
+                kept_count: req_item(selection, "kept_count")?.extract()?,
+                not_applied_reason: opt_item(selection, "not_applied_reason")?
+                    .map(|value| value.extract())
+                    .transpose()?,
+            })
+        }
+        None => None,
+    };
+    Ok(SessionVerdict {
+        test_run_id: req_item(dict, "test_run_id")?.extract()?,
+        head_sha: req_item(dict, "head_sha")?.extract()?,
+        head_branch: opt_item(dict, "head_branch")?.map(|value| value.extract()).transpose()?,
+        pipeline_name: req_item(dict, "pipeline_name")?.extract()?,
+        job_name: req_item(dict, "job_name")?.extract()?,
+        // A string on the wire whatever the provider reports -- GitHub's run
+        // id is an integer, Jenkins' a string -- so `str()` it here rather
+        // than making the plugin know which it has.
+        run_id: opt_item(dict, "run_id")?.map(|value| value.str()?.extract()).transpose()?,
+        run_attempt: opt_item(dict, "run_attempt")?.map(|value| value.extract()).transpose()?,
+        collection_fingerprint: req_item(dict, "collection_fingerprint")?.extract()?,
+        collection_count: req_item(dict, "collection_count")?.extract()?,
+        executed_count: req_item(dict, "executed_count")?.extract()?,
+        passed_count: req_item(dict, "passed_count")?.extract()?,
+        failed_count: req_item(dict, "failed_count")?.extract()?,
+        skipped_count: req_item(dict, "skipped_count")?.extract()?,
+        total_test_runtime_ms: req_item(dict, "total_test_runtime_ms")?.extract()?,
+        failing_tests: req_item(dict, "failing_tests")?.extract()?,
+        quarantined_failing_tests: req_item(dict, "quarantined_failing_tests")?.extract()?,
+        failing_tests_truncated: false,
+        selection,
     })
 }
 

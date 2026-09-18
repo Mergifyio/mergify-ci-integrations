@@ -11,15 +11,26 @@ use crate::config::{ApiConfig, ClientInfo};
 use crate::models::{FlakyDetectionContext, QuarantinePage, TestSelection};
 use crate::outcome::Outcome;
 use crate::trace::{self, AttrValue, MAX_GZIPPED_UPLOAD_BYTES, SpanData, UploadError};
+use crate::verdict::{MAX_GZIPPED_VERDICT_BYTES, SessionVerdict, SessionVerdictReceipt};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(30);
+/// Per attempt, for the session verdict. The upload's 30 s rather than the
+/// fetches' 10 s: the body is a few hundred bytes on a green session, but a
+/// session with 2 M failing tests sends 21.6 MB, which 10 s only fits on a
+/// 17 Mbit/s uplink; 30 s asks for 6. Worst case at session end with the API
+/// accepting connections and never answering: 6 x 30 s + 31 s of backoff =
+/// 211 s — the figure the trace upload already had, now ahead of it, and
+/// once more should the full body be refused as too large and the truncated
+/// one sent after it.
+const VERDICT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Trace-upload retry schedule: one initial attempt plus `max_attempts - 1`
-/// retries, each backing off `base_delay` doubled per retry. The default
-/// approximates the OTLP exporter pytest-mergify used — six attempts with
-/// 1s/2s/4s/8s/16s backoff (~31s total) — so a briefly-degraded backend is
-/// ridden out rather than failing the run fast. Tests shrink `base_delay`.
+/// Upload retry schedule, shared by the trace upload and the session verdict:
+/// one initial attempt plus `max_attempts - 1` retries, each backing off
+/// `base_delay` doubled per retry. The default approximates the OTLP exporter
+/// pytest-mergify used — six attempts with 1s/2s/4s/8s/16s backoff (~31s
+/// total) — so a briefly-degraded backend is ridden out rather than failing
+/// the run fast. Tests shrink `base_delay`.
 #[derive(Clone, Copy)]
 struct RetryPolicy {
     max_attempts: u32,
@@ -293,40 +304,154 @@ impl Client {
     }
 
     async fn post_trace(&self, url: &str, compressed: Vec<u8>) -> Result<(), UploadError> {
-        // Retry transient failures (connection blips, request timeout, any 5xx)
-        // with exponential backoff before failing loud, restoring the behavior
-        // of the OTLP exporter this replaced. A permanent status (4xx other than
-        // 408) surfaces immediately.
+        match self
+            .post_gzipped(url, "application/x-protobuf", UPLOAD_TIMEOUT, &compressed)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(PostFailure::Status { status, body }) => {
+                Err(UploadError { status: Some(status.as_u16()), message: body })
+            }
+            Err(PostFailure::Transport(error)) => {
+                Err(UploadError { status: None, message: error.to_string() })
+            }
+        }
+    }
+
+    /// Send the session's verdict — what it concluded, for Test Selection to
+    /// answer the next rerun from — as gzipped JSON, with the same retry
+    /// schedule as the trace upload.
+    ///
+    /// Fail-open like the fetches, because the verdict is an input to a
+    /// feature the repository may not have: a `402`/`404` → dormant, silently;
+    /// any other failure → [`Outcome::Failed`] with a message for the report.
+    /// Never an `Err`: a verdict that did not land costs the next rerun its
+    /// reduction, never the run its result.
+    ///
+    /// The ids are sorted before compression; a body still over
+    /// [`MAX_GZIPPED_VERDICT_BYTES`] — or one the server refuses with a `413`,
+    /// whatever its bound turns out to be — goes out again with the counts
+    /// and no ids ([`SessionVerdict::truncate`]), which the receipt says.
+    pub async fn send_session_verdict(
+        &self,
+        verdict: SessionVerdict,
+    ) -> Outcome<SessionVerdictReceipt> {
+        self.send_verdict_with_cap(verdict, MAX_GZIPPED_VERDICT_BYTES).await
+    }
+
+    async fn send_verdict_with_cap(
+        &self,
+        mut verdict: SessionVerdict,
+        cap: usize,
+    ) -> Outcome<SessionVerdictReceipt> {
+        let url = self.endpoint("test-session-verdicts");
+        let mut compressed = match verdict.compress() {
+            Ok(compressed) => compressed,
+            Err(error) => return Outcome::Failed(format!("failed to gzip the verdict: {error}")),
+        };
+        let mut truncated = false;
+        if compressed.len() > cap {
+            verdict.truncate();
+            compressed = match verdict.compress() {
+                Ok(compressed) => compressed,
+                Err(error) => {
+                    return Outcome::Failed(format!("failed to gzip the verdict: {error}"));
+                }
+            };
+            truncated = true;
+        }
+
+        loop {
+            match self.post_gzipped(&url, "application/json", VERDICT_TIMEOUT, &compressed).await {
+                Ok(_) => return Outcome::Ready(SessionVerdictReceipt { truncated }),
+                Err(PostFailure::Status { status, .. })
+                    if status == StatusCode::NOT_FOUND || status == StatusCode::PAYMENT_REQUIRED =>
+                {
+                    return Outcome::Dormant;
+                }
+                // The server's bound is not the one this client knows (an
+                // ingress in front of it, an older engine): send what does fit,
+                // once. A second 413 on a body of a few hundred bytes is a
+                // failure like any other.
+                Err(PostFailure::Status { status, .. })
+                    if status == StatusCode::PAYLOAD_TOO_LARGE && !truncated =>
+                {
+                    verdict.truncate();
+                    compressed = match verdict.compress() {
+                        Ok(compressed) => compressed,
+                        Err(error) => {
+                            return Outcome::Failed(format!(
+                                "failed to gzip the verdict: {error}"
+                            ));
+                        }
+                    };
+                    truncated = true;
+                }
+                Err(PostFailure::Status { status, body }) => {
+                    return Outcome::Failed(format!(
+                        "{}: {body}",
+                        http_status_message(status)
+                    ));
+                }
+                Err(PostFailure::Transport(error)) => {
+                    return Outcome::Failed(describe_error(&error));
+                }
+            }
+        }
+    }
+
+    /// POST a gzipped body, retrying transient failures (connection blips,
+    /// request timeout, any 5xx) with exponential backoff before failing,
+    /// restoring the behavior of the OTLP exporter this replaced. A permanent
+    /// status (4xx other than 408) surfaces immediately, with the response
+    /// body as its message.
+    async fn post_gzipped(
+        &self,
+        url: &str,
+        content_type: &str,
+        timeout: Duration,
+        compressed: &[u8],
+    ) -> Result<reqwest::Response, PostFailure> {
         let mut attempt: u32 = 1;
         loop {
             let last_attempt = attempt >= self.retry.max_attempts;
             match self
                 .http
                 .post(url)
-                .timeout(UPLOAD_TIMEOUT)
+                .timeout(timeout)
                 .bearer_auth(&self.config.token)
-                .header("Content-Type", "application/x-protobuf")
+                .header("Content-Type", content_type)
                 .header("Content-Encoding", "gzip")
-                .body(compressed.clone())
+                .body(compressed.to_vec())
                 .send()
                 .await
             {
-                Ok(response) if response.status().is_success() => return Ok(()),
+                Ok(response) if response.status().is_success() => return Ok(response),
                 Ok(response) if is_retryable_status(response.status()) && !last_attempt => {}
                 Ok(response) => {
-                    let status = response.status().as_u16();
+                    let status = response.status();
                     let body = response.text().await.unwrap_or_else(|error| {
                         format!("<could not read response body: {error}>")
                     });
-                    return Err(UploadError { status: Some(status), message: body });
+                    return Err(PostFailure::Status { status, body });
                 }
                 Err(_error) if !last_attempt => {}
-                Err(error) => return Err(UploadError { status: None, message: error.to_string() }),
+                Err(error) => return Err(PostFailure::Transport(error)),
             }
             tokio::time::sleep(self.retry.base_delay * 2u32.pow(attempt - 1)).await;
             attempt += 1;
         }
     }
+}
+
+/// How a POST ended when it did not succeed, before each caller turns it into
+/// its own error type.
+enum PostFailure {
+    /// The server answered with a status no retry fixes (or the retries ran
+    /// out on one), and this is what it said.
+    Status { status: StatusCode, body: String },
+    /// No usable answer: connection, timeout, TLS.
+    Transport(reqwest::Error),
 }
 
 /// Whether an HTTP status is worth retrying: request timeout or any 5xx — the
@@ -377,6 +502,7 @@ fn describe_error(error: &reqwest::Error) -> String {
 mod tests {
     use super::*;
     use crate::trace::SpanStatus;
+    use crate::verdict::tests::{decode as decode_verdict, verdict};
     use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -768,6 +894,186 @@ mod tests {
         assert_eq!(error.status, Some(503));
         // One initial attempt plus five retries (the default `max_attempts`).
         assert_eq!(server.received_requests().await.unwrap().len(), 6);
+    }
+
+
+    const VERDICTS: &str = "/v1/ci/o/repositories/r/test-session-verdicts";
+
+    async fn verdict_bodies(server: &MockServer) -> Vec<serde_json::Value> {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == VERDICTS)
+            .map(|request| decode_verdict(&request.body))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn verdict_posts_gzipped_json_to_the_verdicts_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(VERDICTS))
+            .and(header("content-type", "application/json"))
+            .and(header("content-encoding", "gzip"))
+            .and(header("authorization", "Bearer tok"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 1, "outcome": "recorded",
+            })))
+            .mount(&server)
+            .await;
+        let client = build_client(&server.uri());
+        let receipt = client.send_session_verdict(verdict()).await.into_ready().expect("ready");
+        assert!(!receipt.truncated);
+        let bodies = verdict_bodies(&server).await;
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0]["failing_tests"], serde_json::json!(["t::b"]));
+        assert_eq!(bodies[0]["failing_tests_truncated"], false);
+    }
+
+    #[tokio::test]
+    async fn verdict_dormant_on_404_and_402() {
+        for status in [404, 402] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path(VERDICTS))
+                .respond_with(ResponseTemplate::new(status))
+                .mount(&server)
+                .await;
+            let client = build_client(&server.uri());
+            assert!(client.send_session_verdict(verdict()).await.is_dormant(), "{status}");
+            // A dormant answer is final: no retry, no truncated resend.
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn verdict_over_the_cap_is_sent_with_its_counts_and_no_ids() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(VERDICTS))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let client = build_client(&server.uri());
+        // A 1-byte cap: every body with ids is over it.
+        let receipt =
+            client.send_verdict_with_cap(verdict(), 1).await.into_ready().expect("ready");
+        assert!(receipt.truncated);
+        let bodies = verdict_bodies(&server).await;
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0]["failing_tests"], serde_json::json!([]));
+        assert_eq!(bodies[0]["quarantined_failing_tests"], serde_json::json!([]));
+        assert_eq!(bodies[0]["failing_tests_truncated"], true);
+        // The counts are what the engine still gets.
+        assert_eq!(bodies[0]["failed_count"], 2);
+    }
+
+    #[tokio::test]
+    async fn verdict_refused_as_too_large_is_resent_truncated_once() {
+        let server = MockServer::start().await;
+        // The server's bound is below ours: the first, full body is refused.
+        Mock::given(method("POST"))
+            .and(path(VERDICTS))
+            .respond_with(ResponseTemplate::new(413))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(VERDICTS))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let client = build_client(&server.uri());
+        let receipt = client.send_session_verdict(verdict()).await.into_ready().expect("ready");
+        assert!(receipt.truncated);
+        let bodies = verdict_bodies(&server).await;
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies[0]["failing_tests_truncated"], false);
+        assert_eq!(bodies[1]["failing_tests_truncated"], true);
+        assert_eq!(bodies[1]["failing_tests"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn verdict_refused_as_too_large_twice_is_a_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(VERDICTS))
+            .respond_with(ResponseTemplate::new(413).set_body_string("too big"))
+            .mount(&server)
+            .await;
+        let client = build_client(&server.uri());
+        let outcome = client.send_session_verdict(verdict()).await;
+        assert_eq!(outcome.failure(), Some("Mergify API returned HTTP 413: too big"));
+        // Full, then truncated, then nothing more.
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn verdict_surfaces_a_permanent_rejection_with_its_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(VERDICTS))
+            .respond_with(ResponseTemplate::new(422).set_body_string("failed_count exceeds"))
+            .mount(&server)
+            .await;
+        let client = build_client(&server.uri());
+        let outcome = client.send_session_verdict(verdict()).await;
+        assert_eq!(
+            outcome.failure(),
+            Some("Mergify API returned HTTP 422: failed_count exceeds")
+        );
+        // A permanent status is not retried.
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn verdict_retries_transient_failures_then_succeeds() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(VERDICTS))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(VERDICTS))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let mut client = build_client(&server.uri());
+        client.retry.base_delay = Duration::from_millis(1);
+        assert!(client.send_session_verdict(verdict()).await.into_ready().is_some());
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn verdict_fails_after_exhausting_retries_on_5xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(VERDICTS))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        let mut client = build_client(&server.uri());
+        client.retry.base_delay = Duration::from_millis(1);
+        let outcome = client.send_session_verdict(verdict()).await;
+        assert!(outcome.failure().unwrap().starts_with("Mergify API returned HTTP 503"));
+        // One initial attempt plus five retries, the schedule the upload has.
+        assert_eq!(server.received_requests().await.unwrap().len(), 6);
+    }
+
+    #[tokio::test]
+    async fn verdict_fails_on_transport_error_without_touching_the_run() {
+        // Nothing listens: every attempt is refused at the socket. Never an
+        // `Err` -- the caller reports the message and the run goes on.
+        let mut client = build_client("http://127.0.0.1:1");
+        client.retry.base_delay = Duration::from_millis(1);
+        let outcome = client.send_session_verdict(verdict()).await;
+        assert!(outcome.failure().unwrap().starts_with("Mergify API request failed"));
     }
 
     #[tokio::test]
