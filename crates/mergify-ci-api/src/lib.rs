@@ -17,12 +17,16 @@
 //! - [`Outcome`]: the tri-state every backend fetch resolves to.
 //! - [`Client`]: the async client — fail-open quarantine/flaky fetches
 //!   (resolving to an [`Outcome`]) plus fail-loud trace upload
-//!   ([`Client::upload_trace`]).
+//!   ([`Client::upload_trace`]) and the fail-open session verdict
+//!   ([`Client::send_session_verdict`]).
 //! - [`budget`]: the flaky-detection budget engine — the pure arithmetic
 //!   (test selection, budget, per-test time shares) ported for cross-client
 //!   parity.
 //! - [`SpanData`] / [`AttrValue`]: the plain span data handed in for OTLP
 //!   trace export (no live `OpenTelemetry` objects cross the boundary).
+//! - [`SessionVerdict`]: what a session concluded — its identity, counts and
+//!   final failing ids — written to Mergify before the trace upload so Test
+//!   Selection can answer the next rerun without waiting on trace ingestion.
 //!
 //! The language bindings land in a later slice.
 
@@ -33,6 +37,7 @@ mod config;
 mod models;
 mod outcome;
 mod trace;
+mod verdict;
 
 pub use budget::{BudgetPlan, Mode};
 pub use client::Client;
@@ -40,3 +45,6 @@ pub use config::{ApiConfig, ClientInfo, DEFAULT_API_URL, split_full_name};
 pub use models::{FlakyDetectionContext, QuarantinePage, QuarantinedTest, TestSelection};
 pub use outcome::Outcome;
 pub use trace::{AttrValue, MAX_GZIPPED_UPLOAD_BYTES, SpanData, SpanStatus, UploadError};
+pub use verdict::{
+    MAX_GZIPPED_VERDICT_BYTES, SessionVerdict, SessionVerdictReceipt, SessionVerdictSelection,
+};

@@ -11,6 +11,9 @@ description = "Shared Mergify backend API client + trace export for test-client 
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+# The session verdict is JSON on the wire (`verdict.rs`); the responses are
+# decoded by reqwest's own `json` feature.
+serde_json = "1"
 # Async HTTP: rustls (no system OpenSSL) so the wheels/gems stay portable.
 # `query` is a feature of its own since 0.13; the URL builder needs it.
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
