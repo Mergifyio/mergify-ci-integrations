@@ -22,7 +22,7 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "que
 webpki-root-certs = "1"
 # OTLP trace export by hand — the prost messages only, no tonic/grpc transport
 # and no opentelemetry-otlp SDK (matches mergify-cli's uploader).
-opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic-messages", "trace"] }
+opentelemetry-proto = { version = "0.33", default-features = false, features = ["gen-tonic-messages", "trace"] }
 prost = "0.14"
 flate2 = "1"
 # `time` only: the trace-upload retry backs off between attempts. The driver is
