@@ -152,7 +152,7 @@ jobs:
       # Installs pnpm as a native binary and the runtime with it, so there is
       # no separate actions/setup-node, and runs the frozen install itself.
       # The version comes from devEngines.runtime in clients/ts/package.json.
-      - uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
+      - uses: pnpm/setup@fbda4c85fc2e1e08721cd8763afea8f48d60f024 # v3.0.0
         with:
           working-directory: clients/ts
           runtime: node
@@ -179,7 +179,7 @@ jobs:
       # devEngines carries onFail: warn for exactly this: pnpm checks the
       # runtime against it and would otherwise fail the node 22 leg with
       # ERR_PNPM_BAD_RUNTIME_VERSION.
-      - uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
+      - uses: pnpm/setup@fbda4c85fc2e1e08721cd8763afea8f48d60f024 # v3.0.0
         with:
           working-directory: clients/ts
           runtime: node@${{ matrix.node }}
