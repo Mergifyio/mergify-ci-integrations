@@ -1,0 +1,1 @@
+pytest floor 6.0.0 -> 6.2.5: first pytest accepting pluggy>=1.2 (nothing installable removed)
