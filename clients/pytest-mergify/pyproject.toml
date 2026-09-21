@@ -11,7 +11,12 @@ dependencies = [
     # The OpenTelemetry SDK, its OTLP exporter, and requests are gone: CI
     # detection, the API fetches, and span build + OTLP upload all run through
     # the bundled Rust binding now.
-    "pytest>=6.0.0",
+    # 6.2.5 is the first pytest that accepts pluggy 1.x (6.0-6.2.4 pin it
+    # below 1.0), and pluggy 1.2 is what the collection hook needs.
+    "pytest>=6.2.5",
+    # New-style hook wrappers (`hookimpl(wrapper=True)`), which the collection
+    # hook is written as.
+    "pluggy>=1.2",
     "pytest-timeout>=2.4.0",
 ]
 
@@ -29,6 +34,9 @@ dev = [
     "pytest-asyncio>=0.24.0",
     "freezegun>=1.5.5",
     "pytest-xdist>=3.0",
+    # The real thing, for the one test that runs a split leg end to end
+    # (MRGFY-9417); 0.10 is the first release that runs on Python 3.10+ only.
+    "pytest-split>=0.10; python_version >= '3.10'",
 ]
 
 # Kept out of `dev` so the release can install it with `--only-group check`,

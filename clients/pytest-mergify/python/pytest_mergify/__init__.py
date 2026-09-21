@@ -306,15 +306,41 @@ class PytestMergify:
             }
         self.has_error = False
 
-    @pytest.hookimpl(trylast=True)
+    @pytest.hookimpl(wrapper=True, trylast=True)
     def pytest_collection_modifyitems(
         self,
         config: _pytest.config.Config,
         items: typing.List[_pytest.nodes.Item],
-    ) -> None:
-        # trylast so user filters (-k, -m, --deselect) apply first; the
-        # fingerprint then identifies the set this run intends to execute, and
-        # the reduced-rerun subset only ever narrows what remains.
+    ) -> typing.Generator[None, object, object]:
+        # A wrapper whose work is all after the `yield`: the fingerprint has to
+        # identify the set this run intends to execute, so it is taken once
+        # every other implementation of this hook has narrowed the collection
+        # -- pytest's own filters (`-k`, `-m`, `--deselect`) and the plugins
+        # that split a suite across jobs (pytest-split, pytest-shard). Those
+        # are plain implementations, and a wrapper's tail runs after all of
+        # them whatever their priority. The plain `trylast` implementation this
+        # used to be was ordered against another `trylast` by registration
+        # alone, and in a real run that put ours BEFORE pytest-split's: every
+        # leg of a split job fingerprinted the whole suite, so twenty legs
+        # claimed one identity, and the subset one was served was cut into
+        # shares like any collection (MRGFY-9417).
+        #
+        # `trylast` on a wrapper puts this tail first among the wrappers', so a
+        # plugin wrapping this hook to look at the final collection sees the
+        # set this run will execute. The one narrowing this cannot follow is a
+        # wrapper's own tail, and pytest's `--lf` is one (a `tryfirst`
+        # wrapper, so its tail runs after ours): a class whose tests it
+        # deselects there is fingerprinted whole. A developer-loop flag, not
+        # a CI split, and no priority available to a wrapper lands after it.
+        #
+        # A new-style wrapper (pluggy 1.2, hence the floor in pyproject.toml),
+        # unlike the two `hookwrapper=True` below: a refusal has to fail the
+        # run from this tail, and raising from an old-style wrapper's tail is
+        # what pluggy 1.4 deprecated -- it still propagated, but under a
+        # warning that repeated the message. Here the `yield` hands back the
+        # hook's result (or raises another implementation's exception through
+        # this tail, which then never runs -- a collection left mid-filter is
+        # nobody's identity), and a `raise` after it is the ordinary way out.
         #
         # This is also where the selection is asked for: the request carries the
         # fingerprint of the collection, so it cannot happen before there is
@@ -322,6 +348,8 @@ class PytestMergify:
         # never collects, and workers are excluded from the fetch — which is
         # what it already amounted to, the filtering hook having never run on
         # the controller either.
+        result = yield
+
         self.mergify_ci.on_tests_collected([item.nodeid for item in items])
 
         if self.mergify_ci.test_selection:
@@ -345,6 +373,7 @@ class PytestMergify:
         # that decides what a run says about its own reduction — including the
         # runs that were never offered one, which say nothing.
         self.mergify_ci.on_selection_resolved(kept_count=len(items))
+        return result
 
     def pytest_collection_finish(self, session: _pytest.main.Session) -> None:
         detector = self.mergify_ci.flaky_detector
