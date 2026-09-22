@@ -217,7 +217,12 @@ export class MergifyReporter implements Reporter {
 
   private _applySelection(vitest: Vitest, selection: TestSelection): void {
     this.selection = selection;
-    if (selection.selection !== 'subset') return;
+    // Only a subset this run can act on reaches the workers. Everything else
+    // -- `full`, an `empty` or `refused` answer, a subset this client cannot
+    // honour -- runs the whole suite here: the two answers pytest-mergify
+    // acts on are not built for this reporter yet, and a job that opts in
+    // must never run less than everything on an answer it does not carry.
+    if (selection.selection !== 'subset' || selection.notAppliedReason !== undefined) return;
 
     vitest.provide('mergify:selection', [...selection.tests]);
     this._configureRunner(vitest);
@@ -473,7 +478,13 @@ export class MergifyReporter implements Reporter {
    */
   private _reportSelection(testModules: ReadonlyArray<TestModule>): void {
     const selection = this.selection;
-    if (!selection || selection.selection !== 'subset') return;
+    if (
+      !selection ||
+      selection.selection !== 'subset' ||
+      selection.notAppliedReason !== undefined
+    ) {
+      return;
+    }
 
     const logger = this.vitest?.logger;
     const collected = new Set<string>();

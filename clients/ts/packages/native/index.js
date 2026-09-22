@@ -709,3 +709,4 @@ module.exports.detectRepositoryName = nativeBinding.detectRepositoryName
 module.exports.dynamicShareMs = nativeBinding.dynamicShareMs
 module.exports.shouldRunFlakyDetection = nativeBinding.shouldRunFlakyDetection
 module.exports.staticShareMs = nativeBinding.staticShareMs
+module.exports.testCollectionFingerprint = nativeBinding.testCollectionFingerprint

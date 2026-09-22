@@ -29,8 +29,15 @@ export declare class CiApiClient {
    * The test selection for a run, identified by its own `branch`,
    * `headSha` and job coordinates, or `null` when test selection is not
    * enabled for the repository.
+   *
+   * `collectionFingerprint` is the identity of what this run collected
+   * (`testCollectionFingerprint`): a subset is only safe to serve to a run
+   * that collects the same tests the previous attempt did, so a request
+   * without one is answered with the full suite. Optional so a caller that
+   * holds no collection at the moment it asks (Vitest collects inside its
+   * workers) sends no parameter at all rather than claiming an empty one.
    */
-  fetchTestSelection(branch: string, headSha: string, pipelineName: string, jobName: string): Promise<TestSelection | null>
+  fetchTestSelection(branch: string, headSha: string, pipelineName: string, jobName: string, collectionFingerprint?: string | undefined | null): Promise<TestSelection | null>
   /**
    * Upload `spans` under `resourceAttributes` as gzipped OTLP protobuf,
    * splitting oversized traces across several uploads. Rejects on failure.
@@ -203,6 +210,15 @@ export interface Span {
 export declare function staticShareMs(availableBudgetMs: number, numTests: number): number
 
 /**
+ * The identity of the set of tests a run collected: the same digest
+ * pytest-mergify reports, from the same core recipe
+ * (`mergify_ci_core::test_collection_fingerprint`), so Mergify can match a
+ * rerun's collection against the previous attempt's whatever client uploaded
+ * it. Order-independent; a repeated identifier is a different collection.
+ */
+export declare function testCollectionFingerprint(testIds: Array<string>): string
+
+/**
  * Whether this run should execute only a subset of tests.
  *
  * Left as the server sent it, deliberately: only the caller holds the tests
@@ -211,10 +227,23 @@ export declare function staticShareMs(availableBudgetMs: number, numTests: numbe
  * binding's job is to deliver the answer, not to interpret it.
  */
 export interface TestSelection {
-  /** `"full"` (run everything) or `"subset"` (run only `tests`). */
+  /**
+   * `"full"` (run everything), `"subset"` (run only `tests`), `"empty"`
+   * (run nothing: the previous attempt of this job ran these tests and they
+   * passed), `"refused"` (Mergify will not guess between several candidate
+   * sessions; the run must fail), or a value this client predates. Handed
+   * over verbatim: what to do with an answer the run cannot honour is
+   * decided by the plugin, which declares it rather than rewriting it.
+   */
   selection: string
   /** Why the server chose this selection — surfaced in the plugin report. */
   reason: string
-  /** The test identifiers to run; absent on a `full` answer. */
+  /** The test identifiers to run; absent on every answer but a `subset`. */
   tests?: Array<string>
+  /**
+   * The server's own explanation to show the CI user, when the answer has
+   * one — today only a refusal does. Shown verbatim: the copy is the
+   * server's so it can be corrected without publishing a client.
+   */
+  message?: string
 }
