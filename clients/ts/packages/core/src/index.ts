@@ -1,5 +1,5 @@
 // Backend API client
-export type { ApiClientConfig, MergifyApiClient } from './api.js';
+export type { ApiClientConfig, MergifyApiClient, SessionVerdictClient } from './api.js';
 export { createApiClient } from './api.js';
 export type { FlakyDetectionContext, FlakyDetectionMode } from './flaky-detection.js';
 // Flaky detection
@@ -10,6 +10,14 @@ export { nativeTestCollectionFingerprint } from './native.js';
 export { fetchQuarantineList } from './quarantine.js';
 // Resource detection
 export { detectResources } from './resources/index.js';
+// Session verdict (what the run concluded, written before the trace upload)
+export type { FinalStatus, SessionVerdictInput, SessionVerdictResult } from './session-verdict.js';
+export {
+  buildSessionVerdict,
+  formatSessionVerdictResult,
+  SessionVerdictFold,
+  sendSessionVerdict,
+} from './session-verdict.js';
 // Span helpers
 export type { SessionSpan } from './spans.js';
 export { emitTestCaseSpan, endSessionSpan, startSessionSpan } from './spans.js';
