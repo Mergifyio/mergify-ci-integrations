@@ -115,31 +115,88 @@ the endpoint, and anything that is not a recognised yes (unset, empty, `false`,
 unparsable) means no.
 
 When Mergify's merge queue relaunches a CI run that failed, it already knows
-which tests broke. `globalSetup` asks the API whether this run may replay only
-those, and the reporter applies the answer through Playwright's
-`Reporter.preprocess()` hook — after your own `--project`, `--grep` and `.only`
-filters, so it can only ever narrow what you asked for, and before Playwright
-shards, so the reduced set is what gets spread across a `--shard` matrix.
+which tests broke. The reporter asks the API whether this run may replay only
+those — from Playwright's `Reporter.preprocess()` hook, once the collection is
+known, because the request carries a fingerprint of the tests this run
+collected and Mergify only answers a run that collects the same tests the
+previous attempt did. The hook runs after your own `--project`, `--grep` and
+`.only` filters, so the answer can only ever narrow what you asked for.
 
-```
-[@mergifyio/playwright] ✂️ Test selection
-  selection: subset (reason: queue_rerun)
-  reduced rerun: executing 2 previously-failing test(s), 5 deselected
-```
+Four answers are understood, and the end of the run says which one it got:
+
+- **full** — everything ran, with the reason in one sentence:
+
+  ```
+  ✂️ Test selection
+
+  First attempt of this batch, so the full suite ran.
+  ```
+
+- **subset** — only the tests that failed on the previous attempt ran:
+
+  ```
+  ✂️ Test selection
+
+  The code under test hasn't changed since the previous attempt of this job, where
+  2 of its 7 tests failed. Mergify re-executed only those 2 and skipped the 5 that
+  had already passed:
+
+    [chromium] > tests/login.spec.ts > logs in
+    [chromium] > tests/cart.spec.ts > checks out
+  ```
+
+- **empty** — the previous attempt ran these tests and they all passed, so
+  nothing ran and the job is green. On an unsharded job Playwright still prints
+  `Error: No tests found` before the reporter turns the run green; that line is
+  Playwright's, and the block below it says why nothing was executed.
+
+- **refused** — several runs of this job report to Mergify under the same name,
+  and Mergify will not guess which one this run repeats. The run **fails**, with
+  Mergify's own explanation printed first. The fix is to give each run its own
+  name with `MERGIFY_TEST_JOB_NAME` (see sharding below).
 
 The feature can only ever remove work, never coverage. The full suite runs
 whenever anything is off-nominal:
 
-- the API errors, times out, or answers something unexpected (logged);
-- the repository has no subscription, or the engine has no such endpoint
-  (silent);
-- **none of the served names is among the tests actually collected** — the
-  guard against a stale set after a rename. A reduced run that matched nothing
-  would go green having tested nothing;
+- the API errors, times out, or answers in a way this version does not
+  understand (the block says so);
+- the repository has no subscription, or the engine has no such endpoint;
+- **a served name is not among the tests actually collected** — the whole
+  answer is declined rather than reduced to the part that matched, so a stale
+  subset after a rename never turns into a green run over nothing;
 - the job did not set `MERGIFY_TEST_SELECTION_ENABLE=true` — the opt-in above.
 
 Setup and teardown projects always run in full: Playwright makes their tests
-read-only, and they are never counted as a match either.
+read-only, and they are not part of the fingerprinted collection.
+
+#### Sharded jobs
+
+Each `--shard=k/N` leg is its own job for Mergify: it asks with its own
+collection and is answered with its own failures. Two things follow:
+
+- **Naming each leg is recommended, not required.** Mergify tells the legs
+  apart by what they collected — two legs of one job run different slices, so
+  they carry different fingerprints and each is answered from its own previous
+  attempt even under one job name. Setting `MERGIFY_TEST_JOB_NAME` per leg
+  (for example `e2e-${{ matrix.shard }}`) makes the job log and the Mergify
+  page name the legs apart, and covers the one case the fingerprint cannot:
+  two legs that collected the same set (an empty slice on both, say), which
+  Mergify refuses rather than guesses, as described above.
+- **The reporter partitions the suite itself** once the job opted in: it hands
+  sharding over through Playwright's `TestRun.skipSharding()` and keeps whole
+  files together, in collection order, with Playwright's own arithmetic. The
+  partition is the same on every attempt, which is what lets a leg's collection
+  match the previous attempt's — and on a rerun each leg runs exactly the tests
+  Mergify served it, with no second split. `PWTEST_SHARD_WEIGHTS` is honoured
+  as Playwright honours it (colon-separated, one non-negative integer per leg).
+- **A leg's slice must be stable from one attempt to the next** — same suite,
+  same weights, same number of legs. If it changes, the leg's fingerprint no
+  longer matches its previous attempt's and Mergify serves it the full suite:
+  never a false green, but no reduction either. Keeping the slice stable is
+  the job's responsibility, not something Mergify guesses at.
+
+Only one reporter may take sharding over; a second one calling
+`skipSharding()` makes Playwright abort the run.
 
 **Requires `@playwright/test` 1.62 or later**, where `Reporter.preprocess()` was
 added. On older versions the hook is never called, the full suite runs, and the
@@ -170,6 +227,7 @@ no project name are never prefixed.
 | `PLAYWRIGHT_MERGIFY_ENABLE` | Force-enable outside CI | `false` |
 | `PLAYWRIGHT_MERGIFY_INCLUDE_PROJECT_IN_TEST_NAME` | Prefix the project to multi-project test names as `[project] > …` | `false` |
 | `MERGIFY_TEST_SELECTION_ENABLE` | Let Mergify reduce a merge-queue rerun of this job; anything unparsable means no | `false` |
+| `MERGIFY_TEST_JOB_NAME` | The name this job reports under; recommended per leg of a matrix or a `--shard` run | provider job name |
 | `MERGIFY_CI_DEBUG` | Print spans to console instead of uploading | `false` |
 | `MERGIFY_TRACEPARENT` | W3C distributed trace context | — |
 | `MERGIFY_TEST_RUN_ID` | Test run identifier (set by `withMergify`'s globalSetup; read by workers) | — |
