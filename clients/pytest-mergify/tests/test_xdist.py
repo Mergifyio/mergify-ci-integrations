@@ -6,7 +6,7 @@ import _pytest.pytester
 import pytest
 
 import pytest_mergify
-from pytest_mergify import ci_insights, flaky_detection, rerun
+from pytest_mergify import ci_insights, flaky_detection, rerun, test_selection
 from tests import conftest
 from tests.test_ci_insights import _set_test_environment
 
@@ -166,9 +166,20 @@ def test_no_crash_without_xdist(
     result.assert_outcomes(passed=1)
 
 
+class _FakeSpec:
+    popen = True
+    via = None
+
+
+class _FakeGateway:
+    id = "gw0"
+    spec = _FakeSpec()
+
+
 def test_flaky_detection_disabled_under_each_mode() -> None:
     """Controller does not distribute flaky context under 'each' scheduling."""
     plugin = pytest_mergify.PytestMergify()
+    plugin._xdist_selection = test_selection.XdistSelectionController()
     plugin._xdist_controller = flaky_detection.XdistFlakyDetectionController(
         _context_dict={"existing_test_names": ["test_a"]},
         _mode="new",
@@ -183,6 +194,7 @@ def test_flaky_detection_disabled_under_each_mode() -> None:
 
     class FakeNode:
         config = FakeConfig()
+        gateway = _FakeGateway()
         workerinput: typing.Dict[str, typing.Any] = {}
 
     node = FakeNode()
@@ -195,6 +207,7 @@ def test_flaky_detection_disabled_under_each_mode() -> None:
 def test_flaky_detection_enabled_under_load_mode() -> None:
     """Controller distributes flaky context under 'load' scheduling."""
     plugin = pytest_mergify.PytestMergify()
+    plugin._xdist_selection = test_selection.XdistSelectionController()
     plugin._xdist_controller = flaky_detection.XdistFlakyDetectionController(
         _context_dict={"existing_test_names": ["test_a"]},
         _mode="new",
@@ -208,6 +221,7 @@ def test_flaky_detection_enabled_under_load_mode() -> None:
 
     class FakeNode:
         config = FakeConfig()
+        gateway = _FakeGateway()
         workerinput: typing.Dict[str, typing.Any] = {}
 
     node = FakeNode()

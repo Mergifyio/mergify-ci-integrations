@@ -344,21 +344,27 @@ class MergifyCIInsights:
             init_error_msg=init_error_msg,
         )
 
-    def on_tests_collected(self, collected_test_ids: typing.List[str]) -> None:
+    def on_tests_collected(
+        self, collected_test_ids: typing.Sequence[str]
+    ) -> typing.Optional[str]:
         """Take the identity of what this run collected, and act on it.
 
         Called from the collection hook, once user filters (`-k`, `-m`,
         `--deselect`) have run: the fingerprint then describes the set this run
-        actually intends to execute. It does two independent things — reports
+        actually intends to execute. Under pytest-xdist it is the controller
+        that calls it, with the ids its workers collected -- the same set,
+        taken after the same filters. It does two independent things — reports
         the fingerprint with the run's spans, and asks Mergify whether a subset
         of that collection is enough — so a run that never asks (no
         subscription, no job coordinates, a job that never opted in) still
         reports it.
+
+        Returns the fingerprint, or `None` when none was taken.
         """
         if self.resource_attributes is None:
             # No resource means no spans and no API client: nothing to report
             # the fingerprint on, and nobody to ask.
-            return
+            return None
 
         if os.environ.get("PYTEST_XDIST_WORKER") is not None:
             # Every worker of a run collects the whole suite, so all of them
@@ -376,17 +382,18 @@ class MergifyCIInsights:
             # reduction, so it stays attributable. What cannot be attributed is
             # a set of sibling sessions sharing an identity.)
             #
-            # Selection is off under `-n` anyway (MRGFY-8632), so reporting
-            # nothing costs nothing.
-            return
+            # The controller reports the run's one identity instead, and is
+            # the one that asks (MRGFY-8632).
+            return None
 
         fingerprint = _mergify_ci.compute_test_collection_fingerprint(
-            collected_test_ids
+            list(collected_test_ids)
         )
         self.resource_attributes[_TEST_COLLECTION_FINGERPRINT] = fingerprint
         self.resource_attributes[_TEST_COLLECTION_COUNT] = len(collected_test_ids)
 
         self._load_test_selection(fingerprint)
+        return fingerprint
 
     def on_selection_resolved(self, kept_count: int) -> None:
         """Report what Mergify answered, and what this run made of it.
@@ -398,10 +405,11 @@ class MergifyCIInsights:
 
         Nothing is reported unless the server actually answered. A run that
         never asked -- a job that never opted in, incomplete job coordinates,
-        an xdist worker -- and a run whose question went unanswered -- no
-        subscription, or a fetch that errored -- both run the full suite too,
-        but neither was offered anything, so neither carries a
-        `not_applied_reason`. That absence is the honest signal: recording a
+        an xdist worker (its controller asks for it) -- and a run whose
+        question went unanswered -- no subscription, or a fetch that errored --
+        both run the full suite too, but neither was offered anything, so
+        neither carries a `not_applied_reason`. That absence is the honest
+        signal: recording a
         `full` answer for them would make a repository outside the pilot, and
         an API that was down, indistinguishable from a run Mergify looked at
         and chose not to reduce -- in every count taken afterwards.
@@ -438,8 +446,9 @@ class MergifyCIInsights:
         Sent exactly when the selection was asked for -- including when that
         request failed: the API may be back by now, and the verdict is what
         the NEXT rerun of this job needs, whatever this one was told. A job
-        that never asked (no opt-in, no coordinates, an xdist worker) has no
-        rerun to reduce and sends nothing. The gate is the same as the fetch's
+        that never asked (no opt-in, no coordinates, an xdist worker, whose
+        controller sends the run's one verdict) has no rerun to reduce and
+        sends nothing. The gate is the same as the fetch's
         by construction: `test_selection` is only ever built past it.
 
         Never raises. A verdict that did not land costs the next rerun its

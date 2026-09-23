@@ -18,12 +18,14 @@ import _pytest.terminal
 import pytest
 import pytest_timeout
 
+from pytest_mergify import _mergify_ci
 from pytest_mergify import flaky_detection as _flaky_detection
 from pytest_mergify import rerun as _rerun
 from pytest_mergify import session_verdict as _session_verdict
 from pytest_mergify import test_retry as _test_retry
+from pytest_mergify import test_selection as _test_selection
 from pytest_mergify import tracing, utils
-from pytest_mergify.ci_insights import MergifyCIInsights
+from pytest_mergify.ci_insights import TEST_SELECTION_ENABLE_ENV, MergifyCIInsights
 
 # OpenTelemetry semantic-convention attribute keys, inlined now that the
 # semconv package is gone with the SDK.
@@ -62,8 +64,18 @@ class PytestMergify:
     # one run, which is exactly the ambiguity the engine refuses to guess
     # between. Such a session sends nothing.
     _verdict_disabled: bool = False
+    # Under pytest-xdist, a run that did not do exactly what its answer said
+    # sends no verdict either: see `_settle_xdist_selection`.
+    _verdict_withheld: bool = False
+    _config: typing.Optional[_pytest.config.Config] = None
+    # On a pytest-xdist worker handed the controller's selection, what reads
+    # it; `None` everywhere else, which is every test runs.
+    _xdist_worker_selection: typing.Optional[_test_selection.XdistSelectionWorker] = (
+        None
+    )
 
     def pytest_configure(self, config: _pytest.config.Config) -> None:
+        self._config = config
         config.addinivalue_line(
             "markers",
             "mergify(flaky_detection=bool, auto_retry=bool): Mergify per-test "
@@ -84,6 +96,7 @@ class PytestMergify:
         self._session_span = None
         self._current_test_span = None
         self._verdict = _session_verdict.SessionVerdict()
+        self._verdict_withheld = False
         self._verdict_disabled = any(
             config.getoption(option, default=False)
             for option in ("collectonly", "setuponly", "setupplan")
@@ -103,9 +116,18 @@ class PytestMergify:
 
         self._xdist_controller = _flaky_detection.XdistFlakyDetectionController()
         self._xdist_retry_controller = _test_retry.XdistTestRetryController()
+        self._xdist_selection = _test_selection.XdistSelectionController()
+        self._xdist_worker_selection = None
 
         if _is_xdist_worker(config):
             self._load_mechanisms_from_xdist_worker(config)
+            answer_path = getattr(config, "workerinput", {}).get(
+                _test_selection.XDIST_ANSWER_PATH_KEY
+            )
+            if answer_path is not None:
+                self._xdist_worker_selection = _test_selection.XdistSelectionWorker(
+                    answer_path
+                )
 
     def _load_mechanisms_from_xdist_worker(self, config: _pytest.config.Config) -> None:
         """Build both mechanisms from controller-provided context on a worker."""
@@ -119,6 +141,20 @@ class PytestMergify:
     @pytest.hookimpl(optionalhook=True)
     def pytest_configure_node(self, node: typing.Any) -> None:
         """xdist hook: distribute flaky detection context to workers."""
+        # Test selection first: flaky detection's early return below is about
+        # its own budgets, and every scheduling mode can skip a test.
+        if not _is_local_gateway(node.gateway.spec):
+            # Its worker cannot read a file on this machine, and a run that
+            # reduced on some workers and not on others would report a
+            # reduction it did not make. Nothing is asked, as before
+            # MRGFY-8632: the run is full.
+            self._xdist_selection.disabled = True
+        elif (
+            utils.is_env_true(TEST_SELECTION_ENABLE_ENV)
+            and self.mergify_ci.api_client is not None
+        ):
+            self._xdist_selection.hand_out(node.workerinput)
+
         # Disable under 'each' mode to avoid duplicated budgets.
         if getattr(node.config.option, "dist", None) == "each":
             return
@@ -136,11 +172,76 @@ class PytestMergify:
         self._xdist_controller.populate_workerinput(node.workerinput)
 
     @pytest.hookimpl(optionalhook=True)
+    def pytest_xdist_node_collection_finished(
+        self, node: typing.Any, ids: typing.Sequence[str]
+    ) -> None:
+        """xdist hook: ask for the run's selection, once, on the controller.
+
+        Called as each worker's collection arrives, and before xdist schedules
+        a single test -- scheduling waits for this hook -- so what is decided
+        here is on disk before any worker runs anything. The ids are what the
+        workers kept once every filter and split had run, the set the
+        fingerprint describes on a run without `-n`.
+
+        Only the first call asks. A later worker that collected anything else
+        is a run xdist stops on its own, before any test -- and that run must
+        not then describe the reduction it never got to make.
+        """
+        selection = self._xdist_selection
+        if selection.collected_ids is not None:
+            if list(ids) != selection.collected_ids:
+                selection.collections_differ = True
+            return
+        selection.collected_ids = list(ids)
+
+        if selection.disabled:
+            # Workers configured before the remote one was met still hold a
+            # path, and must not wait on an answer that is not coming.
+            selection.publish(fingerprint=None, keep=None)
+            return
+
+        fingerprint = self.mergify_ci.on_tests_collected(ids)
+
+        keep: typing.Optional[typing.FrozenSet[str]] = None
+        if self.mergify_ci.test_selection is not None:
+            try:
+                keep = self.mergify_ci.test_selection.resolve(ids)
+            except pytest.UsageError:
+                # The same stop as without `-n` (see the collection hook):
+                # raised from here, it ends the run before xdist schedules
+                # anything, with pytest's usage-error exit code.
+                self.has_error = True
+                self.mergify_ci.on_selection_resolved(kept_count=0)
+                raise
+
+        selection.publish(fingerprint, keep)
+        self.mergify_ci.on_selection_resolved(
+            kept_count=len(ids)
+            if keep is None
+            else sum(1 for nodeid in ids if nodeid in keep)
+        )
+
+    @pytest.hookimpl(optionalhook=True)
     def pytest_testnodedown(self, node: typing.Any, error: typing.Any) -> None:
         """xdist hook: collect metrics from completed workers."""
+        if error is not None:
+            # A worker that died took its own account of the run with it --
+            # whether it could read the answer, the time it spent -- so the
+            # run's verdict would be folded from what the others said.
+            self._xdist_selection.worker_crashed = True
         workeroutput = getattr(node, "workeroutput", None)
         if workeroutput is None:
             return
+
+        if workeroutput.get("test_selection_could_not_read"):
+            self._xdist_selection.workers_that_could_not_read.add(node.gateway.id)
+        # The time the worker spent on its tests, which only the worker
+        # measures: the controller receives the reports it logged, not every
+        # attempt it ran.
+        if self._verdict is not None:
+            self._verdict.add_runtime(
+                workeroutput.get("session_verdict_runtime_seconds", 0.0)
+            )
 
         worker_metrics = workeroutput.get("flaky_detection_metrics")
         if worker_metrics is not None:
@@ -344,10 +445,9 @@ class PytestMergify:
         #
         # This is also where the selection is asked for: the request carries the
         # fingerprint of the collection, so it cannot happen before there is
-        # one. Under xdist that means it does not happen at all — the controller
-        # never collects, and workers are excluded from the fetch — which is
-        # what it already amounted to, the filtering hook having never run on
-        # the controller either.
+        # one. Not under xdist: the controller never collects, and workers are
+        # excluded from the fetch. The controller asks from the ids its workers
+        # report instead (`pytest_xdist_node_collection_finished`).
         result = yield
 
         self.mergify_ci.on_tests_collected([item.nodeid for item in items])
@@ -376,6 +476,17 @@ class PytestMergify:
         return result
 
     def pytest_collection_finish(self, session: _pytest.main.Session) -> None:
+        if self._xdist_worker_selection is not None:
+            # The ids this worker reports to the controller, taken here like
+            # xdist takes them -- after every narrowing of the collection,
+            # wrappers' included -- so the fingerprint matches the one the
+            # controller asked with exactly when the collections do.
+            self._xdist_worker_selection.fingerprint = (
+                _mergify_ci.compute_test_collection_fingerprint(
+                    [item.nodeid for item in session.items]
+                )
+            )
+
         detector = self.mergify_ci.flaky_detector
         if detector:
             detector.prepare_for_session(session)
@@ -414,8 +525,20 @@ class PytestMergify:
                     workeroutput["test_retry_metrics"] = (
                         self.mergify_ci.test_retrier.to_serializable_metrics()
                     )
+                if self._verdict is not None:
+                    workeroutput["session_verdict_runtime_seconds"] = (
+                        self._verdict.runtime_seconds
+                    )
+                if (
+                    self._xdist_worker_selection is not None
+                    and self._xdist_worker_selection.could_not_read
+                ):
+                    workeroutput["test_selection_could_not_read"] = True
 
         yield
+
+        if _is_xdist_controller(session.config):
+            self._settle_xdist_selection()
 
         # Export here rather than in the terminal summary: the summary's token
         # checks return early on a run with nothing to upload, but the capture
@@ -425,6 +548,59 @@ class PytestMergify:
         self._finalize_and_export()
 
         self._green_a_run_told_to_execute_nothing(session, exitstatus)
+
+    def _settle_xdist_selection(self) -> None:
+        """Decide what the run may say about the answer, before anything leaves.
+
+        Two things make a run under `-n` differ from what its answer said,
+        and in both the verdict is withheld, so the next rerun of this job
+        finds no session to continue and runs the full suite:
+
+        * a worker could not read the answer and ran every test it was handed.
+          The session then holds part of a reduction, which the engine has no
+          way to read: for `empty` it expects nothing to have run whatever
+          else the verdict says, and would serve `empty` again off a session
+          most of whose tests never ran.
+        * a test the answer left out reported a failure. Its teardown is where
+          the module and session fixtures of the tests before it are torn
+          down, so a failure there belongs to a test that did run; folded
+          under the skipped test's id, the next rerun would replay a test that
+          cannot reproduce it and go green.
+
+        * the workers collected different tests, so xdist stopped the run
+          before any test: there is no result to record.
+        * a worker crashed, and its own account of the run -- whether it read
+          the answer at all -- went with it.
+
+        The first and the last are also declared as the answer not applied,
+        so the block and the reported selection do not announce a reduction
+        the run did not make -- the false announcement MRGFY-8632 started
+        from.
+        """
+        selection = self._xdist_selection
+        selection.clean_up()
+        if selection.keep is None:
+            # Nothing was left out, so no worker could have left out too much
+            # or too little.
+            return
+        if selection.failed_on_a_skipped_test or selection.worker_crashed:
+            self._verdict_withheld = True
+        reason: typing.Optional[_test_selection.NotAppliedReason] = None
+        if selection.collections_differ:
+            reason = "xdist_collections_differ"
+        elif selection.workers_that_could_not_read:
+            reason = "xdist_worker_could_not_read_answer"
+        test_selection = self.mergify_ci.test_selection
+        if (
+            reason is None
+            or selection.collected_ids is None
+            or test_selection is None
+            or test_selection.not_applied_reason is not None
+        ):
+            return
+        self._verdict_withheld = True
+        test_selection.not_applied_reason = reason
+        self.mergify_ci.on_selection_resolved(kept_count=len(selection.collected_ids))
 
     def _green_a_run_told_to_execute_nothing(
         self,
@@ -442,6 +618,11 @@ class PytestMergify:
         job reports does not depend on whether this run had traces to upload:
         `PYTEST_MERGIFY_DEBUG`, or a token the plugin never got, must not turn a
         deliberately empty run red.
+
+        Never reached under pytest-xdist: its workers skip what they were told
+        not to run rather than deselect it, so an `empty` run there is a run of
+        skipped tests, which pytest itself exits 0 on -- and 1 on as soon as a
+        worker that could not read the answer runs a test that fails.
         """
         selection = self.mergify_ci.test_selection
         if (
@@ -478,7 +659,11 @@ class PytestMergify:
         # of this job is answered from, and it must never wait behind the
         # upload's timeout and retries (up to 211 s). Its own failure does
         # not stop the upload either -- the two are independent documents.
-        if self._verdict is not None and not self._verdict_disabled:
+        if (
+            self._verdict is not None
+            and not self._verdict_disabled
+            and not self._verdict_withheld
+        ):
             self.mergify_ci.send_session_verdict(self._verdict)
 
         self._export_result = self.mergify_ci.export_spans(self._finished_spans)
@@ -521,6 +706,19 @@ class PytestMergify:
         # flow. Returning `True` means we took care of running the protocol.
         # See:
         # https://docs.pytest.org/en/7.1.x/how-to/writing_hook_functions.html#firstresult
+        if self._is_skipped_by_selection(item):
+            # Nothing to trace or rerun: a test the answer left out is logged
+            # as skipped, the way a run without `-n` deselects it -- no span,
+            # no rerun, no result in the verdict.
+            item.ihook.pytest_runtest_logstart(
+                nodeid=item.nodeid, location=item.location
+            )
+            _pytest.runner.runtestprotocol(item=item, nextitem=nextitem, log=True)
+            item.ihook.pytest_runtest_logfinish(
+                nodeid=item.nodeid, location=item.location
+            )
+            return True
+
         if (
             not self._traces_enabled
             and not self.mergify_ci.flaky_detector
@@ -745,6 +943,19 @@ class PytestMergify:
 
         return reports
 
+    def _is_skipped_by_selection(self, item: _pytest.nodes.Item) -> bool:
+        return (
+            self._xdist_worker_selection is not None
+            and self._xdist_worker_selection.skips(item.nodeid)
+        )
+
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_runtest_setup(self, item: _pytest.nodes.Item) -> None:
+        # Before any fixture: a test left out of the run costs nothing but its
+        # report.
+        if self._is_skipped_by_selection(item):
+            pytest.skip(_test_selection.XDIST_SKIP_REASON)
+
     @pytest.hookimpl
     def pytest_report_teststatus(
         self,
@@ -833,6 +1044,23 @@ class PytestMergify:
 
         report: _pytest.reports.TestReport = outcome.get_result()
 
+        if self._is_skipped_by_selection(item):
+            # Carried to the controller with the report (xdist serializes its
+            # attributes), which is where the run's verdict is folded and where
+            # this skip must not count as a test that ran.
+            report.mergify_selection_skipped = True  # type: ignore[attr-defined]
+            return
+
+        quarantine = self.mergify_ci.quarantined_tests
+        if (
+            quarantine is not None
+            and report.nodeid in quarantine.quarantine_used_by_tests
+        ):
+            # For the controller, which folds the verdict and did not mark the
+            # item: its own quarantine fetch may not have answered like this
+            # worker's did.
+            report.mergify_quarantined = True  # type: ignore[attr-defined]
+
         # Read here rather than from `pytest_runtest_logreport`, which a
         # held-back first attempt never reaches. This hook fires for every
         # phase of every attempt whether or not it is being reported, so the
@@ -858,14 +1086,26 @@ class PytestMergify:
         # first attempt arrives as passed, an `unhealthy` rerun as `rerun`, a
         # `new`-mode rerun that failed as failed -- so what is folded here is
         # by construction what pytest exits on.
+        #
+        # A test pytest-xdist skipped because the answer left it out is not
+        # one: without `-n` it would have been deselected, never run, and it
+        # must not reach the verdict as a skip that ran -- `executed_count` is
+        # what the next rerun is judged complete against.
         if self._verdict is None:
             return
+        if getattr(report, "mergify_selection_skipped", False):
+            if report.failed:
+                self._xdist_selection.failed_on_a_skipped_test = True
+            return
         quarantine = self.mergify_ci.quarantined_tests
-        self._verdict.record_logged_report(
-            report,
-            quarantined=quarantine is not None
-            and report.nodeid in quarantine.quarantine_used_by_tests,
-        )
+        if quarantine is None:
+            quarantined = False
+        elif self._config is not None and _is_xdist_controller(self._config):
+            # The worker marked the item, not this process.
+            quarantined = getattr(report, "mergify_quarantined", False)
+        else:
+            quarantined = report.nodeid in quarantine.quarantine_used_by_tests
+        self._verdict.record_logged_report(report, quarantined=quarantined)
 
     @property
     def _rerun_mechanisms(self) -> typing.List[_rerun.RerunLoop]:
@@ -1087,3 +1327,12 @@ def _is_xdist_controller(config: _pytest.config.Config) -> bool:
 def _is_xdist_worker(config: _pytest.config.Config) -> bool:
     """Check if running as xdist worker."""
     return hasattr(config, "workerinput")
+
+
+def _is_local_gateway(spec: typing.Any) -> bool:
+    """Whether an xdist worker runs on this machine, sharing its disk.
+
+    `popen` is xdist's own test for a local worker (it restores `sys.path`
+    only for those); `via` would run that popen on another host.
+    """
+    return bool(getattr(spec, "popen", False)) and not getattr(spec, "via", None)

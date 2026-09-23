@@ -5,6 +5,7 @@ import http.server
 import json
 import socketserver
 import threading
+import time
 import typing
 
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
@@ -370,6 +371,12 @@ class _OTLPServer(socketserver.TCPServer):
         self.session_verdict_status: int = 200
         self.trace_status: int = 200
         self.test_selection: typing.Optional[typing.Dict[str, typing.Any]] = None
+        # How many times the test-selection endpoint was asked, whatever it
+        # answered: under `pytest -n` the question is asked once per run.
+        self.test_selection_requests: int = 0
+        self.test_selection_status: int = 200
+        self.test_selection_delay: float = 0.0
+        self.quarantined_tests: typing.Optional[typing.List[str]] = None
         super().__init__(*args, **kwargs)
 
 
@@ -405,7 +412,32 @@ class _OTLPRequestHandler(http.server.BaseHTTPRequestHandler):
         # test asked for a selection to be served, which is the only way a run
         # in a *subprocess* can be given one (the in-process fake client never
         # reaches it).
-        if self.path.split("?")[0].endswith("/test-selection") and (
+        path = self.path.split("?")[0]
+        if path.endswith("/quarantines") and self.server.quarantined_tests is not None:
+            payload = json.dumps(
+                {
+                    "quarantined_tests": [
+                        {"test_name": name} for name in self.server.quarantined_tests
+                    ]
+                }
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
+        if path.endswith("/test-selection"):
+            self.server.test_selection_requests += 1
+            if self.server.test_selection_delay:
+                time.sleep(self.server.test_selection_delay)
+            if self.server.test_selection_status != 200:
+                self.send_response(self.server.test_selection_status)
+                self.end_headers()
+                return
+
+        if path.endswith("/test-selection") and (
             self.server.test_selection is not None
         ):
             payload = json.dumps(self.server.test_selection).encode("utf-8")
@@ -439,6 +471,23 @@ class OTLPCollector:
     def serve_test_selection(self, payload: typing.Dict[str, typing.Any]) -> None:
         """Answer the test-selection endpoint with `payload` from now on."""
         self._server.test_selection = payload
+
+    def fail_test_selection(self, status: int) -> None:
+        """Answer the test-selection endpoint with `status` from now on."""
+        self._server.test_selection_status = status
+
+    def delay_test_selection(self, seconds: float) -> None:
+        """Hold every test-selection answer back for `seconds`."""
+        self._server.test_selection_delay = seconds
+
+    def serve_quarantine(self, names: typing.List[str]) -> None:
+        """Answer the quarantine endpoint with these test names."""
+        self._server.quarantined_tests = names
+
+    @property
+    def test_selection_requests(self) -> int:
+        """How many times the test-selection endpoint was asked."""
+        return self._server.test_selection_requests
 
     def refuse_session_verdicts(self, status: int) -> None:
         """Answer every session verdict with `status` from now on."""
