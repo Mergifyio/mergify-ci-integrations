@@ -217,7 +217,7 @@ importers:
     devDependencies:
       '@napi-rs/cli':
         specifier: ^3.5.1
-        version: 3.10.1(@emnapi/core@1.9.2)(@emnapi/runtime@1.9.2)(@types/node@26.6.1)(supports-color@7.2.0)
+        version: 3.10.2(@emnapi/core@1.9.2)(@emnapi/runtime@1.9.2)(@types/node@26.6.1)(supports-color@7.2.0)
 
   packages/playwright:
     dependencies:
@@ -549,8 +549,8 @@ packages:
   '@loaderkit/resolve@1.0.6':
     resolution: {integrity: sha512-G8FdIoF5CypfwmD9rl8BXod5HDn8JqB0CCNBXDTaRZ+yRYhARrrSToX1zg1zy9jX3zLqigsELwhT4gNtkdQAUg==}
 
-  '@napi-rs/cli@3.10.1':
-    resolution: {integrity: sha512-9w66AHq2U3vIfj7G0UlVUOENbt6M7XHlHxa+rSbxkVhmCXKY2GIvLGLyYfWz8wBMjwC7dJojNInQhhUJU4hJUw==}
+  '@napi-rs/cli@3.10.2':
+    resolution: {integrity: sha512-5iSFDRh9YdSAhWEk4EvBt0Ld/SVfvZSrjBkggWhdAW6aQfKN4H98+4dOWRbGPt6TDXgRLd5RpbABYJXkuyTGpw==}
     engines: {node: ^20.17.0 || ^22.13.0 || >= 23.5.0}
     hasBin: true
     peerDependencies:
@@ -2758,7 +2758,7 @@ snapshots:
     dependencies:
       '@braidai/lang': 1.1.2
 
-  '@napi-rs/cli@3.10.1(@emnapi/core@1.9.2)(@emnapi/runtime@1.9.2)(@types/node@26.6.1)(supports-color@7.2.0)':
+  '@napi-rs/cli@3.10.2(@emnapi/core@1.9.2)(@emnapi/runtime@1.9.2)(@types/node@26.6.1)(supports-color@7.2.0)':
     dependencies:
       '@inquirer/prompts': 8.6.0(@types/node@26.6.1)
       '@napi-rs/cross-toolchain': 1.0.3(supports-color@7.2.0)
