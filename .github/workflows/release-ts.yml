@@ -131,7 +131,9 @@ jobs:
       # Build BEFORE assembling: the assembly injects optionalDependencies the
       # lockfile knows nothing about, and `pnpm run` verifies deps against the
       # lockfile first, so it would fail with ERR_PNPM_OUTDATED_LOCKFILE. Only
-      # `run`/`exec` do that check -- `pnpm pack` below is unaffected.
+      # `run`/`exec` do that check -- `pnpm pack` below is unaffected. The
+      # injection is undone right after the pack, so this constraint holds for
+      # the steps in between and nowhere else.
       - run: pnpm -r run build
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -170,6 +172,14 @@ jobs:
           for dir in packages/native/npm/*/; do
             npm pack "./${dir}" --pack-destination "${GITHUB_WORKSPACE}/dist"
           done
+      # The tarballs carry the injected optionalDependencies, so the manifest
+      # has done its job; putting the committed one back leaves the workspace
+      # in step with the lockfile again, which is what `pnpm run`/`exec` check
+      # before running anything (see the build step above). Without this, every
+      # step below would have to avoid pnpm -- and the first one that did not,
+      # the metadata check, failed every release attempt after it was added.
+      - name: Restore the loader manifest
+        run: git checkout -- packages/native/package.json
       # Everything below inspects the tarballs that were just packed -- the
       # ones the publish stage will upload, since it no longer rebuilds. A pack
       # exits 0 on a package with no LICENSE, no binary, or a manifest naming a
