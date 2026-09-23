@@ -17,7 +17,7 @@ crate-type = ["cdylib"]
 [dependencies]
 mergify-ci-api = { path = "../../../../crates/mergify-ci-api" }
 mergify-ci-core = { path = "../../../../crates/mergify-ci-core" }
-magnus = "0.8"
+magnus = "0.9"
 # For rb_thread_call_without_gvl, which magnus 0.8 does not wrap. Kept in
 # step with the version magnus itself depends on.
 rb-sys = "0.9"
