@@ -1,0 +1,1 @@
+review: restore packages/native/package.json after the pack instead of bypassing pnpm (kozlek)
