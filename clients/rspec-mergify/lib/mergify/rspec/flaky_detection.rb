@@ -146,11 +146,14 @@ module Mergify
         (metrics.initial_duration * min_exec) > metrics.remaining_time
       end
 
+      # Asked before the rerun it guards. `rerun_count` counts executions, the
+      # initial one included, so the rerun about to start is the last one when
+      # it is the one reaching the cap.
       def last_rerun_for_test?(test_id)
         return false unless @metrics.key?(test_id)
 
         metrics = @metrics[test_id]
-        metrics.will_exceed_deadline? || metrics.rerun_count >= @context['max_test_execution_count']
+        metrics.will_exceed_deadline? || metrics.rerun_count + 1 >= @context['max_test_execution_count']
       end
 
       def test_metrics(test_id)

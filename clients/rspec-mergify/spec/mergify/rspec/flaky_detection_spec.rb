@@ -381,10 +381,10 @@ RSpec.describe Mergify::RSpec::FlakyDetector do
       detector.fill_metrics_from_report(test_id, 'teardown', 0.001, :passed)
       detector.set_test_deadline(test_id)
 
-      # max_test_execution_count is 10, we already have 1
-      9.times { detector.fill_metrics_from_report(test_id, 'call', 0.001, :passed) }
+      # max_test_execution_count is 10: after 9, the next execution is the last
+      8.times { detector.fill_metrics_from_report(test_id, 'call', 0.001, :passed) }
 
-      expect(detector.test_metrics(test_id).rerun_count).to eq(10)
+      expect(detector.test_metrics(test_id).rerun_count).to eq(9)
       expect(detector.last_rerun_for_test?(test_id)).to be(true)
     end
 
@@ -394,9 +394,9 @@ RSpec.describe Mergify::RSpec::FlakyDetector do
       detector.fill_metrics_from_report(test_id, 'teardown', 0.001, :passed)
       detector.set_test_deadline(test_id)
 
-      8.times { detector.fill_metrics_from_report(test_id, 'call', 0.001, :passed) }
+      7.times { detector.fill_metrics_from_report(test_id, 'call', 0.001, :passed) }
 
-      expect(detector.test_metrics(test_id).rerun_count).to eq(9)
+      expect(detector.test_metrics(test_id).rerun_count).to eq(8)
       expect(detector.last_rerun_for_test?(test_id)).to be(false)
     end
   end
