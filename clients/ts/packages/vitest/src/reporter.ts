@@ -30,6 +30,7 @@ import {
   TEST_SELECTION_ENABLE_ENV,
   toTestSelection,
 } from '@mergifyio/ci-core';
+import type { ProvidedContext } from 'vitest';
 import type { Reporter, TestCase, TestModule, Vitest } from 'vitest/node';
 import * as vitestResource from './resources/vitest.js';
 import type { MergifyReporterOptions } from './types.js';
@@ -224,7 +225,7 @@ export class MergifyReporter implements Reporter {
     // must never run less than everything on an answer it does not carry.
     if (selection.selection !== 'subset' || selection.notAppliedReason !== undefined) return;
 
-    vitest.provide('mergify:selection', [...selection.tests]);
+    this._provideToRunner(vitest, 'mergify:selection', [...selection.tests]);
     this._configureRunner(vitest);
   }
 
@@ -243,14 +244,47 @@ export class MergifyReporter implements Reporter {
   }
 
   private _configureFlakyDetection(vitest: Vitest): void {
-    vitest.provide('mergify:flakyContext', this.flakyContext);
-    vitest.provide('mergify:flakyMode', this.flakyMode);
+    this._provideToRunner(vitest, 'mergify:flakyContext', this.flakyContext);
+    this._provideToRunner(vitest, 'mergify:flakyMode', this.flakyMode);
     this._configureRunner(vitest);
   }
 
+  /**
+   * Hand a value to the runner, in every project but a browser one.
+   *
+   * Vitest serialises a provided value into every test file it runs, and in
+   * browser mode it also parses it again in each file's iframe. The browser
+   * tester never loads a custom runner — it builds its own from
+   * `VitestTestRunner` whatever `runner` says — so nothing in a browser project
+   * reads these values, and the flaky-detection context alone carries every
+   * test name of the repository's default branch: tens of thousands of names,
+   * shipped and parsed once per file for nobody (MRGFY-9610).
+   *
+   * A root-level `vitest.provide` would reach browser projects anyway, since
+   * each project inherits the root's values; providing per project is what
+   * keeps them out. In a single-project config the root project is the only
+   * entry in `vitest.projects`, so the runner there sees exactly what it did.
+   *
+   * Vitest 3 still honours the deprecated `poolMatchGlobs` ahead of browser
+   * mode, so a browser project can send some of its files to a Node pool,
+   * where a `runner` set on that project does load. Such a project keeps
+   * receiving everything: it pays what it paid before, and its Node files
+   * lose nothing. Vitest 4 removed the option.
+   */
+  private _provideToRunner<K extends keyof ProvidedContext & string>(
+    vitest: Vitest,
+    key: K,
+    value: ProvidedContext[K]
+  ): void {
+    for (const project of vitest.projects) {
+      const config = project.config as typeof project.config & { poolMatchGlobs?: unknown[] };
+      if (config.browser?.enabled && !config.poolMatchGlobs?.length) continue;
+      project.provide(key, value);
+    }
+  }
+
   private _configureRunner(vitest: Vitest): void {
-    // Provide quarantine list to workers via ProvidedContext
-    vitest.provide('mergify:quarantine', [...this.quarantineList]);
+    this._provideToRunner(vitest, 'mergify:quarantine', [...this.quarantineList]);
 
     // Auto-configure the custom runner if not already set.
     //

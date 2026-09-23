@@ -22,6 +22,7 @@ function fakeVitest(overrides: { runner?: string } = {}): Vitest {
     config: { runner: overrides.runner },
     logger: { log: (msg: string) => logs.push(msg) },
     provide: () => {},
+    projects: [],
   } as unknown as Vitest;
 }
 
