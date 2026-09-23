@@ -52,6 +52,15 @@ The plugin activates automatically when running in CI (detected via the `CI` env
 | `MERGIFY_TRACEPARENT` | W3C distributed trace context | — |
 | `MERGIFY_TEST_JOB_NAME` | Mergify test job name | — |
 
+### Parallel runs
+
+[parallel_tests](https://github.com/grosser/parallel_tests) and [turbo_tests](https://github.com/serpapi/turbo_tests) need no setup. Each worker is a separate RSpec process, and each reports to Mergify as its own session:
+
+- flaky detection sizes each worker's rerun budget from the tests that worker runs;
+- each worker prints its own Mergify report, so a report covers only that worker's tests.
+
+Suites split across CI jobs (knapsack, `circleci tests split`, Buildkite `parallelism`) behave the same way, one session per job.
+
 For detailed documentation, see the [official guide](https://docs.mergify.com/ci-insights/test-frameworks/rspec/).
 
 ## Development
