@@ -240,6 +240,19 @@ jobs:
       contents: read
     uses: ./.github/workflows/build-ts-native.yml
 
+  # The release's own pack-and-install checks, on every pull request: a
+  # change to a package, or to the checks themselves, fails here rather than
+  # at the next release. The version is a throwaway pre-release, never
+  # published.
+  ts-pack:
+    name: ts pack
+    needs: ts-native-build
+    permissions:
+      contents: read
+    uses: ./.github/workflows/pack-ts.yml
+    with:
+      version: 0.0.0-ci.${{ github.run_id }}
+
   rspec-tests:
     name: rspec-mergify tests (ruby ${{ matrix.ruby }})
     runs-on: ubuntu-latest
@@ -364,6 +377,7 @@ jobs:
       - ts-codespell
       - ts-semgrep
       - ts-native-build
+      - ts-pack
       - rspec-tests
       - rspec-rubocop
       - rspec-codespell
