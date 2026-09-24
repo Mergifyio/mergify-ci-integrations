@@ -15,14 +15,17 @@
 // Usage: check-ts-install.mjs <dist-dir> <version> [vitest-version]
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
-const [distDir, version, vitestVersion = '4.1.10'] = process.argv.slice(2);
-if (!distDir || !version) {
+const [distArg, version, vitestVersion = '4.1.10'] = process.argv.slice(2);
+if (!distArg || !version) {
   console.error('usage: check-ts-install.mjs <dist-dir> <version> [vitest-version]');
   process.exit(2);
 }
+// npm runs in a scratch directory below, so a relative path would resolve
+// there -- and npm reads an unresolvable `dist/x.tgz` as a GitHub shorthand.
+const distDir = resolve(distArg);
 
 // napi's target naming, for the one platform this runner can actually execute.
 const PLATFORMS = {
