@@ -115,18 +115,18 @@ def test_the_uploaded_fingerprint_describes_the_uploaded_tests(
     ] == conftest.collection_fingerprint(uploaded_test_ids)
 
 
-def test_no_session_of_a_distributed_run_claims_a_fingerprint(
+def test_only_the_controller_of_a_distributed_run_claims_a_fingerprint(
     pytester: _pytest.pytester.Pytester,
     monkeypatch: pytest.MonkeyPatch,
     otlp_collector: conftest.OTLPCollector,
 ) -> None:
     # Under `pytest -n`, every worker collects the whole suite and runs a share
-    # of it, so all of them would report ONE identity over partial results --
-    # and a worker that died before uploading would leave its siblings looking
-    # complete and green. The guard that prevents it is only as good as xdist
-    # keeping collection out of the controller, which is a third-party detail
-    # this repo pins nowhere else; this runs the real thing rather than
-    # simulating a worker with an environment variable.
+    # of it, so a worker claiming the collection's identity would report ONE
+    # identity over partial results -- and a worker that died before uploading
+    # would leave its siblings looking complete and green. The run's identity
+    # is the controller's to claim: it is the one process that knows the whole
+    # collection and asks for the selection on it (MRGFY-8632). This runs the
+    # real thing rather than simulating a worker with an environment variable.
     conftest.configure_upload(monkeypatch, otlp_collector)
     pytester.makepyfile(
         """
@@ -140,8 +140,21 @@ def test_no_session_of_a_distributed_run_claims_a_fingerprint(
 
     result.assert_outcomes(passed=3)
     batches = otlp_collector.batches
-    # The run did upload -- otherwise the assertion below passes vacuously.
-    assert batches
-    assert any(span.name for batch in batches for span in batch.spans)
-    for batch in batches:
+    workers = [
+        batch
+        for batch in batches
+        if any(span.attributes.get("test.scope") == "case" for span in batch.spans)
+    ]
+    # The run did upload its tests -- otherwise the assertion below passes
+    # vacuously.
+    assert workers
+    for batch in workers:
         assert "test.collection.fingerprint" not in batch.resource_attributes
+    (controller,) = [batch for batch in batches if batch not in workers]
+    assert controller.resource_attributes[
+        "test.collection.fingerprint"
+    ] == conftest.collection_fingerprint(
+        f"test_only_the_controller_of_a_distributed_run_claims_a_fingerprint.py::{name}"
+        for name in ("test_one", "test_two", "test_three")
+    )
+    assert controller.resource_attributes["test.collection.count"] == 3

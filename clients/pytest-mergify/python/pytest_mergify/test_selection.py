@@ -1,5 +1,10 @@
 import dataclasses
+import json
+import os
+import shutil
+import tempfile
 import textwrap
+import time
 import typing
 
 import _pytest.config
@@ -78,6 +83,21 @@ NotAppliedReason = typing.Literal[
     # chose -- and, unlike the value above, it would still look like an
     # ordinary reduction.
     "subset_partly_absent_from_collection",
+    # Under pytest-xdist, the controller applied the answer and at least one
+    # worker could not read it, so that worker ran every test it was handed.
+    # The one value here that is not about the answer: the run was offered a
+    # reduction it could act on, and the file carrying it to a worker went
+    # missing or unreadable -- which is also why it is the one value that
+    # does not mean the WHOLE suite ran, only that the reduction did not
+    # reach every test. Unreachable on a healthy machine, since the answer is
+    # written before xdist hands out a single test. Not one of the engine's
+    # known values, so its `not_applied` metric files it under "other".
+    "xdist_worker_could_not_read_answer",
+    # Under pytest-xdist, the workers collected different tests, so xdist
+    # stopped the run before any test ran and the answer was applied to
+    # nothing. The customer's collection is not deterministic across
+    # processes; nothing about Mergify's answer.
+    "xdist_collections_differ",
 ]
 
 
@@ -174,6 +194,13 @@ _FULL_RUN_SENTENCES: typing.Dict[str, str] = {
     "subset_served_without_tests": _NOT_APPLIED_SENTENCE,
     "subset_matched_no_collected_test": _NOT_APPLIED_SENTENCE,
     "subset_partly_absent_from_collection": _NOT_APPLIED_SENTENCE,
+    "xdist_worker_could_not_read_answer": (
+        "Some pytest-xdist workers couldn't read Mergify's answer, so they ran"
+        " every test they were given."
+    ),
+    "xdist_collections_differ": (
+        "The pytest-xdist workers collected different tests, so no test ran."
+    ),
 }
 
 # A newer engine may serve a reason this client predates. The block must then
@@ -288,6 +315,28 @@ class TestSelection:
     ) -> None:
         """Apply the served answer to the collected items, in place.
 
+        Raises `pytest.UsageError` on a refusal, which is what fails the run,
+        carrying the server's explanation of it.
+        """
+        keep = self.resolve([item.nodeid for item in items])
+        if keep is None:
+            return
+
+        deselected = [item for item in items if item.nodeid not in keep]
+        if deselected:
+            items[:] = [item for item in items if item.nodeid in keep]
+            config.hook.pytest_deselected(items=deselected)
+
+    def resolve(
+        self, nodeids: typing.Sequence[str]
+    ) -> typing.Optional[typing.FrozenSet[str]]:
+        """Decide what the served answer leaves of this collection to run.
+
+        Returns the ids to run, or `None` to run all of them. Only ids are
+        read, so the same decision serves the run that holds the items and the
+        pytest-xdist controller, which only ever sees the ids its workers
+        collected.
+
         Matching is by exact nodeid — the identifiers Mergify serves are the
         ones this plugin previously uploaded. A subset is honoured all or not
         at all: one served id this collection does not hold declines the whole
@@ -301,7 +350,7 @@ class TestSelection:
             # Declared at construction: there was an answer, and this client
             # could not act on it. Leaving the collection alone is the full
             # suite.
-            return
+            return None
 
         if self.selection == "refused":
             # Deliberately not the degradation path. Everywhere else, a shape
@@ -314,63 +363,47 @@ class TestSelection:
             raise pytest.UsageError(self.message or FALLBACK_REFUSAL_MESSAGE)
 
         if self.selection == "empty":
-            self._deselect_everything(config, items)
-            return
+            # A collection that is already empty is left alone, counters
+            # included: the run is then red for a reason of its own (a `-k`
+            # matching nothing), and recording an application would have this
+            # answer both green that exit code and announce a skip over a suite
+            # it never emptied.
+            #
+            # Emptying rather than stopping the session is what keeps the rest
+            # of the run intact: the session still finishes, so it still
+            # uploads. A `pytest.exit` would be shorter and would make the one
+            # job that legitimately ran nothing the only one missing from
+            # Mergify's reporting.
+            if not nodeids:
+                return None
+            self.deselected_count = len(nodeids)
+            return frozenset()
 
         if self.selection != "subset":
-            return
+            return None
 
-        subset = set(self.tests)
-        kept = [item for item in items if item.nodeid in subset]
-        matched = {item.nodeid for item in kept}
+        subset = frozenset(self.tests)
+        kept = [nodeid for nodeid in nodeids if nodeid in subset]
+        matched = set(kept)
         if matched != subset:
-            # Identities, not counts. `kept` holds collected ITEMS and `subset`
-            # holds distinct ids, and the two stop being comparable as soon as
-            # a nodeid appears twice -- which `pytest --keep-duplicates` does on
-            # purpose. Under a count comparison one duplicate cancels one
-            # missing served id, and the run reduces to an arbitrary part of
-            # what was asked for while reporting an ordinary reduction: exactly
-            # the outcome this branch exists to prevent.
+            # Identities, not counts. `kept` may hold one id several times, and
+            # `subset` holds distinct ids, and the two stop being comparable as
+            # soon as a nodeid appears twice -- which `pytest --keep-duplicates`
+            # does on purpose. Under a count comparison one duplicate cancels
+            # one missing served id, and the run reduces to an arbitrary part
+            # of what was asked for while reporting an ordinary reduction:
+            # exactly the outcome this branch exists to prevent.
             self.not_applied_reason = (
                 "subset_matched_no_collected_test"
                 if not matched
                 else "subset_partly_absent_from_collection"
             )
-            return
-
-        deselected = [item for item in items if item.nodeid not in subset]
-        if deselected:
-            items[:] = kept
-            config.hook.pytest_deselected(items=deselected)
+            return None
 
         self.kept_count = len(kept)
-        self.deselected_count = len(deselected)
-        self.kept_tests = [item.nodeid for item in kept]
-
-    def _deselect_everything(
-        self,
-        config: _pytest.config.Config,
-        items: typing.List[_pytest.nodes.Item],
-    ) -> None:
-        """Empty the collection through pytest's own deselection path.
-
-        Deselecting rather than stopping the session is what keeps the rest of
-        the run intact: the session still finishes, so it still uploads. A
-        `pytest.exit` here would be shorter and would make the one job that
-        legitimately ran nothing the only one missing from Mergify's reporting.
-
-        A collection that is already empty is left alone, counters included: the
-        run is then red for a reason of its own (a `-k` matching nothing), and
-        recording an application would have this answer both green that exit
-        code and announce a skip over a suite it never emptied.
-        """
-        if not items:
-            return
-
-        self.deselected_count = len(items)
-        deselected = list(items)
-        items[:] = []
-        config.hook.pytest_deselected(items=deselected)
+        self.deselected_count = len(nodeids) - len(kept)
+        self.kept_tests = kept
+        return subset
 
     def report(self) -> str:
         """The block pytest prints in its "Mergify CI" terminal section.
@@ -413,19 +446,27 @@ class TestSelection:
                 " in the error above."
             )
 
+        # A declined answer keeps Mergify's `reason` verbatim (it is the
+        # server's word, never rewritten), so on that path the sentence is
+        # keyed by what THIS run did with the answer. Asked before the two
+        # reductions below: under pytest-xdist an answer can be resolved
+        # against the collection and then fail to reach a worker, and the
+        # block must not describe a reduction that worker did not make.
+        if self.not_applied_reason is not None:
+            return self._block(
+                _FULL_RUN_SENTENCES.get(
+                    self.not_applied_reason, _UNKNOWN_REASON_SENTENCE
+                )
+            )
+
         if self.selection == "empty":
             return self._empty_block()
 
         if self.selection == "subset" and self.kept_count is not None:
             return self._subset_block()
 
-        # A declined answer keeps Mergify's `reason` verbatim (it is the
-        # server's word, never rewritten), so on that path the sentence is
-        # keyed by what THIS run did with the answer.
         return self._block(
-            _FULL_RUN_SENTENCES.get(
-                self.not_applied_reason or self.reason, _UNKNOWN_REASON_SENTENCE
-            )
+            _FULL_RUN_SENTENCES.get(self.reason, _UNKNOWN_REASON_SENTENCE)
         )
 
     def _empty_block(self) -> str:
@@ -480,3 +521,161 @@ class TestSelection:
     @staticmethod
     def _block(text: str) -> str:
         return f"{_HEADER}\n\n{textwrap.fill(text, _WRAP_WIDTH)}\n"
+
+
+# The key under which the pytest-xdist controller hands each worker the path of
+# the answer file, in the worker's `workerinput`.
+XDIST_ANSWER_PATH_KEY = "mergify_test_selection_answer_path"
+
+# How long a worker waits for the answer file before running everything. The
+# controller writes it before xdist schedules a single test, so a worker about
+# to run one finds it already there; the wait only covers a filesystem slow to
+# show a rename, and a file still missing past it is never coming.
+XDIST_ANSWER_WAIT_SECONDS = 10.0
+
+# The reason a worker gives the tests the answer left out. Visible with `-rs`,
+# and what a developer searches for when a job reports tests as skipped.
+XDIST_SKIP_REASON = "Not selected by Mergify Test Selection"
+
+
+@dataclasses.dataclass
+class XdistSelectionController:
+    """Carries the controller's one answer to every pytest-xdist worker.
+
+    Under `-n`, the controller never collects and the workers never ask: the
+    controller asks once, from the ids its workers report, and writes what to
+    run to a file each worker reads before its first test. A file rather than
+    `workerinput`, which leaves for a worker before that worker has
+    collected -- that is, before there is a collection to ask about.
+
+    Workers skip rather than deselect: xdist requires every worker to report
+    the same collection, and a worker that deselected on an answer the others
+    did not read would fail the run on "Different tests were collected".
+    """
+
+    # A remote gateway (`--tx ssh=...`) does not share this machine's disk, so
+    # no file reaches it: the run neither asks nor reduces.
+    disabled: bool = False
+    # Created when the first worker is handed a path, so a run that never
+    # opted in leaves nothing behind.
+    _directory: typing.Optional[str] = None
+    # What the first worker collected. xdist fails the run on its own when a
+    # later worker collects anything else, so the rest are not compared.
+    collected_ids: typing.Optional[typing.List[str]] = None
+    # What the controller decided to run, or `None` for everything.
+    keep: typing.Optional[typing.FrozenSet[str]] = None
+    # The workers that ran everything because they could not read the answer.
+    workers_that_could_not_read: typing.Set[str] = dataclasses.field(
+        default_factory=set
+    )
+    # Whether a worker died before reporting what it did with the answer.
+    worker_crashed: bool = False
+    # Whether a later worker collected anything other than the first: xdist
+    # then stops the run before any test.
+    collections_differ: bool = False
+    # Whether a test the answer left out reported a failure -- from its
+    # teardown, which also tears down what the tests before it set up.
+    failed_on_a_skipped_test: bool = False
+
+    @property
+    def answer_path(self) -> typing.Optional[str]:
+        if self._directory is None:
+            return None
+        return os.path.join(self._directory, "answer.json")
+
+    def hand_out(self, workerinput: typing.Dict[str, typing.Any]) -> None:
+        """Give a worker the path its answer will be written at."""
+        if self.disabled:
+            return
+        if self._directory is None:
+            # One directory per run, never a fixed path: two runs on one
+            # machine must not read each other's answer.
+            self._directory = tempfile.mkdtemp(prefix="pytest-mergify-")
+        workerinput[XDIST_ANSWER_PATH_KEY] = self.answer_path
+
+    def publish(
+        self,
+        fingerprint: typing.Optional[str],
+        keep: typing.Optional[typing.FrozenSet[str]],
+    ) -> None:
+        """Write the answer for the workers, atomically.
+
+        Written whatever was decided, including "run everything": a worker
+        holding a path waits for its file, and should not wait on a run that
+        was never going to reduce anything.
+        """
+        self.keep = keep
+        path = self.answer_path
+        if path is None:
+            return
+        temporary = f"{path}.tmp"
+        try:
+            with open(temporary, "w", encoding="utf-8") as file:
+                json.dump(
+                    {
+                        "fingerprint": fingerprint,
+                        "keep": None if keep is None else sorted(keep),
+                    },
+                    file,
+                )
+            os.replace(temporary, path)
+        except OSError:
+            # Every worker then waits out its bound and runs everything, and
+            # says so -- the run is slower, never wrong.
+            pass
+
+    def clean_up(self) -> None:
+        if self._directory is not None:
+            shutil.rmtree(self._directory, ignore_errors=True)
+
+
+@dataclasses.dataclass
+class XdistSelectionWorker:
+    """Reads the controller's answer on a pytest-xdist worker, once.
+
+    Anything unexpected -- no file, a file it cannot read, an answer about a
+    collection other than this worker's -- runs the test. The one outcome this
+    must never produce is a test skipped on an answer that was not about it.
+    """
+
+    answer_path: str
+    # The identity of what this worker collected, taken from the very ids it
+    # reports to the controller, so it is the fingerprint the controller asked
+    # with whenever the two collections agree.
+    fingerprint: typing.Optional[str] = None
+    could_not_read: bool = False
+    _loaded: bool = False
+    _keep: typing.Optional[typing.FrozenSet[str]] = None
+
+    def skips(self, nodeid: str) -> bool:
+        """Whether the answer leaves this test out of the run."""
+        keep = self._load()
+        return keep is not None and nodeid not in keep
+
+    def _load(self) -> typing.Optional[typing.FrozenSet[str]]:
+        if self._loaded:
+            return self._keep
+        self._loaded = True
+
+        deadline = time.monotonic() + XDIST_ANSWER_WAIT_SECONDS
+        while not os.path.exists(self.answer_path) and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+        try:
+            with open(self.answer_path, encoding="utf-8") as file:
+                answer = json.load(file)
+            keep = answer["keep"]
+            if keep is None:
+                return None
+            if (
+                answer["fingerprint"] != self.fingerprint
+                or not isinstance(keep, list)
+                or not all(isinstance(nodeid, str) for nodeid in keep)
+            ):
+                raise ValueError("the answer is not about this collection")
+        except (OSError, ValueError, KeyError, TypeError):
+            self.could_not_read = True
+            return None
+
+        self._keep = frozenset(keep)
+        return self._keep
