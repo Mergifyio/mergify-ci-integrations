@@ -158,7 +158,15 @@ writeFileSync(
   runnerProbe,
   `import { existsSync } from 'node:fs';
    const { MergifyReporter } = await import('@mergifyio/vitest');
-   const vitest = { version: '${vitestVersion}', config: {}, logger: { log: () => {} }, provide: () => {} };
+   // A Vitest instance always lists its projects -- the root one at least --
+   // and the reporter hands its runner inputs to each of them.
+   const vitest = {
+     version: '${vitestVersion}',
+     config: {},
+     logger: { log: () => {} },
+     provide: () => {},
+     projects: [{ config: {}, provide: () => {} }],
+   };
    new MergifyReporter({ quarantineList: ['suite > quarantined'] }).onInit(vitest);
    const runner = vitest.config.runner;
    if (!runner) { console.error('reporter configured no runner'); process.exit(1); }
