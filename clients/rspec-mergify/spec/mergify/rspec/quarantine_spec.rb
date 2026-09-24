@@ -147,5 +147,20 @@ RSpec.describe Mergify::RSpec::Quarantine, if: Mergify::RSpec::Native.available?
     it 'lists unused quarantined tests' do
       expect(report).to match(%r{Unused quarantined tests \(1\):\n\s+- \./spec/bar_spec\.rb\[1:2\]})
     end
+
+    context 'when run by a parallel worker' do
+      around do |example|
+        original = ENV.fetch('TEST_ENV_NUMBER', nil)
+        ENV['TEST_ENV_NUMBER'] = '2'
+        example.run
+      ensure
+        original.nil? ? ENV.delete('TEST_ENV_NUMBER') : ENV['TEST_ENV_NUMBER'] = original
+      end
+
+      it 'does not call the tests other workers ran unused' do
+        expect(report).to match(%r{Quarantined tests not run by this worker \(1\):\n\s+- \./spec/bar_spec\.rb\[1:2\]})
+        expect(report).not_to include('Unused')
+      end
+    end
   end
 end

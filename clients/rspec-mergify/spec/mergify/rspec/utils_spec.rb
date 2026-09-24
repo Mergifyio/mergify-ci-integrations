@@ -108,4 +108,23 @@ RSpec.describe Mergify::RSpec::Utils do
       end.to raise_error(Mergify::RSpec::Utils::InvalidRepositoryFullNameError)
     end
   end
+
+  describe '.parallel_worker?' do
+    around do |example|
+      original = ENV.fetch('TEST_ENV_NUMBER', nil)
+      example.run
+    ensure
+      original.nil? ? ENV.delete('TEST_ENV_NUMBER') : ENV['TEST_ENV_NUMBER'] = original
+    end
+
+    it "is true for parallel_tests' first worker, whose number is empty" do
+      ENV['TEST_ENV_NUMBER'] = ''
+      expect(described_class.parallel_worker?).to be(true)
+    end
+
+    it 'is false outside a parallel run' do
+      ENV.delete('TEST_ENV_NUMBER')
+      expect(described_class.parallel_worker?).to be(false)
+    end
+  end
 end

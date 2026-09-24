@@ -48,12 +48,18 @@ module Mergify
         lines << "  Quarantined tests run (#{used.size}):"
         used.each { |t| lines << "    - #{t}" }
         lines << ''
-        lines << "  Unused quarantined tests (#{unused.size}):"
+        lines << "  #{unused_label} (#{unused.size}):"
         unused.each { |t| lines << "    - #{t}" }
         lines.join("\n")
       end
 
       private
+
+      # A parallel worker runs a share of the suite, so a quarantined test it
+      # did not run was most likely run by another worker, not left unused.
+      def unused_label
+        Utils.parallel_worker? ? 'Quarantined tests not run by this worker' : 'Unused quarantined tests'
+      end
 
       # A nil list means the repository has no quarantine subscription, which is
       # not an error: the session simply quarantines nothing. Anything that went

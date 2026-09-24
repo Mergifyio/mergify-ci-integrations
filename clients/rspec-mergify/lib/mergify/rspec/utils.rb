@@ -45,6 +45,13 @@ module Mergify
         env_truthy?('CI') || env_truthy?('RSPEC_MERGIFY_ENABLE')
       end
 
+      # Returns true inside one of the processes parallel_tests or turbo_tests
+      # splits a suite across. Both set TEST_ENV_NUMBER, to an empty string for
+      # parallel_tests' first worker, so it is the key that counts.
+      def parallel_worker?
+        ENV.key?('TEST_ENV_NUMBER')
+      end
+
       # Split "owner/repo" into [owner, repo].
       # Raises InvalidRepositoryFullNameError when the format is wrong.
       def split_full_repo_name(full_repo_name)
