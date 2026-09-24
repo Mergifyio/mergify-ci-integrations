@@ -2,12 +2,11 @@
 // Install the packed tarballs the way a user would, on this runner's platform,
 // and prove the result actually loads.
 //
-// No local registry is involved and none is needed: npm satisfies the
-// transitive @mergifyio/ci-core -> ci-native link from the top-level tarballs
-// as long as the versions match exactly, which they do -- the release stamps
-// one version across the workspace.
+// No local registry is involved and none is needed: overrides point the
+// packages' links to each other (ci-core -> ci-native -> the platform binary)
+// at the packed files, since the release version is not on the registry yet.
 //
-// The peer is pinned deliberately. Left to itself npm resolves `vitest` to
+// The peer is pinned deliberately. Left to itself pnpm resolves `vitest` to
 // whatever `>=3.0.0` currently allows, which is a major nobody has tested
 // against; that range is its own open question and not something this check
 // should silently depend on.
@@ -73,15 +72,28 @@ const run = (cmd, args, opts = {}) =>
 
 console.log(`platform: ${key} -> @mergifyio/ci-native-${platform}`);
 console.log('installing the packed tarballs...');
-run(process.platform === 'win32' ? 'npm.cmd' : 'npm', [
-  'install',
-  '--no-audit',
-  '--no-fund',
-  tgz(`ci-native-${platform}`),
-  tgz('ci-native'),
-  tgz('ci-core'),
-  tgz('vitest'),
-  tgz('playwright'),
+// pnpm, like the rest of this repository. The packages depend on each other at
+// the release version, which is not on the registry until this draft is
+// published, so the overrides point those links at the packed files: every
+// @mergifyio package below resolves to a tarball or fails, never to a
+// registry copy. The other platforms' binaries are optional and absent.
+const internal = ['ci-core', 'ci-native', `ci-native-${platform}`];
+writeFileSync(
+  join(work, 'pnpm-workspace.yaml'),
+  `overrides:\n${internal
+    .map((name) => `  "@mergifyio/${name}": "file:${tgz(name).replaceAll('\\', '/')}"\n`)
+    .join('')}`
+);
+// Windows ships pnpm behind a .cmd shim, and Node refuses to spawn a .cmd
+// without a shell (EINVAL since CVE-2024-27980).
+const isWindows = process.platform === 'win32';
+const pnpm = (args) => run('pnpm', args, { shell: isWindows });
+console.log(`node ${process.version}, pnpm ${pnpm(['--version']).trim()}`);
+pnpm([
+  'add',
+  ...[`ci-native-${platform}`, 'ci-native', 'ci-core', 'vitest', 'playwright'].map((name) =>
+    tgz(name).replaceAll('\\', '/')
+  ),
 ]);
 
 const problems = [];
