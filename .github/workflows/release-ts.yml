@@ -67,6 +67,7 @@ jobs:
       contents: read # checkout + read the tag list
     outputs:
       tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -103,6 +104,7 @@ jobs:
             exit 1
           fi
           echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+          echo "version=${TAG#ts-v}" >> "${GITHUB_OUTPUT}"
 
   build-native-draft:
     if: github.event_name == 'workflow_dispatch'
@@ -110,148 +112,18 @@ jobs:
       contents: read
     uses: ./.github/workflows/build-ts-native.yml
 
-  pack-packages:
+  pack:
     if: github.event_name == 'workflow_dispatch'
     needs: [resolve-tag, build-native-draft]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read # checkout only; create-draft is what needs write
-    defaults:
-      run:
-        working-directory: clients/ts
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: pnpm/setup@fbda4c85fc2e1e08721cd8763afea8f48d60f024 # v3.0.0
-        with:
-          working-directory: clients/ts
-          runtime: node
-          cache: true
-          require-lockfile: true
-      # Stamp the in-repo 0.0.0 with the release version; `pnpm pack` rewrites
-      # the workspace:* dependency ranges to the stamped version.
-      - name: Stamp the version
-        env:
-          TAG: ${{ needs.resolve-tag.outputs.tag }}
-        run: pnpm -r version "${TAG#ts-v}" --no-git-tag-version
-      # Build BEFORE assembling: the assembly injects optionalDependencies the
-      # lockfile knows nothing about, and `pnpm run` verifies deps against the
-      # lockfile first, so it would fail with ERR_PNPM_OUTDATED_LOCKFILE. Only
-      # `run`/`exec` do that check -- `pnpm pack` below is unaffected. The
-      # injection is undone right after the pack, so this constraint holds for
-      # the steps in between and nowhere else.
-      - run: pnpm -r run build
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          path: clients/ts/packages/native/artifacts
-          pattern: ts-native-*
-      - name: Assemble the platform packages
-        working-directory: clients/ts/packages/native
-        run: |
-          pnpm exec napi artifacts -d artifacts
-          # Sync the platform packages to the stamped version, and pin them as
-          # optionalDependencies of the loader package (the committed manifest
-          # carries none, so the workspace stays resolvable between releases).
-          # Both `pnpm exec` calls run while the manifest is still clean; the
-          # injection below has to stay last in this step.
-          pnpm exec napi version
-          node --eval '
-            const fs = require("node:fs");
-            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
-            pkg.optionalDependencies = Object.fromEntries(
-              fs.readdirSync("npm").map((dir) => [
-                JSON.parse(fs.readFileSync("npm/" + dir + "/package.json", "utf8")).name,
-                pkg.version,
-              ]),
-            );
-            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
-          '
-      # `napi artifacts` populates the platform directories, so the copies have
-      # to land after it. Nothing else here depends on them: npm packs a LICENSE
-      # from the package directory on its own, no `files` entry required.
-      - name: Stage the licenses
-        working-directory: ${{ github.workspace }}
-        run: .github/scripts/stage-ts-licenses.sh
-      - name: Pack the packages
-        run: |
-          pnpm -r pack --pack-destination "${GITHUB_WORKSPACE}/dist"
-          for dir in packages/native/npm/*/; do
-            npm pack "./${dir}" --pack-destination "${GITHUB_WORKSPACE}/dist"
-          done
-      # The tarballs carry the injected optionalDependencies, so the manifest
-      # has done its job; putting the committed one back leaves the workspace
-      # in step with the lockfile again, which is what `pnpm run`/`exec` check
-      # before running anything (see the build step above). Without this, every
-      # step below would have to avoid pnpm -- and the first one that did not,
-      # the metadata check, failed every release attempt after it was added.
-      - name: Restore the loader manifest
-        run: git checkout -- packages/native/package.json
-      # Everything below inspects the tarballs that were just packed -- the
-      # ones the publish stage will upload, since it no longer rebuilds. A pack
-      # exits 0 on a package with no LICENSE, no binary, or a manifest naming a
-      # file no build emits, so nothing else here has an opinion on any of that.
-      - name: Check the packed contents
-        working-directory: ${{ github.workspace }}
-        env:
-          TAG: ${{ needs.resolve-tag.outputs.tag }}
-        run: node .github/scripts/check-ts-packages.mjs dist "${TAG#ts-v}"
-      # publint and attw judge the manifest rather than the file list: exports
-      # maps, main/module/types agreement, and whether the declarations resolve
-      # under each TypeScript module-resolution mode.
-      #
-      # Both are workspace devDependencies rather than fetched per run, so the
-      # lockfile pins them and renovate can see them. `pnpm dlx` would pin the
-      # version just as exactly, but only inside this file, where nothing
-      # updates it -- and a release is the last place to discover a tool has
-      # gone stale. Runs from clients/ts, where the install lives.
-      - name: Check the publishing metadata
-        run: |
-          for tgz in "${GITHUB_WORKSPACE}"/dist/*.tgz; do
-            echo "::group::${tgz##*/}"
-            pnpm exec publint "${tgz}"
-            pnpm exec attw --pack "${tgz}"
-            echo "::endgroup::"
-          done
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: ts-packages
-          path: dist/*.tgz
-          if-no-files-found: error
-
-  # Install the packed packages the way a user would and prove they load. Only
-  # the three natively executable targets run here: the four cross-compiled ones
-  # (both musl archs, linux arm64, and the intel mac) need a container, QEMU, or
-  # a different runner image, and are not covered.
-  check-install:
-    if: github.event_name == 'workflow_dispatch'
-    needs: [resolve-tag, pack-packages]
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # For node and pnpm to run the check with; nothing is installed from the
-      # workspace -- the script builds its own consumer project.
-      - uses: pnpm/setup@fbda4c85fc2e1e08721cd8763afea8f48d60f024 # v3.0.0
-        with:
-          working-directory: clients/ts
-          runtime: node
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: ts-packages
-          path: dist
-      - name: Install and load the packed packages
-        shell: bash
-        env:
-          TAG: ${{ needs.resolve-tag.outputs.tag }}
-        run: node .github/scripts/check-ts-install.mjs dist "${TAG#ts-v}"
+    uses: ./.github/workflows/pack-ts.yml
+    with:
+      version: ${{ needs.resolve-tag.outputs.version }}
 
   create-draft:
     if: github.event_name == 'workflow_dispatch' && !inputs.dry_run
-    needs: [resolve-tag, pack-packages, check-install]
+    needs: [resolve-tag, pack]
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the draft release
