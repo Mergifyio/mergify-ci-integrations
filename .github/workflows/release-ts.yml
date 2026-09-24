@@ -43,6 +43,11 @@ on:
         type: string
         required: false
         default: ""
+      dry_run:
+        description: "Build, pack and check the packages without creating the draft release -- to prove a release change from its branch before it merges."
+        type: boolean
+        required: false
+        default: false
   release:
     types: [published]
 
@@ -228,9 +233,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # For a node to run the check with; nothing is installed from the
-      # workspace, and the consumer project the script builds uses npm, since
-      # that is what most consumers will.
+      # For node and pnpm to run the check with; nothing is installed from the
+      # workspace -- the script builds its own consumer project.
       - uses: pnpm/setup@fbda4c85fc2e1e08721cd8763afea8f48d60f024 # v3.0.0
         with:
           working-directory: clients/ts
@@ -246,7 +250,7 @@ jobs:
         run: node .github/scripts/check-ts-install.mjs dist "${TAG#ts-v}"
 
   create-draft:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && !inputs.dry_run
     needs: [resolve-tag, pack-packages, check-install]
     runs-on: ubuntu-latest
     permissions:
