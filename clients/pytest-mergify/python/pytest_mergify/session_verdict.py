@@ -95,6 +95,14 @@ class SessionVerdict:
     def record_duration(self, report: _pytest.reports.TestReport) -> None:
         self._runtime_seconds += report.duration
 
+    def add_runtime(self, seconds: float) -> None:
+        """Count time measured elsewhere -- a pytest-xdist worker's."""
+        self._runtime_seconds += seconds
+
+    @property
+    def runtime_seconds(self) -> float:
+        return self._runtime_seconds
+
     @property
     def total_test_runtime_ms(self) -> int:
         return int(self._runtime_seconds * 1000)
