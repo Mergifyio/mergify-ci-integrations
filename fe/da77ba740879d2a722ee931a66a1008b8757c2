@@ -1,1 +1,1 @@
-fix the three codespell hits CI flagged (afterAll in prose, testOf parameter)
+type the test env as a plain record: eslint has no NodeJS global
