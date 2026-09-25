@@ -21,7 +21,7 @@ permissions: {}
 
 jobs:
   pack-packages:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read # checkout only; create-draft is what needs write
     defaults:
@@ -134,7 +134,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest, windows-latest, macos-latest]
+        runner: [ubuntu-26.04, windows-latest, macos-latest]
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read

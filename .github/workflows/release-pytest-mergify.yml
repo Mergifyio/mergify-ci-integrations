@@ -50,7 +50,7 @@ jobs:
   # downstream job stamps and releases.
   resolve-tag:
     if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read # checkout + read the tag list
     outputs:
@@ -113,7 +113,7 @@ jobs:
   check-packages:
     if: github.event_name == 'workflow_dispatch'
     needs: [resolve-tag, build-draft]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
     steps:
@@ -156,7 +156,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest, windows-latest, macos-latest]
+        runner: [ubuntu-26.04, windows-latest, macos-latest]
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -176,7 +176,7 @@ jobs:
   create-draft:
     if: github.event_name == 'workflow_dispatch'
     needs: [resolve-tag, build-draft, check-packages, check-install]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: write # create the draft release
     steps:
@@ -205,7 +205,7 @@ jobs:
     # A GitHub Release in this monorepo isn't client-scoped, so only act on
     # pytest-mergify's tags; other clients get their own release workflows.
     if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'pytest-mergify-v')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # The `release` environment carries the PyPI Trusted Publishing identity.
     environment: release
     permissions:

@@ -62,7 +62,7 @@ jobs:
   # ---------------- Step 1: prepare the draft (workflow_dispatch) ----------------
   resolve-tag:
     if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read # checkout + read the tag list
     outputs:
@@ -124,7 +124,7 @@ jobs:
   create-draft:
     if: github.event_name == 'workflow_dispatch' && !inputs.dry_run
     needs: [resolve-tag, pack]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: write # create the draft release
     steps:
@@ -155,7 +155,7 @@ jobs:
     # A GitHub Release in this monorepo isn't client-scoped, so only act on
     # ts-v* tags; other clients have their own release workflows.
     if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'ts-v')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # Nothing is compiled here any more, so this is far more than the work
     # needs -- but the OIDC exchange can still hang, and that is what the
     # ceiling is for.
