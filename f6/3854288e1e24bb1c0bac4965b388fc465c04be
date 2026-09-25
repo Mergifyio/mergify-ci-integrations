@@ -1,0 +1,1 @@
+rebase on main after #394; drop its selection gate (selectionUnreachable) now that the runner extension deselects under projects, in browser mode and under a user runner; port #394's deselection of already-skipped tests into extend-runner
