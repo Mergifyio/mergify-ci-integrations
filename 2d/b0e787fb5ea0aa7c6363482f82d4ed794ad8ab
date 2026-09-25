@@ -1,0 +1,1 @@
+replace the JSON-report key, which collapses spec ids across projects and silently dropped tests from every leg; guard the corpus as a set in both directions; keep setup projects out on both sides
