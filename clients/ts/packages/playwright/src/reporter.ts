@@ -31,6 +31,7 @@ import {
   type SessionVerdictClient,
   SessionVerdictFold,
   type SessionVerdictResult,
+  SHARD_SLICE_UNAVAILABLE,
   type SpanAttributes,
   selectionEcho,
   selectionResourceAttributes,
@@ -53,6 +54,7 @@ import type {
   TestResult,
 } from '@playwright/test/reporter';
 import * as playwrightResource from './resources/playwright.js';
+import { listPlaywrightSlice } from './shard.js';
 import { readStateFile, type SharedState } from './state-file.js';
 import type { MergifyReporterOptions } from './types.js';
 import {
@@ -61,6 +63,7 @@ import {
   mapStatus,
   projectNameFromTest,
   projectNamePrefix,
+  readonlyProjectNames,
   resolveIncludeProject,
   toPosix,
 } from './utils.js';
@@ -93,92 +96,6 @@ interface PlaywrightTestRun {
    * left, without partitioning it. Optional so a stub need not provide it.
    */
   skipSharding?(): void;
-}
-
-/**
- * This leg's share of a sharded run, decided here rather than by Playwright.
- *
- * The selection is keyed on what a leg collected -- its fingerprint and count
- * are what the engine matches the previous attempt's session on, and what it
- * judges the session complete against. Playwright partitions AFTER
- * `preprocess`, so the only moment the reporter can ask is a moment where it
- * does not know Playwright's slice; and letting Playwright partition a served
- * subset spreads one leg's failures over every leg, so that most of them are
- * replayed by nobody. So once a leg asks, the partition is the reporter's on
- * every attempt: the same collection, the same shard index, the same slice --
- * which is what makes the fingerprint match.
- *
- * The unit is the file within a project (and a `repeatEach` index): a serial
- * describe, a `beforeAll`, a worker-scoped fixture never span two files, so a
- * partition that keeps files whole is one Playwright's own grouping would
- * allow. The arithmetic is Playwright's `filterForShard` with equal weights:
- * contiguous ranges of the collection, sized by the legs' weights
- * (`PWTEST_SHARD_WEIGHTS`, colon-separated as Playwright reads it, equal by
- * default) with the remainder on the first
- * legs, and a unit assigned to the leg its first test falls in.
- */
-export function shardSlice<T extends { unit: string }>(
-  entries: readonly T[],
-  shard: { current: number; total: number },
-  weights: readonly number[] = Array.from({ length: shard.total }, () => 1)
-): Set<T> {
-  // Playwright's `filterForShard`: each leg gets `floor(weight * total /
-  // totalWeight)` entries, the remainder one by one from the first leg on.
-  const totalWeight = weights.reduce((a, b) => a + b, 0);
-  const sizes = weights.map((w) => Math.floor((w * entries.length) / totalWeight));
-  const remainder = entries.length - sizes.reduce((a, b) => a + b, 0);
-  for (let i = 0; i < remainder; i++) sizes[i % sizes.length] += 1;
-  let from = 0;
-  for (let i = 0; i < shard.current - 1; i++) from += sizes[i];
-  const to = from + sizes[shard.current - 1];
-
-  // Units in collection order, each with the index of its first entry.
-  const firstIndex = new Map<string, number>();
-  entries.forEach((entry, index) => {
-    if (!firstIndex.has(entry.unit)) firstIndex.set(entry.unit, index);
-  });
-  const kept = new Set<T>();
-  for (const entry of entries) {
-    const start = firstIndex.get(entry.unit) ?? 0;
-    if (start >= from && start < to) kept.add(entry);
-  }
-  return kept;
-}
-
-/**
- * The per-leg weights Playwright reads from `PWTEST_SHARD_WEIGHTS`, when they
- * are well-formed for this run; undefined otherwise, which is equal weights.
- * Playwright itself aborts the run on a count mismatch; here the partition is
- * ours, so the same run keeps going on the default and says so.
- */
-function shardWeights(total: number, log: (msg: string) => void): number[] | undefined {
-  const raw = process.env.PWTEST_SHARD_WEIGHTS;
-  if (!raw) return undefined;
-  // Playwright's own reading (`resolveShardWeightsOption`): colon-separated
-  // integers, zero allowed, negative or unparsable refused.
-  const weights = raw.split(':').map((w) => Number.parseInt(w, 10));
-  const totalWeight = weights.reduce((a, b) => a + b, 0);
-  if (
-    weights.length === total &&
-    weights.every((w) => !Number.isNaN(w) && w >= 0) &&
-    totalWeight > 0
-  ) {
-    return weights;
-  }
-  log(
-    `PWTEST_SHARD_WEIGHTS="${raw}" does not name ${total} non-negative weights; the legs are weighted equally`
-  );
-  return undefined;
-}
-
-/**
- * Which unit of the partition a test belongs to. `test.location.file` rather
- * than the file suite's title, which is relative and project-independent;
- * the project keeps two projects' copies of one file apart, as Playwright's
- * worker hash does.
- */
-function shardUnit(test: TestCase): string {
-  return `${projectNameFromTest(test) ?? ''}\0${test.location?.file ?? ''}\0${test.repeatEachIndex ?? 0}`;
 }
 
 /**
@@ -223,32 +140,37 @@ function finalStatus(test: TestCase, failOnFlakyTests: boolean): FinalStatus | u
 }
 
 /**
- * Every project pulled in by another project *of this run* — as a
- * `dependencies` entry or as its `teardown`.
+ * Why a listing cannot be acted on, or undefined when it can.
  *
- * Their tests are readonly during `preprocess`: `testRun.exclude()` throws on
- * them ("these always run in full"). Read from the suite, NOT from
- * `config.projects`: the latter holds every declared project regardless of
- * `--project`, so under `playwright test --project=setup` it would mark `setup`
- * readonly on the strength of a declaration by an `e2e` project that is not
- * running — filtering out the entire collection, killing the reduction, and
- * reporting `subset_matched_no_collected_test` for a cause that never happened.
+ * The corpus the listing saw must be the very set this run collected -- equal
+ * as sets, in both directions. A surplus means the listing saw tests this run
+ * does not hold; a deficit means it missed tests this run does hold, and only
+ * the deficit can drop a test from every leg, which is why counting one side
+ * was not enough. Either way the slice is drawn over a suite that is not this
+ * one, and the only safe answer is to run the leg in full.
  *
- * No graph walk is needed for chains: every project of the run contributes its
- * own declarations, so a setup project's own setup or teardown is picked up
- * from that project's entry. Still deliberately over-inclusive — a project both
- * top-level and someone else's dependency lands here and keeps running in full,
- * which is the direction this feature is allowed to err in.
+ * The slice is then checked to be part of that corpus, so a listing that
+ * agrees on the whole and still names something else in its slice is refused
+ * too.
  */
-function readonlyProjectNames(suite: Suite): Set<string> {
-  const names = new Set<string>();
-  for (const projectSuite of suite.suites) {
-    const project = projectSuite.project();
-    if (!project) continue;
-    for (const dependency of project.dependencies) names.add(dependency);
-    if (project.teardown) names.add(project.teardown);
+function listingDisagreement(
+  listing: { corpus: readonly string[]; slice: readonly string[] },
+  collected: ReadonlyMap<string, unknown>
+): string | undefined {
+  const listed = new Set(listing.corpus);
+  const surplus = [...listed].filter((id) => !collected.has(id)).length;
+  const missing = [...collected.keys()].filter((id) => !listed.has(id)).length;
+  if (surplus || missing) {
+    return (
+      `Playwright listed a suite this run does not have (${surplus} test(s) it does not` +
+      ` collect, ${missing} it collects and the listing missed)`
+    );
   }
-  return names;
+  const strayInSlice = listing.slice.filter((id) => !listed.has(id)).length;
+  if (strayInSlice) {
+    return `Playwright gave this shard ${strayInSlice} test(s) outside the suite it listed`;
+  }
+  return undefined;
 }
 
 export class MergifyReporter implements Reporter {
@@ -480,19 +402,30 @@ export class MergifyReporter implements Reporter {
         );
         return;
       }
+      // Asked before anything is taken over, so a failure here leaves the run
+      // exactly as Playwright would have run it.
+      const listing = listPlaywrightSlice(log);
+      const byId = new Map(collected.map((entry) => [entry.test.id, entry]));
+      const disagreement = listing && listingDisagreement(listing, byId);
+      if (!listing || disagreement) {
+        if (disagreement) log(`${disagreement}; the shard runs unreduced`);
+        // Fail open, and say so where the developer reads it: Playwright still
+        // shards this run itself, the leg runs its own share in full, and no
+        // slice is guessed.
+        this.testSelection = applyToCollected(
+          { selection: 'full', reason: SHARD_SLICE_UNAVAILABLE, tests: new Set(), served: false },
+          []
+        );
+        return;
+      }
       // Throws when another reporter already took sharding over: caught by
       // `preprocess`, and the run then executes whatever that reporter left.
       params.testRun.skipSharding();
-      const slice = shardSlice(
-        collected.map((entry) => ({ ...entry, unit: shardUnit(entry.test) })),
-        params.config.shard,
-        shardWeights(params.config.shard.total, log)
-      );
-      const inSlice = new Set([...slice].map((entry) => entry.test));
+      const inSlice = new Set(listing.slice);
       for (const entry of collected) {
-        if (!inSlice.has(entry.test)) params.testRun.exclude(entry.test);
+        if (!inSlice.has(entry.test.id)) params.testRun.exclude(entry.test);
       }
-      collected = collected.filter((entry) => inSlice.has(entry.test));
+      collected = collected.filter((entry) => inSlice.has(entry.test.id));
     }
 
     // Distinct identities, in collection order: with project prefixing off, a

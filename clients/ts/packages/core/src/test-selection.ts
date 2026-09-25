@@ -19,6 +19,13 @@ export type TestSelectionClient = Pick<CiApiClient, 'fetchTestSelection'>;
 export type TestSelectionAnswer = 'full' | 'subset' | 'empty' | 'refused';
 
 /**
+ * The `reason` a client reports when a sharded leg could not learn its own
+ * slice. It never comes from the server: the client puts it on a `full`
+ * selection it builds itself, so the terminal block can say what happened.
+ */
+export const SHARD_SLICE_UNAVAILABLE = 'shard_slice_unavailable';
+
+/**
  * Why a run did not do what Mergify answered. Closed on purpose, and named
  * after the shape of the answer rather than after what the run did with it:
  * what it did is always the same, run everything.
@@ -503,6 +510,11 @@ function fullRunSentences(client: TestSelectionClientIdentity): Record<string, s
       'The previous attempt stopped before running all of its tests, so the full suite ran.',
     matched_test_session_failures_truncated:
       'The previous attempt had too many failures for Mergify to list, so the full suite ran.',
+    // Client-side: the run is sharded, and the client could not establish
+    // which tests this leg owns. Nothing was asked and nothing was skipped --
+    // the leg ran its own share, exactly as it would have without Mergify.
+    [SHARD_SLICE_UNAVAILABLE]:
+      "Mergify couldn't tell which tests this shard owns, so the shard ran in full.",
     no_collection_fingerprint:
       `This version of ${client.name} doesn't report what it collected, so the full suite ran.` +
       ' Upgrade it to let Mergify reduce reruns.',

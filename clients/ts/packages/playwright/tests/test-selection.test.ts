@@ -11,7 +11,15 @@ import type {
   TestResult,
 } from '@playwright/test/reporter';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MergifyReporter, shardSlice } from '../src/reporter.js';
+
+// The slice comes from Playwright itself, through a subprocess the reporter
+// spawns. These tests stand in for that answer; that the real one is
+// Playwright's own, test for test, is proven against the real runner in
+// `tests/integration/sharding.test.ts`.
+vi.mock('../src/shard.js', () => ({ listPlaywrightSlice: vi.fn() }));
+
+import { MergifyReporter } from '../src/reporter.js';
+import { listPlaywrightSlice } from '../src/shard.js';
 
 interface FakeProject {
   name: string;
@@ -83,6 +91,9 @@ function fakeTest(
 ): TestCase {
   const outcome = options.outcome ?? 'expected';
   return {
+    // Playwright gives every test an id, unique per project and repeat index;
+    // it is what a listed slice is matched on.
+    id: `${project}|${file}|${title}|${options.repeatEachIndex ?? 0}`,
     title,
     titlePath: () => ['', project, file, title],
     location: { file: `/root/${file}`, line: 1, column: 1 },
@@ -485,19 +496,34 @@ describe('preprocess — acting on the answer', () => {
 });
 
 describe("preprocess — a sharded run is this leg's own", () => {
+  // `vi.fn()` mocks are not touched by `restoreAllMocks`, so without this a
+  // test that forgets to arm the listing silently inherits its neighbour's --
+  // and `collection()` mints the same ids every time, so it would match.
+  beforeEach(() => {
+    vi.mocked(listPlaywrightSlice).mockReset();
+  });
+
   const sharded = (current: number, total = 2) =>
     fakeConfig([{ name: 'proj' }], { shard: { current, total } });
   const collection = () => [a1(), a2(), b1(), fakeTest('proj', 'c.spec.ts', 'one')];
+  // The listing always reports the whole corpus it saw plus this leg's slice;
+  // the reporter refuses anything whose corpus is not, as a set, what it
+  // collected itself.
+  const listed = (corpus: TestCase[], ...slice: TestCase[]) =>
+    vi.mocked(listPlaywrightSlice).mockReturnValue({
+      corpus: corpus.map((test) => test.id),
+      slice: slice.map((test) => test.id),
+    });
 
-  it('takes sharding over and fingerprints its own slice', async () => {
+  it('takes sharding over and fingerprints the slice Playwright gave it', async () => {
     const { reporter, client } = harness();
     const tests = collection();
     const { excluded, testRun, skipSharding } = fakeTestRun();
+    listed(tests, tests[0], tests[1]);
 
     await reporter.preprocess({ config: sharded(1), suite: suiteWith(tests), testRun });
 
     expect(skipSharding).toHaveBeenCalledOnce();
-    // Four tests over two legs: `a.spec.ts` (2) lands on leg 1, the rest on leg 2.
     expect(excluded).toEqual([tests[2], tests[3]]);
     expect(client.fetchTestSelection.mock.calls[0]?.[4]).toBe(
       nativeTestCollectionFingerprint(['[proj] > a.spec.ts > one', '[proj] > a.spec.ts > two'])
@@ -505,10 +531,11 @@ describe("preprocess — a sharded run is this leg's own", () => {
     expect(reporter.getTestSelection().collection?.count).toBe(2);
   });
 
-  it('gives the other leg the complement, so the two cover the whole suite', async () => {
+  it('takes the complement on the other leg, whatever Playwright decided', async () => {
     const { reporter, client } = harness();
     const tests = collection();
     const { excluded, testRun } = fakeTestRun();
+    listed(tests, tests[2], tests[3]);
 
     await reporter.preprocess({ config: sharded(2), suite: suiteWith(tests), testRun });
 
@@ -526,69 +553,120 @@ describe("preprocess — a sharded run is this leg's own", () => {
     });
     const tests = collection();
     const { excluded, testRun, skipSharding } = fakeTestRun();
+    listed(tests, tests[0], tests[1]);
 
     await reporter.preprocess({ config: sharded(1), suite: suiteWith(tests), testRun });
 
     expect(skipSharding).toHaveBeenCalledOnce();
-    expect(excluded).toEqual([tests[2], tests[3], tests[0]]);
+    expect([...excluded].sort((x, y) => x.id.localeCompare(y.id))).toEqual([
+      tests[0],
+      tests[2],
+      tests[3],
+    ]);
   });
 
-  it('runs its own slice in full when the request failed: no leg covers for another', async () => {
-    const { reporter } = harness(new Error('Mergify API returned HTTP 500'));
-    const tests = collection();
-    const { excluded, testRun } = fakeTestRun();
+  // Whatever goes wrong with the listing, the leg has to end up running what
+  // Playwright would have given it -- never a slice the reporter guessed, and
+  // never a green leg that executed nothing.
+  describe('when Playwright cannot say which tests this leg owns', () => {
+    it('leaves sharding to Playwright and asks Mergify nothing', async () => {
+      const { reporter, client } = harness();
+      const { excluded, testRun, skipSharding } = fakeTestRun();
+      vi.mocked(listPlaywrightSlice).mockReturnValue(null);
 
-    await reporter.preprocess({ config: sharded(1), suite: suiteWith(tests), testRun });
+      await reporter.preprocess({ config: sharded(1), suite: suiteWith(collection()), testRun });
 
-    expect(excluded).toEqual([tests[2], tests[3]]);
+      expect(skipSharding).not.toHaveBeenCalled();
+      expect(excluded).toEqual([]);
+      expect(client.fetchTestSelection).not.toHaveBeenCalled();
+    });
+
+    it('says so in the block, so an unreduced shard is explained', async () => {
+      const { reporter } = harness();
+      vi.mocked(listPlaywrightSlice).mockReturnValue(null);
+      const config = sharded(1);
+      const suite = suiteWith(collection());
+
+      await reporter.preprocess({ config, suite, testRun: fakeTestRun().testRun });
+      reporter.onBegin(config, suite);
+      await reporter.onEnd({ ...RUN, status: 'passed' });
+
+      expect(output()).toContain(
+        "Mergify couldn't tell which tests this shard owns, so the shard ran in full."
+      );
+    });
+
+    it('keeps its own slice, and only that, when the request to Mergify failed', async () => {
+      // The shard exclusion has already happened when the answer fails to
+      // arrive, and it must stand: a leg that fell back to the whole corpus
+      // would run what every other leg is also running, N times over.
+      const { reporter } = harness(new Error('Mergify API returned HTTP 500'));
+      const tests = collection();
+      const { excluded, testRun } = fakeTestRun();
+      listed(tests, tests[0], tests[1]);
+
+      await reporter.preprocess({ config: sharded(1), suite: suiteWith(tests), testRun });
+
+      expect(excluded).toEqual([tests[2], tests[3]]);
+      expect(reporter.getTestSelection().application?.selection.fetchError).toBe(
+        'Mergify API returned HTTP 500'
+      );
+    });
+
+    // The two directions are not symmetric in their consequence. A surplus
+    // fingerprints tests the leg never runs; a DEFICIT excludes tests the leg
+    // owns, on every leg, and the job goes green having skipped them. Only the
+    // second one loses tests, and it is the one a count-based guard missed.
+    it('refuses a listing that names a test this run does not have', async () => {
+      const { reporter, client } = harness();
+      const tests = collection();
+      const { excluded, testRun, skipSharding } = fakeTestRun();
+      vi.mocked(listPlaywrightSlice).mockReturnValue({
+        corpus: [...tests.map((test) => test.id), 'a-test-from-elsewhere'],
+        slice: [tests[0].id],
+      });
+
+      await reporter.preprocess({ config: sharded(1), suite: suiteWith(tests), testRun });
+
+      expect(skipSharding).not.toHaveBeenCalled();
+      expect(excluded).toEqual([]);
+      expect(client.fetchTestSelection).not.toHaveBeenCalled();
+    });
+
+    it('refuses a listing that MISSED a test this run has', async () => {
+      const { reporter, client } = harness();
+      const tests = collection();
+      const { excluded, testRun, skipSharding } = fakeTestRun();
+      // Playwright's JSON reporter used to collapse a spec shared by several
+      // projects into one id. Both sides then shrank together, a count-based
+      // guard saw nothing, and the tests it omitted ran on no leg at all.
+      listed(tests.slice(0, 2), tests[0]);
+
+      await reporter.preprocess({ config: sharded(1), suite: suiteWith(tests), testRun });
+
+      expect(skipSharding).not.toHaveBeenCalled();
+      expect(excluded).toEqual([]);
+      expect(client.fetchTestSelection).not.toHaveBeenCalled();
+    });
+
+    it('refuses a slice holding something outside the corpus it listed', async () => {
+      const { reporter, client } = harness();
+      const tests = collection();
+      const { excluded, testRun, skipSharding } = fakeTestRun();
+      vi.mocked(listPlaywrightSlice).mockReturnValue({
+        corpus: tests.map((test) => test.id),
+        slice: [tests[0].id, 'a-test-from-elsewhere'],
+      });
+
+      await reporter.preprocess({ config: sharded(1), suite: suiteWith(tests), testRun });
+
+      expect(skipSharding).not.toHaveBeenCalled();
+      expect(excluded).toEqual([]);
+      expect(client.fetchTestSelection).not.toHaveBeenCalled();
+    });
   });
 
-  it("reads the legs' weights from PWTEST_SHARD_WEIGHTS", async () => {
-    vi.stubEnv('PWTEST_SHARD_WEIGHTS', '3:1');
-    const { reporter } = harness();
-    const tests = collection();
-    const { excluded, testRun } = fakeTestRun();
-
-    await reporter.preprocess({ config: sharded(1), suite: suiteWith(tests), testRun });
-
-    // Four tests, weights 3:1: leg 1 takes three, so `b.spec.ts` joins it.
-    expect(excluded).toEqual([tests[3]]);
-  });
-
-  it('weights the legs equally when PWTEST_SHARD_WEIGHTS does not fit the run', async () => {
-    vi.stubEnv('PWTEST_SHARD_WEIGHTS', '1:2:3');
-    const { reporter } = harness();
-    const tests = collection();
-    const { excluded, testRun } = fakeTestRun();
-
-    await reporter.preprocess({ config: sharded(1), suite: suiteWith(tests), testRun });
-
-    expect(excluded).toEqual([tests[2], tests[3]]);
-    expect(output()).toContain('PWTEST_SHARD_WEIGHTS="1:2:3" does not name 2 non-negative weights');
-  });
-
-  it('accepts a zero weight, as Playwright does', async () => {
-    vi.stubEnv('PWTEST_SHARD_WEIGHTS', '0:1');
-    const { reporter } = harness();
-    const tests = collection();
-    const { excluded, testRun } = fakeTestRun();
-
-    await reporter.preprocess({ config: sharded(1), suite: suiteWith(tests), testRun });
-
-    // Leg 1 weighs nothing: everything is leg 2's.
-    expect(excluded).toEqual(tests);
-  });
-
-  it('does not touch sharding when the run is not sharded', async () => {
-    const { reporter } = harness();
-    const { testRun, skipSharding } = fakeTestRun();
-
-    await reporter.preprocess({ config: fakeConfig(), suite: suiteWith(collection()), testRun });
-
-    expect(skipSharding).not.toHaveBeenCalled();
-  });
-
-  it('does not ask when this Playwright cannot hand sharding over', async () => {
+  it('never hands sharding over on a Playwright that cannot take it back', async () => {
     const { reporter, client } = harness();
     const { excluded, testRun } = fakeTestRun({ skipSharding: false });
 
@@ -597,52 +675,6 @@ describe("preprocess — a sharded run is this leg's own", () => {
     expect(client.fetchTestSelection).not.toHaveBeenCalled();
     expect(excluded).toEqual([]);
     expect(output()).toContain('cannot hand sharding to a reporter');
-  });
-});
-
-describe('shardSlice', () => {
-  const entries = (units: string[]) => units.map((unit, i) => ({ unit, i }));
-
-  it('keeps a unit whole, on the leg its first entry falls in', () => {
-    // Seven entries over two legs: sizes 4 and 3. `b` starts at index 3,
-    // inside leg 1's range, so leg 1 takes all of `b` and runs five.
-    const all = entries(['a', 'a', 'a', 'b', 'b', 'c', 'c']);
-
-    expect([...shardSlice(all, { current: 1, total: 2 })].map((e) => e.i)).toEqual([0, 1, 2, 3, 4]);
-    expect([...shardSlice(all, { current: 2, total: 2 })].map((e) => e.i)).toEqual([5, 6]);
-  });
-
-  it('partitions: every entry lands on exactly one leg', () => {
-    const all = entries(['a', 'b', 'b', 'c', 'd', 'd', 'd', 'e', 'f', 'g', 'g']);
-    const seen = new Map<number, number>();
-    for (const current of [1, 2, 3]) {
-      for (const entry of shardSlice(all, { current, total: 3 })) {
-        seen.set(entry.i, (seen.get(entry.i) ?? 0) + 1);
-      }
-    }
-
-    expect([...seen.values()].every((n) => n === 1)).toBe(true);
-    expect(seen.size).toBe(all.length);
-  });
-
-  it('puts the remainder on the first legs, like Playwright', () => {
-    const all = entries(['a', 'b', 'c', 'd', 'e']);
-
-    expect(shardSlice(all, { current: 1, total: 3 }).size).toBe(2);
-    expect(shardSlice(all, { current: 2, total: 3 }).size).toBe(2);
-    expect(shardSlice(all, { current: 3, total: 3 }).size).toBe(1);
-  });
-
-  it('sizes the legs by their weights, as Playwright does', () => {
-    // Playwright's arithmetic with weights 3:1 over eight entries: 6 and 2.
-    const all = entries(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']);
-
-    expect(shardSlice(all, { current: 1, total: 2 }, [3, 1]).size).toBe(6);
-    expect(shardSlice(all, { current: 2, total: 2 }, [3, 1]).size).toBe(2);
-  });
-
-  it('leaves a leg empty rather than split a unit', () => {
-    expect(shardSlice(entries(['a', 'a', 'a']), { current: 2, total: 2 }).size).toBe(0);
   });
 });
 
