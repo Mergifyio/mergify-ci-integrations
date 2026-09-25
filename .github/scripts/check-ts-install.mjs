@@ -147,37 +147,45 @@ for (const [label, source] of [
   }
 }
 
-// --- the runner path the reporter computes points at a packed file ---------
-// tests/runner-path.test.ts asserts this against ../src, which proves the
-// computation. Doing it against node_modules also proves the file survived
+// --- the setup files the reporter computes point at packed files ------------
+// tests/setup-path.test.ts asserts this against ../src, which proves the
+// computation. Doing it against node_modules also proves the files survived
 // packing -- and this is the exact defect that shipped in 0.1.1 through 0.3.4,
 // where a hardcoded `runner.js` matched no emitted file. vitest does not fail
-// loudly on an unresolvable runner, so nothing downstream would notice.
-const runnerProbe = join(work, 'runner-probe.mjs');
+// loudly on an unresolvable file, so nothing downstream would notice.
+const setupProbe = join(work, 'setup-probe.mjs');
 writeFileSync(
-  runnerProbe,
+  setupProbe,
   `import { existsSync } from 'node:fs';
    const { MergifyReporter } = await import('@mergifyio/vitest');
    // A Vitest instance always lists its projects -- the root one at least --
-   // and the reporter hands its runner inputs to each of them.
+   // and the reporter adds its setup file to each: one for Node projects, one
+   // for browser ones.
+   const projects = [false, true].map((browser) => ({
+     name: browser ? 'web' : '',
+     config: { browser: { enabled: browser }, setupFiles: [] },
+     provide: () => {},
+   }));
    const vitest = {
      version: '${vitestVersion}',
      config: {},
      logger: { log: () => {} },
      provide: () => {},
-     projects: [{ config: {}, provide: () => {} }],
+     projects,
    };
    new MergifyReporter({ quarantineList: ['suite > quarantined'] }).onInit(vitest);
-   const runner = vitest.config.runner;
-   if (!runner) { console.error('reporter configured no runner'); process.exit(1); }
-   if (!existsSync(runner)) { console.error('runner path does not exist: ' + runner); process.exit(1); }
-   console.log('  runner resolves: ' + runner.split(/[\\\\/]/).pop());
+   for (const project of projects) {
+     const setup = project.config.setupFiles[0];
+     if (!setup) { console.error('reporter added no setup file'); process.exit(1); }
+     if (!existsSync(setup)) { console.error('setup file does not exist: ' + setup); process.exit(1); }
+     console.log('  setup file resolves: ' + setup.split(/[\\\\/]/).pop());
+   }
   `
 );
 try {
-  process.stdout.write(run('node', [runnerProbe]));
+  process.stdout.write(run('node', [setupProbe]));
 } catch (e) {
-  problems.push(`runner path check failed: ${e.stdout || ''}${e.stderr || e.message}`);
+  problems.push(`setup file check failed: ${e.stdout || ''}${e.stderr || e.message}`);
 }
 
 rmSync(work, { recursive: true, force: true });

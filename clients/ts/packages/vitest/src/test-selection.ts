@@ -1,65 +1,11 @@
-import { dirname, extname, relative, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { relative, sep } from 'node:path';
 import type { FinalStatus } from '@mergifyio/ci-core';
 import type { TestSpecification, Vitest } from 'vitest/node';
 
 /** Whether this Vitest exports its runner base class, `TestRunner`, from `vitest` (4.1 and later). */
-function exportsTestRunner(version: string): boolean {
+export function exportsTestRunner(version: string): boolean {
   const [major = 0, minor = 0] = version.split('.').map((part) => Number.parseInt(part, 10));
   return major > 4 || (major === 4 && minor >= 1);
-}
-
-/**
- * The runner the reporter installs, which is what deselects tests.
- *
- * It is a sibling of this very module and always carries the same extension:
- * tsdown emits `index.mjs` next to `runner.mjs` and `index.cjs` next to
- * `runner.cjs`, and under vitest the sources run as `.ts`. There is no
- * `runner.js` in any of those worlds, so deriving the extension from the
- * module being executed is what keeps the pair in step — a hardcoded one
- * resolved to a file that ships in no build at all, and vitest then failed the
- * whole run with ERR_MODULE_NOT_FOUND the moment a repository had its first
- * quarantined test (#87).
- *
- * Which runner depends on the Vitest running: its base class is exported from
- * `vitest` since 4.1 and only from `vitest/runners` before, a subpath 4.1
- * deprecates and 5.0 removed. Loading the wrong one breaks the run the same
- * way a missing file does.
- */
-export function mergifyRunnerPath(vitestVersion: string): string {
-  const self = typeof __filename !== 'undefined' ? __filename : fileURLToPath(import.meta.url);
-  const entry = exportsTestRunner(vitestVersion) ? 'runner' : 'runner-legacy';
-  return resolve(dirname(self), `${entry}${extname(self)}`);
-}
-
-/**
- * Why this run cannot honour a selection, or undefined when it can.
- *
- * A selection is only as real as the runner that deselects: Vitest loads a
- * `config.runner` for the root project alone, and never in browser mode, where
- * the browser tester builds its own (MRGFY-9626). Anywhere else every served
- * answer would run the whole suite while the report claimed a reduction, and
- * the verdict would tell the next attempt a subset ran. Asking nothing is the
- * honest answer there, the same one a job that never opted in gets.
- */
-export function selectionUnreachable(
-  vitest: Vitest,
-  specifications: ReadonlyArray<TestSpecification>
-): string | undefined {
-  const runner = vitest.config.runner;
-  if (runner && runner !== mergifyRunnerPath(vitest.version)) {
-    return `a custom runner is configured (${runner}), and only Mergify's can deselect tests`;
-  }
-  const root = vitest.getRootProject();
-  for (const specification of specifications) {
-    if (specification.project !== root) {
-      return 'this run uses `test.projects`, where Vitest does not load the runner that deselects tests';
-    }
-    if (specification.project.config.browser?.enabled) {
-      return 'this run uses browser mode, where Vitest does not load the runner that deselects tests';
-    }
-  }
-  return undefined;
 }
 
 /**

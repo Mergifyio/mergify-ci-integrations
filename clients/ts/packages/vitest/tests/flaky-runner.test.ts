@@ -58,6 +58,61 @@ describe('Flaky detection runner', () => {
     expect(testSpan!.attributes['cicd.test.flaky_detection']).toBe(true);
     expect(testSpan!.attributes['cicd.test.new']).toBe(true);
     expect(testSpan!.attributes['cicd.test.rerun_count']).toBeGreaterThan(0);
+    // The fixture fails its first run and passes the next: the typical flaky
+    // test. Vitest keeps a test's state at `fail` across repeats once a try
+    // failed, and skips `onAfterTryTask` on a try that throws, so reading
+    // either recorded every repeat as a failure and this was never flagged.
+    expect(testSpan!.attributes['cicd.test.flaky']).toBe(true);
+  });
+
+  // Unhealthy mode reruns a test already known to be unhealthy only to learn
+  // from it: its own first attempt decides the verdict, as in pytest-mergify
+  // and rspec-mergify. Absorbing every failure instead turned a test that
+  // failed on each attempt green.
+  async function runUnhealthy(file: string, testName: string) {
+    const sink = new InMemorySpanSink();
+    const reporter = new MergifyReporter({
+      sink,
+      flakyContext: {
+        ...flakyContext,
+        existing_test_names: [testName],
+        unhealthy_test_names: [testName],
+      },
+      flakyMode: 'unhealthy',
+    });
+    const vitest = await startVitest('test', [], {
+      root: fixturesDir,
+      include: [file],
+      reporters: [reporter],
+      watch: false,
+    });
+    await vitest?.close();
+    const testSpan = sink.getFinishedSpans().find((s) => s.attributes['test.scope'] === 'case');
+    return { testSpan: testSpan!, status: reporter.getSession()!.status };
+  }
+
+  it('keeps an unhealthy test failing when its first attempt fails', async () => {
+    const { testSpan, status } = await runUnhealthy(
+      'flaky.test.ts',
+      'flaky suite > intermittent test'
+    );
+
+    expect(testSpan.attributes['cicd.test.flaky_detection']).toBe(true);
+    expect(testSpan.attributes['cicd.test.rerun_count']).toBeGreaterThan(0);
+    expect(testSpan.attributes['test.case.result.status']).toBe('failed');
+    expect(status).toBe('failed');
+  });
+
+  it('absorbs a failure only a rerun of an unhealthy test saw', async () => {
+    const { testSpan, status } = await runUnhealthy(
+      'unhealthy-late.test.ts',
+      'late suite > fails after its first attempt'
+    );
+
+    expect(testSpan.attributes['cicd.test.rerun_count']).toBeGreaterThan(0);
+    expect(testSpan.attributes['cicd.test.flaky']).toBe(true);
+    expect(testSpan.attributes['test.case.result.status']).toBe('passed');
+    expect(status).toBe('passed');
   });
 
   it('does not rerun tests that are not candidates', async () => {
