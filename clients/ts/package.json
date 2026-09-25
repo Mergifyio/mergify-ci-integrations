@@ -2,7 +2,7 @@
   "name": "mergify-ci-ts",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@12.5.0",
+  "packageManager": "pnpm@12.5.1",
   "devEngines": {
     "runtime": {
       "name": "node",
