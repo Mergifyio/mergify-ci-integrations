@@ -1,1 +1,6 @@
-keep the ruby 3.2 rspec leg on ubuntu-24.04: Ruby 3.2's headers from ruby-builder's 26.04 build do not parse under rb-sys bindgen (no HAVE_STDBOOL_H under GCC 15/C23)
+Revision history for #382:
+
+rev 2 (content) 2026-09-25 19:24 UTC — keep the ruby 3.2 rspec leg on ubuntu-24.04: Ruby 3.2's headers from ruby-builder's 26.04 build do not parse under rb-sys bindgen (no HAVE_STDBOOL_H under GCC 15/C23)
+rev 1 (initial) 2026-09-25 19:24 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":382,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"fe48e611644d3fdfcfa137395ae1a7815f184d7b","timestamp_iso":"2026-09-25T19:24:19Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"fe48e611644d3fdfcfa137395ae1a7815f184d7b","new_sha":"2693a9b47a1805d822652fea9e69e913020c5b08","timestamp_iso":"2026-09-25T19:24:19Z","reason":"keep the ruby 3.2 rspec leg on ubuntu-24.04: Ruby 3.2's headers from ruby-builder's 26.04 build do not parse under rb-sys bindgen (no HAVE_STDBOOL_H under GCC 15/C23)","replay_sha":null,"compare_url":"https://github.com/Mergifyio/mergify-ci-integrations/compare/fe48e611644d3fdfcfa137395ae1a7815f184d7b...2693a9b47a1805d822652fea9e69e913020c5b08"}]} -->
