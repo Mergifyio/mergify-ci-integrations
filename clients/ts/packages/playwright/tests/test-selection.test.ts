@@ -11,7 +11,7 @@ import type {
   TestResult,
 } from '@playwright/test/reporter';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MergifyReporter, shardSlice } from '../src/reporter.js';
+import { MergifyReporter, shardSlice, testGroups } from '../src/reporter.js';
 
 interface FakeProject {
   name: string;
@@ -600,20 +600,135 @@ describe("preprocess — a sharded run is this leg's own", () => {
   });
 });
 
-describe('shardSlice', () => {
-  const entries = (units: string[]) => units.map((unit, i) => ({ unit, i }));
+describe('testGroups', () => {
+  // Structural stand-ins for what Playwright hands a reporter: the fields
+  // `createTestGroups` reads, and nothing else.
+  interface FakeSuite {
+    parent?: FakeSuite;
+    _parallelMode?: string;
+    _hooks?: { type: string }[];
+  }
+  const project = (mode?: string): FakeSuite => ({ _parallelMode: mode, _hooks: [] });
+  const file = (parent: FakeSuite, hooks: string[] = []): FakeSuite => ({
+    parent,
+    _parallelMode: 'none',
+    _hooks: hooks.map((type) => ({ type })),
+  });
+  const describeSuite = (parent: FakeSuite, mode: string): FakeSuite => ({
+    parent,
+    _parallelMode: mode,
+    _hooks: [],
+  });
+  const test_ = (name: string, parent: FakeSuite, requireFile: string) => ({
+    name,
+    parent,
+    _workerHash: 'w',
+    _requireFile: requireFile,
+  });
+  const names = (groups: readonly (readonly { name: string }[])[]) =>
+    groups.map((group) => group.map((entry) => entry.name));
+  const build = (entries: { name: string }[], legs = 2) =>
+    names(
+      testGroups(
+        [entries],
+        (entry) => entry as never,
+        () => 'p',
+        legs
+      )
+    );
 
-  it('keeps a unit whole, on the leg its first entry falls in', () => {
-    // Seven entries over two legs: sizes 4 and 3. `b` starts at index 3,
-    // inside leg 1's range, so leg 1 takes all of `b` and runs five.
-    const all = entries(['a', 'a', 'a', 'b', 'b', 'c', 'c']);
+  it('makes one group per test when the project is fullyParallel', () => {
+    const p = project('parallel');
+    const f = file(p);
+    const entries = ['a', 'b', 'c'].map((n) => test_(n, f, 'f.spec.ts'));
+
+    expect(build(entries)).toEqual([['a'], ['b'], ['c']]);
+  });
+
+  it('keeps a file whole when the project is not fullyParallel', () => {
+    const p = project();
+    const f = file(p);
+    const entries = ['a', 'b', 'c'].map((n) => test_(n, f, 'f.spec.ts'));
+
+    expect(build(entries)).toEqual([['a', 'b', 'c']]);
+  });
+
+  it('keeps a serial describe together, and leaves its file-mates alone', () => {
+    const p = project('parallel');
+    const f = file(p);
+    const serial = describeSuite(f, 'serial');
+    const entries = [
+      test_('s1', serial, 'f.spec.ts'),
+      test_('s2', serial, 'f.spec.ts'),
+      test_('loner', f, 'f.spec.ts'),
+    ];
+
+    expect(build(entries)).toEqual([['s1', 's2'], ['loner']]);
+  });
+
+  it("treats `mode: 'default'` as sequential, as Playwright does", () => {
+    const p = project('parallel');
+    const f = file(p);
+    const defaulted = describeSuite(f, 'default');
+    const entries = [test_('d1', defaulted, 'f.spec.ts'), test_('d2', defaulted, 'f.spec.ts')];
+
+    expect(build(entries)).toEqual([['d1', 'd2']]);
+  });
+
+  it('chunks a hooked file into one piece per leg, so a beforeAll is paid once per piece', () => {
+    // Five tests under a `beforeAll`, four legs: ceil(5 / 4) = 2 per piece.
+    const p = project('parallel');
+    const f = file(p, ['beforeAll']);
+    const entries = ['h1', 'h2', 'h3', 'h4', 'h5'].map((n) => test_(n, f, 'f.spec.ts'));
+
+    expect(build(entries, 4)).toEqual([['h1', 'h2'], ['h3', 'h4'], ['h5']]);
+  });
+
+  it('never groups two files together, nor two worker hashes', () => {
+    const p = project('parallel');
+    const a = file(p);
+    const b = file(p);
+    const entries = [
+      { ...test_('a1', a, 'a.spec.ts'), _workerHash: 'w1' },
+      { ...test_('b1', b, 'b.spec.ts'), _workerHash: 'w1' },
+      { ...test_('a2', a, 'a.spec.ts'), _workerHash: 'w2' },
+    ];
+
+    expect(build(entries).map((group) => group.length)).toEqual([1, 1, 1]);
+  });
+
+  it('falls back to one group per file when the runner exposes no parallel mode', () => {
+    // A future Playwright that stops exposing `_parallelMode` leaves every test
+    // reading as sequential. Coarser than Playwright's own partition, never
+    // finer -- so a group is still never split across two legs.
+    const bare = { parent: undefined };
+    const entries = ['a', 'b'].map((n) => ({
+      name: n,
+      parent: bare as never,
+      _requireFile: 'f.spec.ts',
+    }));
+
+    expect(build(entries)).toEqual([['a', 'b']]);
+  });
+});
+
+describe('shardSlice', () => {
+  const groups = (sizes: number[]) => {
+    let i = 0;
+    return sizes.map((size) => Array.from({ length: size }, () => ({ i: i++ })));
+  };
+
+  it('keeps a group whole, on the leg its first test falls in', () => {
+    // Seven tests over two legs: sizes 4 and 3. The second group starts at
+    // index 3, inside leg 1's range, so leg 1 takes all of it and runs five.
+    const all = groups([3, 2, 2]);
 
     expect([...shardSlice(all, { current: 1, total: 2 })].map((e) => e.i)).toEqual([0, 1, 2, 3, 4]);
     expect([...shardSlice(all, { current: 2, total: 2 })].map((e) => e.i)).toEqual([5, 6]);
   });
 
-  it('partitions: every entry lands on exactly one leg', () => {
-    const all = entries(['a', 'b', 'b', 'c', 'd', 'd', 'd', 'e', 'f', 'g', 'g']);
+  it('partitions: every test lands on exactly one leg', () => {
+    const all = groups([1, 2, 1, 3, 1, 1, 2]);
     const seen = new Map<number, number>();
     for (const current of [1, 2, 3]) {
       for (const entry of shardSlice(all, { current, total: 3 })) {
@@ -622,11 +737,11 @@ describe('shardSlice', () => {
     }
 
     expect([...seen.values()].every((n) => n === 1)).toBe(true);
-    expect(seen.size).toBe(all.length);
+    expect(seen.size).toBe(all.flat().length);
   });
 
   it('puts the remainder on the first legs, like Playwright', () => {
-    const all = entries(['a', 'b', 'c', 'd', 'e']);
+    const all = groups([1, 1, 1, 1, 1]);
 
     expect(shardSlice(all, { current: 1, total: 3 }).size).toBe(2);
     expect(shardSlice(all, { current: 2, total: 3 }).size).toBe(2);
@@ -634,15 +749,15 @@ describe('shardSlice', () => {
   });
 
   it('sizes the legs by their weights, as Playwright does', () => {
-    // Playwright's arithmetic with weights 3:1 over eight entries: 6 and 2.
-    const all = entries(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']);
+    // Playwright's arithmetic with weights 3:1 over eight tests: 6 and 2.
+    const all = groups([1, 1, 1, 1, 1, 1, 1, 1]);
 
     expect(shardSlice(all, { current: 1, total: 2 }, [3, 1]).size).toBe(6);
     expect(shardSlice(all, { current: 2, total: 2 }, [3, 1]).size).toBe(2);
   });
 
-  it('leaves a leg empty rather than split a unit', () => {
-    expect(shardSlice(entries(['a', 'a', 'a']), { current: 2, total: 2 }).size).toBe(0);
+  it('leaves a leg empty rather than split a group', () => {
+    expect(shardSlice(groups([3]), { current: 2, total: 2 }).size).toBe(0);
   });
 });
 

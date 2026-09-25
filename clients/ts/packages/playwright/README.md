@@ -192,12 +192,16 @@ things follow:
   two legs that collected the same set (an empty slice on both, say), which
   Mergify refuses rather than guesses, as described above.
 - **The reporter partitions the suite itself** once the job opted in: it hands
-  sharding over through Playwright's `TestRun.skipSharding()` and keeps whole
-  files together, in collection order, with Playwright's own arithmetic. The
-  partition is the same on every attempt, which is what lets a leg's collection
-  match the previous attempt's — and on a rerun each leg runs exactly the tests
-  Mergify served it, with no second split. `PWTEST_SHARD_WEIGHTS` is honoured
-  as Playwright honours it (colon-separated, one non-negative integer per leg).
+  sharding over through Playwright's `TestRun.skipSharding()` and then computes
+  **the same partition Playwright would have** — the same grouping (a test of
+  its own under `fullyParallel`, a serial `describe` kept together, a file with
+  a `beforeAll` cut into one piece per leg, a whole file otherwise) and the same
+  arithmetic. Your legs get the shares they got before the reporter was added.
+  The partition is also the same on every attempt, which is what lets a leg's
+  collection match the previous attempt's — and on a rerun each leg runs exactly
+  the tests Mergify served it, with no second split. `PWTEST_SHARD_WEIGHTS` is
+  honoured as Playwright honours it (colon-separated, one non-negative integer
+  per leg).
 - **A leg's slice must be stable from one attempt to the next** — same suite,
   same weights, same number of legs. If it changes, the leg's fingerprint no
   longer matches its previous attempt's and Mergify serves it the full suite:

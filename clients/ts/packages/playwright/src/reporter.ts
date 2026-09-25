@@ -96,6 +96,127 @@ interface PlaywrightTestRun {
 }
 
 /**
+ * How Playwright groups tests before it shards them, ported from its own
+ * `createTestGroups`.
+ *
+ * A group is what the partition will not split apart, and Playwright's answer
+ * is much finer than "one file": under `fullyParallel` a plain test is its own
+ * group, so fifteen legs of an 840-test suite get 56 tests each. Keeping whole
+ * files together instead costs a skew this suite showed at 30..79 tests a leg,
+ * and the wall of a sharded job is its slowest leg.
+ *
+ * Only three things hold tests together, and each is reproduced here:
+ *
+ * - the worker hash and the required file, which never let two files -- or two
+ *   projects' copies of one file -- share a group;
+ * - an enclosing `serial` or `default` suite, whose tests run in order in one
+ *   worker (`test.describe.serial`, `test.describe.configure({ mode })`);
+ * - a hook that runs once for a whole file -- `beforeAll` and the teardown that
+ *   pairs with it -- outside any such suite, which Playwright pays once per
+ *   group and therefore chunks into `ceil(n / legs)`-sized pieces rather than
+ *   paying it per test.
+ *
+ * Anything outside a parallel suite (a project without `fullyParallel`) stays
+ * one group per file, which is what Playwright does too.
+ *
+ * The fields this reads are Playwright's internals. A runner that stops
+ * exposing them leaves `parallelMode` undefined, no test reads as parallel, and
+ * every file becomes a single group -- coarser than Playwright's own
+ * partition, never finer, so a group is still never split across two legs.
+ */
+interface GroupingSuite {
+  parent?: GroupingSuite;
+  _parallelMode?: string;
+  _hooks?: readonly { type?: string }[];
+}
+
+interface GroupingTest {
+  parent?: GroupingSuite;
+  _workerHash?: string;
+  _requireFile?: string;
+  location?: { file?: string };
+  repeatEachIndex?: number;
+}
+
+/** One group of the partition, in the order Playwright emits them. */
+export type TestGroup<T> = readonly T[];
+
+export function testGroups<T>(
+  projects: readonly (readonly T[])[],
+  toTest: (entry: T) => GroupingTest,
+  projectNameOf: (entry: T) => string,
+  expectedParallelism: number
+): TestGroup<T>[] {
+  const result: T[][] = [];
+  for (const project of projects) {
+    // Keyed exactly as Playwright keys them, and in insertion order, because
+    // that order is the one `filterForShard` walks to cut its ranges.
+    const byWorkerHash = new Map<
+      string,
+      Map<string, { general: T[]; parallel: Map<unknown, T[]>; parallelWithHooks: T[] }>
+    >();
+    for (const entry of project) {
+      const test = toTest(entry);
+      const workerHash =
+        test._workerHash ?? `${projectNameOf(entry)}\0${test.repeatEachIndex ?? 0}`;
+      const requireFile = test._requireFile ?? test.location?.file ?? '';
+      let byFile = byWorkerHash.get(workerHash);
+      if (!byFile) byWorkerHash.set(workerHash, (byFile = new Map()));
+      let bucket = byFile.get(requireFile);
+      if (!bucket) {
+        byFile.set(
+          requireFile,
+          (bucket = { general: [], parallel: new Map(), parallelWithHooks: [] })
+        );
+      }
+
+      let insideParallel = false;
+      let outerMostSequentialSuite: GroupingSuite | undefined;
+      let hasAllHooks = false;
+      for (let parent = test.parent; parent; parent = parent.parent) {
+        if (parent._parallelMode === 'serial' || parent._parallelMode === 'default') {
+          outerMostSequentialSuite = parent;
+        }
+        insideParallel = insideParallel || parent._parallelMode === 'parallel';
+        hasAllHooks =
+          hasAllHooks ||
+          (parent._hooks ?? []).some(
+            (hook) => hook.type === 'beforeAll' || hook.type === 'afterAll'
+          );
+      }
+
+      if (!insideParallel) {
+        bucket.general.push(entry);
+      } else if (hasAllHooks && !outerMostSequentialSuite) {
+        bucket.parallelWithHooks.push(entry);
+      } else {
+        const key = outerMostSequentialSuite ?? test;
+        let group = bucket.parallel.get(key);
+        if (!group) bucket.parallel.set(key, (group = []));
+        group.push(entry);
+      }
+    }
+
+    for (const byFile of byWorkerHash.values()) {
+      for (const bucket of byFile.values()) {
+        if (bucket.general.length) result.push(bucket.general);
+        result.push(...bucket.parallel.values());
+        // `expectedParallelism` is the number of legs, as Playwright passes it
+        // on the sharding path -- so a hooked file is cut into at most one
+        // piece per leg.
+        const size = Math.ceil(bucket.parallelWithHooks.length / expectedParallelism);
+        let last: T[] | undefined;
+        for (const entry of bucket.parallelWithHooks) {
+          if (!last || last.length >= size) result.push((last = []));
+          last.push(entry);
+        }
+      }
+    }
+  }
+  return result;
+}
+
+/**
  * This leg's share of a sharded run, decided here rather than by Playwright.
  *
  * The selection is keyed on what a leg collected -- its fingerprint and count
@@ -108,54 +229,47 @@ interface PlaywrightTestRun {
  * every attempt: the same collection, the same shard index, the same slice --
  * which is what makes the fingerprint match.
  *
- * The unit is the file within a project (and a `repeatEach` index): a serial
- * describe, a `beforeAll`, a worker-scoped fixture never span two files, so a
- * partition that keeps files whole is one Playwright's own grouping would
- * allow. The arithmetic is Playwright's `filterForShard` with equal weights:
- * contiguous ranges of the collection, sized by the legs' weights
+ * This is Playwright's `filterForShard`, over the groups `testGroups` built:
+ * contiguous ranges of the collection sized by the legs' weights
  * (`PWTEST_SHARD_WEIGHTS`, colon-separated as Playwright reads it, equal by
- * default) with the remainder on the first
- * legs, and a unit assigned to the leg its first test falls in.
+ * default) with the remainder on the first legs, and a group kept whole by the
+ * leg its first test falls in. Same collection, same shard index, same slice.
  */
-export function shardSlice<T extends { unit: string }>(
-  entries: readonly T[],
+export function shardSlice<T>(
+  groups: readonly TestGroup<T>[],
   shard: { current: number; total: number },
   weights: readonly number[] = Array.from({ length: shard.total }, () => 1)
 ): Set<T> {
-  // Playwright's `filterForShard`: each leg gets `floor(weight * total /
-  // totalWeight)` entries, the remainder one by one from the first leg on.
   const totalWeight = weights.reduce((a, b) => a + b, 0);
-  const sizes = weights.map((w) => Math.floor((w * entries.length) / totalWeight));
-  const remainder = entries.length - sizes.reduce((a, b) => a + b, 0);
+  let shardableTotal = 0;
+  for (const group of groups) shardableTotal += group.length;
+  const sizes = weights.map((w) => Math.floor((w * shardableTotal) / totalWeight));
+  const remainder = shardableTotal - sizes.reduce((a, b) => a + b, 0);
   for (let i = 0; i < remainder; i++) sizes[i % sizes.length] += 1;
   let from = 0;
   for (let i = 0; i < shard.current - 1; i++) from += sizes[i];
   const to = from + sizes[shard.current - 1];
 
-  // Units in collection order, each with the index of its first entry.
-  const firstIndex = new Map<string, number>();
-  entries.forEach((entry, index) => {
-    if (!firstIndex.has(entry.unit)) firstIndex.set(entry.unit, index);
-  });
   const kept = new Set<T>();
-  for (const entry of entries) {
-    const start = firstIndex.get(entry.unit) ?? 0;
-    if (start >= from && start < to) kept.add(entry);
+  let current = 0;
+  for (const group of groups) {
+    if (current >= from && current < to) {
+      for (const entry of group) kept.add(entry);
+    }
+    current += group.length;
   }
   return kept;
 }
 
 /**
- * The per-leg weights Playwright reads from `PWTEST_SHARD_WEIGHTS`, when they
- * are well-formed for this run; undefined otherwise, which is equal weights.
- * Playwright itself aborts the run on a count mismatch; here the partition is
- * ours, so the same run keeps going on the default and says so.
+ * The legs' weights, as Playwright's own `resolveShardWeightsOption` reads
+ * them: colon-separated integers, one per leg, zero allowed. Anything else is
+ * reported and the legs are weighted equally -- Playwright refuses the run
+ * instead, but a selection that fails open must not be what stops a CI job.
  */
-function shardWeights(total: number, log: (msg: string) => void): number[] | undefined {
+export function shardWeights(total: number, log: (msg: string) => void): number[] | undefined {
   const raw = process.env.PWTEST_SHARD_WEIGHTS;
   if (!raw) return undefined;
-  // Playwright's own reading (`resolveShardWeightsOption`): colon-separated
-  // integers, zero allowed, negative or unparsable refused.
   const weights = raw.split(':').map((w) => Number.parseInt(w, 10));
   const totalWeight = weights.reduce((a, b) => a + b, 0);
   if (
@@ -169,16 +283,6 @@ function shardWeights(total: number, log: (msg: string) => void): number[] | und
     `PWTEST_SHARD_WEIGHTS="${raw}" does not name ${total} non-negative weights; the legs are weighted equally`
   );
   return undefined;
-}
-
-/**
- * Which unit of the partition a test belongs to. `test.location.file` rather
- * than the file suite's title, which is relative and project-independent;
- * the project keeps two projects' copies of one file apart, as Playwright's
- * worker hash does.
- */
-function shardUnit(test: TestCase): string {
-  return `${projectNameFromTest(test) ?? ''}\0${test.location?.file ?? ''}\0${test.repeatEachIndex ?? 0}`;
 }
 
 /**
@@ -483,8 +587,25 @@ export class MergifyReporter implements Reporter {
       // Throws when another reporter already took sharding over: caught by
       // `preprocess`, and the run then executes whatever that reporter left.
       params.testRun.skipSharding();
+      // Playwright groups per project suite and shards the concatenation in
+      // `rootSuite.suites` order. `allTests()` walks the project suites in that
+      // same order, so splitting `collected` by project name rebuilds it -- and
+      // the setup/teardown projects Playwright detaches before sharding are the
+      // ones already dropped above.
+      const byProject = new Map<string, CollectedTest[]>();
+      for (const entry of collected) {
+        const name = projectNameFromTest(entry.test) ?? '';
+        const inProject = byProject.get(name);
+        if (inProject) inProject.push(entry);
+        else byProject.set(name, [entry]);
+      }
       const slice = shardSlice(
-        collected.map((entry) => ({ ...entry, unit: shardUnit(entry.test) })),
+        testGroups(
+          [...byProject.values()],
+          (entry) => entry.test,
+          (entry) => projectNameFromTest(entry.test) ?? '',
+          params.config.shard.total
+        ),
         params.config.shard,
         shardWeights(params.config.shard.total, log)
       );
