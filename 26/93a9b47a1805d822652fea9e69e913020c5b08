@@ -1,0 +1,1 @@
+keep the ruby 3.2 rspec leg on ubuntu-24.04: Ruby 3.2's headers from ruby-builder's 26.04 build do not parse under rb-sys bindgen (no HAVE_STDBOOL_H under GCC 15/C23)
