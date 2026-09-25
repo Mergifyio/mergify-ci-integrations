@@ -881,7 +881,7 @@ class PytestMergify:
             )
             for report in reports:
                 if report.when != "call":
-                    item.ihook.pytest_runtest_logreport(report=report)
+                    _log_rerun_report(item, report)
 
             attempt_outcomes = _call_outcomes(reports)
             distinct_outcomes |= attempt_outcomes
@@ -918,27 +918,25 @@ class PytestMergify:
         capture reruns in metrics.
         """
 
-        if not self.mergify_ci.flaky_detector:
+        detector = self.mergify_ci.flaky_detector
+        if not detector:
             return []
 
-        if self.mergify_ci.flaky_detector.mode == "new":
-            return _pytest.runner.runtestprotocol(
-                item=item, nextitem=nextitem, log=True
-            )
-
+        # Logged here rather than by `runtestprotocol`, in `new` mode too, so
+        # that every rerun report goes through `_log_rerun_report`.
         reports = _pytest.runner.runtestprotocol(
             item=item, nextitem=nextitem, log=False
         )
         for report in reports:
-            if report.when != "call":
-                item.ihook.pytest_runtest_logreport(report=report)  # Log as usual.
+            if detector.mode == "new" or report.when != "call":
+                _log_rerun_report(item, report)  # Log as usual.
             else:
                 # Make rerun visible in the logs by temporarily changing
                 # outcome. The goal is to count a potential failure as a rerun
                 # instead of a regular failure.
                 original_outcome = report.outcome
                 report.outcome = "rerun"  # type: ignore[assignment]
-                item.ihook.pytest_runtest_logreport(report=report)
+                _log_rerun_report(item, report)
                 report.outcome = original_outcome
 
         return reports
@@ -1179,6 +1177,29 @@ def _call_outcomes(
     failed.
     """
     return {report.outcome for report in reports if report.when == "call"}
+
+
+def _log_rerun_report(
+    item: _pytest.nodes.Item, report: _pytest.reports.TestReport
+) -> None:
+    """Log a rerun's report with no duration of its own.
+
+    A rerun is reported under the test's own id, and the consumers that turn
+    logged reports into a test's duration sum them per id: pytest-split's
+    `--store-durations` stored a 0.25s test rerun 284 times at 57s, and
+    balanced the next run's shards on it (MRGFY-9701). The first attempt keeps
+    its duration, so a test is recorded at what one execution costs. The rerun
+    time is a share of the session's budget rather than a property of the
+    test -- how many reruns it gets depends on what else the session has to
+    rerun -- and it is still measured: the rerun metrics and the verdict's
+    runtime read `pytest_runtest_makereport`, before this.
+
+    Zeroed for good rather than swapped back once logged, unlike the `rerun`
+    outcome: pytest-split reads the reports the terminal reporter holds at
+    session finish, long after this call.
+    """
+    report.duration = 0.0
+    item.ihook.pytest_runtest_logreport(report=report)
 
 
 def _report_held_back_attempt(
