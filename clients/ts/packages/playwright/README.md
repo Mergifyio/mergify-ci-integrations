@@ -191,13 +191,31 @@ things follow:
   page name the legs apart, and covers the one case the fingerprint cannot:
   two legs that collected the same set (an empty slice on both, say), which
   Mergify refuses rather than guesses, as described above.
-- **The reporter partitions the suite itself** once the job opted in: it hands
-  sharding over through Playwright's `TestRun.skipSharding()` and keeps whole
-  files together, in collection order, with Playwright's own arithmetic. The
-  partition is the same on every attempt, which is what lets a leg's collection
-  match the previous attempt's — and on a rerun each leg runs exactly the tests
-  Mergify served it, with no second split. `PWTEST_SHARD_WEIGHTS` is honoured
-  as Playwright honours it (colon-separated, one non-negative integer per leg).
+- **The reporter asks Playwright which tests this leg owns** once the job opted
+  in. `preprocess` runs before Playwright shards, so the reporter runs the same
+  command again with `--list` and a reporter of its own, which reads the ids off
+  the suite Playwright has by then sharded. Your legs get the shares they always
+  got — `--grep`, `--project`, `PWTEST_SHARD_WEIGHTS` and every other filter
+  included, because the listing replays your own command line — and a future
+  release that groups tests differently is simply obeyed. The extra collection
+  costs well under a second (0.66 s on a suite of 811 tests) and starts neither
+  your web server nor your `globalSetup`.
+- **That listing also reports the whole suite it saw**, and the reporter checks
+  it against what it collected itself, as a set, in both directions. Anything
+  the listing has and this run does not — or, just as important, anything this
+  run has and the listing missed — means the two are looking at different
+  suites, and a slice drawn over the wrong one would exclude tests that belong
+  to this leg from every leg at once.
+- **A setup or teardown project is left out on both sides.** Playwright
+  re-attaches those projects to every leg after sharding and their tests always
+  run in full, so counting them would make a sharded run with an auth-setup
+  project — the common shape — look like a mismatch and lose its reduction.
+- **If the listing fails** — Playwright exits non-zero, times out, answers
+  something the reporter cannot read, or describes a suite this run does not
+  have — **the leg runs its own share in full**: sharding stays with Playwright,
+  Mergify is not asked, and the block says so. A slice is never guessed. One
+  known limit follows from `--list` not running `globalSetup`: a suite whose
+  collection depends on it lands here.
 - **A leg's slice must be stable from one attempt to the next** — same suite,
   same weights, same number of legs. If it changes, the leg's fingerprint no
   longer matches its previous attempt's and Mergify serves it the full suite:
