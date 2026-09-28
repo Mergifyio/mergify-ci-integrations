@@ -1,0 +1,1 @@
+pin the compat job to ubuntu-24.04, the image it ran on, per the repo's explicit-pin convention (#382)
