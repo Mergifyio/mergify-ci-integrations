@@ -1,15 +1,18 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import type { MergifyApiClient } from '@mergifyio/ci-core';
+import { Writable } from 'node:stream';
+import type { MergifyApiClient, SessionVerdictClient } from '@mergifyio/ci-core';
 import {
   InMemorySpanSink,
   isTestSelectionEnabled,
   TEST_SELECTION_ENABLE_ENV,
 } from '@mergifyio/ci-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { TestSpecification, Vitest } from 'vitest/node';
 import { startVitest } from 'vitest/node';
 import { MergifyReporter } from '../src/reporter.js';
+import { selectionUnreachable } from '../src/test-selection.js';
 
 const fixturesDir = resolve(import.meta.dirname, 'fixtures');
 
@@ -256,15 +259,14 @@ describe('the opt-in gate', () => {
 
     await runWith(apiClient);
 
-    // No fingerprint: this reporter never holds the whole collection at the
-    // moment it asks (Vitest collects inside its workers), so it sends none
-    // rather than claim an empty one.
+    // With the fingerprint of the files this run executes: without one the
+    // engine answers `full` whatever the previous attempt did.
     expect(apiClient.fetchTestSelection).toHaveBeenCalledWith(
       'queue/main/42',
       'cafecafe',
       'CI',
       'unit',
-      undefined
+      expect.stringMatching(/^[0-9a-f]{64}$/)
     );
   });
 
@@ -289,5 +291,337 @@ describe('the opt-in gate', () => {
     for (const yes of ['1', 'true', 'yes', 'on', 'TRUE', ' true ']) {
       expect(isTestSelectionEnabled(yes)).toBe(true);
     }
+  });
+});
+
+type SessionVerdict = Parameters<SessionVerdictClient['sendSessionVerdict']>[0];
+
+/** A served answer, as the bundled client returns it. */
+interface Answer {
+  selection: string;
+  reason: string;
+  tests?: string[];
+  message?: string;
+}
+
+/**
+ * Drive one opted-in run end to end against a stand-in for the backend: the
+ * request it makes, the tests it executes, the verdict it writes, the resource
+ * it uploads and what it prints.
+ */
+async function runLoop(options: {
+  answer: Answer;
+  include?: string[];
+  shard?: string;
+  projects?: boolean;
+  testNamePattern?: string;
+  passWithNoTests?: boolean;
+}) {
+  const sink = new InMemorySpanSink();
+  const verdicts: SessionVerdict[] = [];
+  const apiClient = {
+    fetchQuarantine: vi.fn().mockResolvedValue(null),
+    fetchFlakyContext: vi.fn().mockResolvedValue(null),
+    fetchTestSelection: vi.fn().mockResolvedValue({ tests: [], ...options.answer }),
+    uploadTrace: vi.fn().mockResolvedValue(undefined),
+    sendSessionVerdict: vi.fn(async (verdict: SessionVerdict) => {
+      verdicts.push(verdict);
+      return { truncated: false };
+    }),
+  };
+  const reporter = new MergifyReporter({ sink, apiClient });
+
+  let output = '';
+  const capture = new Writable({
+    write(chunk, _encoding, done) {
+      output += String(chunk);
+      done();
+    },
+  });
+
+  const include = options.include ?? ['selection.test.ts'];
+  const vitest = await startVitest(
+    'test',
+    [],
+    {
+      root: fixturesDir,
+      reporters: [reporter],
+      watch: false,
+      ...(options.projects ? { projects: [{ test: { name: 'unit', include } }] } : { include }),
+      ...(options.shard ? { shard: options.shard } : {}),
+      ...(options.testNamePattern ? { testNamePattern: options.testNamePattern } : {}),
+      ...(options.passWithNoTests ? { passWithNoTests: true } : {}),
+    },
+    {},
+    { stdout: capture, stderr: capture }
+  );
+  await vitest?.close();
+
+  const executed = existsSync(markerFile)
+    ? readFileSync(markerFile, 'utf8').split('\n').filter(Boolean).sort()
+    : [];
+  const requested = apiClient.fetchTestSelection.mock.calls[0]?.[4] as string | undefined;
+  const resource = sink.getFinishedSpans()[0]?.resourceAttributes ?? {};
+  return { reporter, apiClient, verdicts, executed, requested, resource, output };
+}
+
+describe('the reduced-rerun loop', () => {
+  beforeEach(() => {
+    markerDir = mkdtempSync(join(tmpdir(), 'mergify-selection-'));
+    markerFile = join(markerDir, 'executed.txt');
+    vi.stubEnv('MERGIFY_SELECTION_MARKER', markerFile);
+    // See 'the opt-in gate' for why the event name comes first.
+    vi.stubEnv('GITHUB_EVENT_NAME', 'push');
+    vi.stubEnv('GITHUB_ACTIONS', 'true');
+    vi.stubEnv('GITHUB_REPOSITORY', 'test-owner/test-repo');
+    vi.stubEnv('GITHUB_HEAD_REF', '');
+    vi.stubEnv('GITHUB_REF_NAME', 'queue/main/42');
+    vi.stubEnv('GITHUB_SHA', 'cafecafe');
+    vi.stubEnv('GITHUB_WORKFLOW', 'CI');
+    vi.stubEnv('GITHUB_JOB', 'unit');
+    vi.stubEnv(TEST_SELECTION_ENABLE_ENV, 'true');
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(markerDir, { recursive: true, force: true });
+    process.exitCode = undefined;
+  });
+
+  const full: Answer = { selection: 'full', reason: 'no_predecessor' };
+  const both = ['selection.test.ts', 'selection-other.test.ts'];
+
+  it('gives each shard its own fingerprint, stable across attempts', async () => {
+    // Every shard of a job reports under one job name; the fingerprint is
+    // what lets the engine answer each from its own predecessor rather than
+    // serve all of them the failures of all of them.
+    const first = await runLoop({ answer: full, include: both, shard: '1/2' });
+    rmSync(markerFile, { force: true });
+    const second = await runLoop({ answer: full, include: both, shard: '2/2' });
+    rmSync(markerFile, { force: true });
+    const again = await runLoop({ answer: full, include: both, shard: '1/2' });
+    rmSync(markerFile, { force: true });
+    const whole = await runLoop({ answer: full, include: both });
+
+    // The two shards really ran different files.
+    expect([...first.executed, ...second.executed].sort()).toEqual([
+      'alpha',
+      'beta',
+      'delta',
+      'gamma',
+    ]);
+    expect(first.requested).toMatch(/^[0-9a-f]{64}$/);
+    expect(first.requested).not.toBe(second.requested);
+    expect(first.requested).toBe(again.requested);
+    expect(whole.requested).not.toBe(first.requested);
+    expect(whole.requested).not.toBe(second.requested);
+  });
+
+  it('tells apart shards that hold no file at all', async () => {
+    // One file over three shards: two legs run nothing. Sharing the digest of
+    // nothing, they would be one session twice to the engine, which refuses
+    // to choose and fails both.
+    // One run at a time: they share the marker file and the exit code.
+    const first = await runLoop({ answer: full, shard: '1/3', passWithNoTests: true });
+    const second = await runLoop({ answer: full, shard: '2/3', passWithNoTests: true });
+    const third = await runLoop({ answer: full, shard: '3/3', passWithNoTests: true });
+    expect(new Set([first.requested, second.requested, third.requested]).size).toBe(3);
+  });
+
+  it('puts a different name filter under a different fingerprint', async () => {
+    // Same files, different tests: two legs of a matrix split by `-t` must not
+    // be answered from each other's failures.
+    const all = await runLoop({ answer: full });
+    rmSync(markerFile, { force: true });
+    const filtered = await runLoop({ answer: full, testNamePattern: 'gamma' });
+
+    expect(filtered.executed).toEqual(['gamma']);
+    expect(filtered.requested).toMatch(/^[0-9a-f]{64}$/);
+    expect(filtered.requested).not.toBe(all.requested);
+  });
+
+  it('writes the verdict under the fingerprint it asked with', async () => {
+    vi.stubEnv('MERGIFY_SELECTION_FAIL_BETA', '1');
+    const { verdicts, requested, resource, reporter } = await runLoop({ answer: full });
+
+    expect(reporter.getSession()!.status).toBe('failed');
+    expect(verdicts).toHaveLength(1);
+    const [verdict] = verdicts;
+    expect(verdict).toMatchObject({
+      headSha: 'cafecafe',
+      pipelineName: 'CI',
+      jobName: 'unit',
+      collectionFingerprint: requested,
+      collectionCount: 3,
+      executedCount: 3,
+      passedCount: 2,
+      failedCount: 1,
+      skippedCount: 0,
+      failingTests: ['selection > beta'],
+      quarantinedFailingTests: [],
+      selection: { answer: 'full', reason: 'no_predecessor', keptCount: 3 },
+    });
+    // The same facts on the trace, where the engine reads them when no
+    // verdict arrived.
+    expect(resource).toMatchObject({
+      'test.collection.fingerprint': requested,
+      'test.collection.count': 3,
+      'test.selection.answer': 'full',
+      'test.selection.kept_count': 3,
+    });
+  });
+
+  it('replays only the served subset, and says so', async () => {
+    const { executed, verdicts, output } = await runLoop({
+      answer: { selection: 'subset', reason: 'reduced_rerun', tests: ['selection > beta'] },
+    });
+
+    expect(executed).toEqual(['beta']);
+    expect(verdicts[0]).toMatchObject({
+      collectionCount: 3,
+      executedCount: 1,
+      passedCount: 1,
+      failingTests: [],
+      selection: { answer: 'subset', keptCount: 1 },
+    });
+    expect(output).toContain('Mergify re-executed only');
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it('runs nothing on `empty`, and ends green', async () => {
+    const { executed, verdicts, output, reporter } = await runLoop({
+      answer: { selection: 'empty', reason: 'predecessor_passed' },
+    });
+
+    expect(executed).toEqual([]);
+    expect(reporter.getSession()!.status).toBe('passed');
+    expect(process.exitCode).toBeUndefined();
+    expect(verdicts[0]).toMatchObject({
+      collectionCount: 3,
+      executedCount: 0,
+      failedCount: 0,
+      selection: { answer: 'empty', keptCount: 0 },
+    });
+    expect(output).toContain('all 3 tests passed back then');
+  });
+
+  it('keeps a shard served `empty` green', async () => {
+    // The shard whose slice passed on the previous attempt: it runs nothing,
+    // and must not fail the batch for it.
+    const { executed, reporter } = await runLoop({
+      answer: { selection: 'empty', reason: 'predecessor_passed' },
+      include: both,
+      shard: '2/2',
+    });
+
+    expect(executed).toEqual([]);
+    expect(reporter.getSession()!.status).toBe('passed');
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it('fails a refused run without running anything', async () => {
+    const { executed, output, reporter } = await runLoop({
+      answer: {
+        selection: 'refused',
+        reason: 'indeterminate',
+        message: 'Several runs share this job name.',
+      },
+    });
+
+    expect(executed).toEqual([]);
+    expect(output).toContain('Several runs share this job name.');
+    expect(reporter.getSession()!.status).toBe('failed');
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('asks nothing under `test.projects`, where no project loads the runner', async () => {
+    const { apiClient, executed, verdicts } = await runLoop({ answer: full, projects: true });
+
+    expect(apiClient.fetchTestSelection).not.toHaveBeenCalled();
+    expect(verdicts).toEqual([]);
+    expect(executed).toEqual(['alpha', 'beta', 'gamma']);
+  });
+
+  it('asks nothing in browser mode, where the runner never loads', () => {
+    const root = { config: { browser: { enabled: true } } };
+    const vitest = { config: {}, getRootProject: () => root } as unknown as Vitest;
+    const specifications = [{ project: root }] as unknown as TestSpecification[];
+
+    expect(selectionUnreachable(vitest, specifications)).toMatch(/browser mode/);
+    root.config.browser.enabled = false;
+    expect(selectionUnreachable(vitest, specifications)).toBeUndefined();
+  });
+});
+
+describe('what the verdict must not claim', () => {
+  beforeEach(() => {
+    markerDir = mkdtempSync(join(tmpdir(), 'mergify-selection-'));
+    markerFile = join(markerDir, 'executed.txt');
+    vi.stubEnv('MERGIFY_SELECTION_MARKER', markerFile);
+    vi.stubEnv('GITHUB_EVENT_NAME', 'push');
+    vi.stubEnv('GITHUB_ACTIONS', 'true');
+    vi.stubEnv('GITHUB_REPOSITORY', 'test-owner/test-repo');
+    vi.stubEnv('GITHUB_HEAD_REF', '');
+    vi.stubEnv('GITHUB_REF_NAME', 'queue/main/42');
+    vi.stubEnv('GITHUB_SHA', 'cafecafe');
+    vi.stubEnv('GITHUB_WORKFLOW', 'CI');
+    vi.stubEnv('GITHUB_JOB', 'unit');
+    vi.stubEnv(TEST_SELECTION_ENABLE_ENV, 'true');
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(markerDir, { recursive: true, force: true });
+    process.exitCode = undefined;
+  });
+
+  const full: Answer = { selection: 'full', reason: 'no_predecessor' };
+  const other = ['selection-other.test.ts'];
+
+  it('sends no verdict when a hook failed, whose tests read as skipped', async () => {
+    // Sent, it would name no failure: the retry would be served `empty`, run
+    // nothing, and turn green on the same broken hook.
+    vi.stubEnv('MERGIFY_SELECTION_BREAK_HOOK', '1');
+    const { verdicts, output, reporter } = await runLoop({ answer: full, include: other });
+
+    expect(reporter.getSession()!.status).toBe('failed');
+    expect(verdicts).toEqual([]);
+    expect(output).toContain("Mergify wasn't sent this run's results");
+  });
+
+  it('sends no verdict when an error escaped every test', async () => {
+    vi.stubEnv('MERGIFY_SELECTION_LEAK_REJECTION', '1');
+    const { verdicts } = await runLoop({ answer: full, include: other });
+
+    expect(verdicts).toEqual([]);
+  });
+
+  it('counts no test as executed on `empty`, not even one the author skipped', async () => {
+    // A skipped test counts as executed, and an `empty` run that reports one
+    // stops reading as "ran nothing" -- the answer after which Mergify runs
+    // the full suite again rather than chain `empty` forever.
+    const { verdicts, executed } = await runLoop({
+      answer: { selection: 'empty', reason: 'predecessor_passed' },
+      include: other,
+    });
+
+    expect(executed).toEqual([]);
+    expect(verdicts[0]).toMatchObject({ collectionCount: 2, executedCount: 0 });
+  });
+
+  it('fails a subset only part of which is collected here', async () => {
+    // Running the part that matched would go green without the missing one,
+    // and the verdict would then tell the next attempt nothing failed.
+    const { executed, reporter } = await runLoop({
+      answer: {
+        selection: 'subset',
+        reason: 'reduced_rerun',
+        tests: ['selection > beta', 'selection > renamed-since'],
+      },
+    });
+
+    expect(executed).toEqual(['beta']);
+    expect(reporter.getSession()!.status).toBe('failed');
+    expect(process.exitCode).toBe(1);
   });
 });

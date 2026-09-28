@@ -74,8 +74,13 @@ export function createMergifyRunner(Base: RunnerBase): RunnerBase {
       for (const task of suite.tasks) {
         if (task.type === 'suite') {
           this.deselectOutsideSubset(task);
-        } else if (task.mode === 'run' && !this.selectedTests?.has(buildTestKey(task))) {
-          task.mode = 'skip';
+        } else if (!this.selectedTests?.has(buildTestKey(task))) {
+          // A test the user already skipped (`it.skip`, `it.todo`, a name
+          // filter) is deselected too: it stays skipped, and is left out of the
+          // report like every other test outside the subset. Reported as
+          // skipped, it would count as executed, and an `empty` run would tell
+          // Mergify it ran tests when it ran none.
+          if (task.mode === 'run') task.mode = 'skip';
           (task.meta as Record<string, unknown>).mergifyDeselected = true;
         }
       }
