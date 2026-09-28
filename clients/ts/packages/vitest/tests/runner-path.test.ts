@@ -15,10 +15,10 @@ import { MergifyReporter } from '../src/reporter.js';
  *
  * These tests exist for the computation alone (#87).
  */
-function fakeVitest(overrides: { runner?: string } = {}): Vitest {
+function fakeVitest(overrides: { runner?: string; version?: string } = {}): Vitest {
   const logs: string[] = [];
   return {
-    version: '4.1.10',
+    version: overrides.version ?? '4.1.10',
     config: { runner: overrides.runner },
     logger: { log: (msg: string) => logs.push(msg) },
     provide: () => {},
@@ -26,7 +26,7 @@ function fakeVitest(overrides: { runner?: string } = {}): Vitest {
   } as unknown as Vitest;
 }
 
-function configuredRunner(options: { runner?: string } = {}): string | undefined {
+function configuredRunner(options: { runner?: string; version?: string } = {}): string | undefined {
   const vitest = fakeVitest(options);
   // A quarantine list is the cheapest way in: it is the one seam that reaches
   // `_configureRunner` synchronously, and one name is enough to trigger it.
@@ -58,6 +58,24 @@ describe('the runner path', () => {
     expect(dirname(runner)).toBe(
       dirname(fileURLToPath(new URL('../src/reporter.ts', import.meta.url)))
     );
+  });
+
+  // The runner base class lives in `vitest` from 4.1 and in `vitest/runners`
+  // before; 5.0 removed the latter. Each generation gets the entry built on the
+  // base it actually has, and both must exist.
+  it.each([
+    ['3.0.9', 'runner-legacy'],
+    ['3.2.4', 'runner-legacy'],
+    ['4.0.18', 'runner-legacy'],
+    ['4.1.0', 'runner'],
+    ['4.1.11', 'runner'],
+    ['5.0.1', 'runner'],
+  ])('on Vitest %s, points at the %s entry', (version, entry) => {
+    const runner = configuredRunner({ version })!;
+    const self = fileURLToPath(import.meta.url);
+
+    expect(basename(runner)).toBe(`${entry}${extname(self)}`);
+    expect(existsSync(runner)).toBe(true);
   });
 
   it('leaves a runner the user configured themselves alone', () => {

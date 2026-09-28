@@ -39,6 +39,12 @@ import { readPluginVersion } from './version.js';
 
 const DEFAULT_API_URL = 'https://api.mergify.com';
 
+/** Whether this Vitest exports its runner base class, `TestRunner`, from `vitest` (4.1 and later). */
+function exportsTestRunner(version: string): boolean {
+  const [major = 0, minor = 0] = version.split('.').map((part) => Number.parseInt(part, 10));
+  return major > 4 || (major === 4 && minor >= 1);
+}
+
 /**
  * Sharding is the hazard this feature still has on Vitest, and opting in is
  * what a user accepts when they take it on.
@@ -296,8 +302,14 @@ export class MergifyReporter implements Reporter {
     // resolved to a file that ships in no build at all, and vitest then failed
     // the whole run with ERR_MODULE_NOT_FOUND the moment a repository had its
     // first quarantined test (#87).
+    //
+    // Which runner depends on the Vitest running: its base class is exported
+    // from `vitest` since 4.1 and only from `vitest/runners` before, a subpath
+    // 4.1 deprecates and 5.0 removed. Loading the wrong one breaks the run the
+    // same way a missing file does.
     const self = typeof __filename !== 'undefined' ? __filename : fileURLToPath(import.meta.url);
-    const mergifyRunner = resolve(dirname(self), `runner${extname(self)}`);
+    const entry = exportsTestRunner(vitest.version) ? 'runner' : 'runner-legacy';
+    const mergifyRunner = resolve(dirname(self), `${entry}${extname(self)}`);
     if (!vitest.config.runner) {
       vitest.config.runner = mergifyRunner;
     } else if (vitest.config.runner !== mergifyRunner) {
