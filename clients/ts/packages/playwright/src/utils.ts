@@ -1,5 +1,5 @@
 import { envToBool } from '@mergifyio/ci-core';
-import type { TestCase } from '@playwright/test/reporter';
+import type { Suite, TestCase } from '@playwright/test/reporter';
 
 /**
  * Normalize a path to POSIX separators. Quarantine keys and span names must be
@@ -111,4 +111,33 @@ export function projectNamePrefix(project: string | undefined): string {
  */
 export function resolveIncludeProject(): boolean {
   return envToBool(process.env.PLAYWRIGHT_MERGIFY_INCLUDE_PROJECT_IN_TEST_NAME, false);
+}
+
+/**
+ * Every project pulled in by another project *of this run* — as a
+ * `dependencies` entry or as its `teardown`.
+ *
+ * Their tests are readonly during `preprocess`: `testRun.exclude()` throws on
+ * them ("these always run in full"). Read from the suite, NOT from
+ * `config.projects`: the latter holds every declared project regardless of
+ * `--project`, so under `playwright test --project=setup` it would mark `setup`
+ * readonly on the strength of a declaration by an `e2e` project that is not
+ * running — filtering out the entire collection, killing the reduction, and
+ * reporting `subset_matched_no_collected_test` for a cause that never happened.
+ *
+ * No graph walk is needed for chains: every project of the run contributes its
+ * own declarations, so a setup project's own setup or teardown is picked up
+ * from that project's entry. Still deliberately over-inclusive — a project both
+ * top-level and someone else's dependency lands here and keeps running in full,
+ * which is the direction this feature is allowed to err in.
+ */
+export function readonlyProjectNames(suite: Suite): Set<string> {
+  const names = new Set<string>();
+  for (const projectSuite of suite.suites) {
+    const project = projectSuite.project();
+    if (!project) continue;
+    for (const dependency of project.dependencies) names.add(dependency);
+    if (project.teardown) names.add(project.teardown);
+  }
+  return names;
 }

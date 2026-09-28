@@ -42,6 +42,7 @@ export {
   formatTestSelectionReport,
   isTestSelectionEnabled,
   resolveSelectionCoordinates,
+  SHARD_SLICE_UNAVAILABLE,
   selectionEcho,
   selectionResourceAttributes,
   TEST_SELECTION_ENABLE_ENV,
