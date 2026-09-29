@@ -41,7 +41,7 @@ afterEach(() => {
   rmSync(cacheRoot, { recursive: true, force: true });
 });
 
-function seedStateFile(quarantinedTests: string[]): void {
+function seedStateFile(quarantinedTests: string[], rootDir = fixtureTestsDir): void {
   mkdirSync(dirname(statePath), { recursive: true });
   writeFileSync(
     statePath,
@@ -50,7 +50,7 @@ function seedStateFile(quarantinedTests: string[]): void {
         version: 1,
         testRunId: 'integration-test-run',
         createdAt: '2026-04-22T10:00:00Z',
-        rootDir: fixtureTestsDir,
+        rootDir,
         quarantinedTests,
       },
       null,
@@ -195,6 +195,33 @@ describe('integration: quarantine end-to-end', () => {
     const combined = `${result.stdout}\n${result.stderr}`;
     expect(result.status).toBe(1); // both failing tests count
     expect(combined).not.toContain('Quarantine report');
+  }, 60_000);
+});
+
+describe('integration: quarantine inside describe blocks, under both name forms', () => {
+  it('absorbs tests quarantined under the reporter name and the JUnit one', () => {
+    seedStateFile(
+      [
+        'nested.spec.ts > outer > quarantined-fails',
+        // The same test again, as Playwright's JUnit reporter names it: the
+        // list can hold both, and both must count as used.
+        'nested.spec.ts.outer › quarantined-fails',
+        'nested.spec.ts.outer › inner › junit-quarantined-fails',
+      ],
+      join(fixtureRoot, 'tests-describe')
+    );
+    const result = runPlaywrightFixture({
+      PW_FIXTURE_DIR: './tests-describe',
+      PLAYWRIGHT_MERGIFY_INCLUDE_PROJECT_IN_TEST_NAME: 'false',
+    });
+
+    const combined = `${result.stdout}\n${result.stderr}`;
+    expect(result.status).toBe(0);
+    expect(combined).toContain('fetched: 3');
+    expect(combined).toContain('caught:  2');
+    expect(combined).toContain('    - nested.spec.ts > outer > quarantined-fails');
+    expect(combined).toContain('    - nested.spec.ts > outer > inner > junit-quarantined-fails');
+    expect(combined).toContain('unused:  0');
   }, 60_000);
 });
 

@@ -19,7 +19,9 @@ interface MockInfo {
 function mockInfo(overrides: Partial<MockInfo> = {}): MockInfo {
   return {
     title: 'adds numbers',
-    titlePath: ['chromium', '/repo/tests/math.spec.ts', 'math', 'adds numbers'],
+    // `TestInfo.titlePath` starts at the file, relative to the testDir — not
+    // the reporter's `['', project, file, ...]`.
+    titlePath: ['math.spec.ts', 'math', 'adds numbers'],
     file: '/repo/tests/math.spec.ts',
     status: 'passed',
     expectedStatus: 'passed',
@@ -60,7 +62,7 @@ describe('applyQuarantine', () => {
     const info = mockInfo({
       status: 'failed',
       title: 'other',
-      titlePath: ['chromium', '/repo/tests/math.spec.ts', 'math', 'other'],
+      titlePath: ['math.spec.ts', 'math', 'other'],
     });
     applyQuarantine({
       testInfo: info as never,
@@ -156,6 +158,37 @@ describe('applyQuarantine — project prefix', () => {
     applyQuarantine({
       testInfo: info as never,
       quarantineSet: unprefixed,
+      rootDir: '/repo',
+      includeProject: true,
+    });
+    expect(info.expectedStatus).toBe('failed');
+    expect(info.annotations).toContainEqual({ type: 'mergify:quarantined' });
+  });
+});
+
+describe('applyQuarantine — describe blocks and JUnit names', () => {
+  const nested = {
+    status: 'failed' as const,
+    title: 'adds numbers',
+    titlePath: ['math.spec.ts', 'outer', 'inner', 'adds numbers'],
+  };
+
+  it('keeps every describe in the key', () => {
+    const info = mockInfo(nested);
+    applyQuarantine({
+      testInfo: info as never,
+      quarantineSet: new Set(['tests/math.spec.ts > outer > inner > adds numbers']),
+      rootDir: '/repo',
+      includeProject: false,
+    });
+    expect(info.annotations).toContainEqual({ type: 'mergify:quarantined' });
+  });
+
+  it('matches an entry stored under the JUnit name', () => {
+    const info = mockInfo(nested);
+    applyQuarantine({
+      testInfo: info as never,
+      quarantineSet: new Set(['math.spec.ts.outer › inner › adds numbers']),
       rootDir: '/repo',
       includeProject: true,
     });

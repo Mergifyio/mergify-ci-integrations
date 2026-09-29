@@ -69,6 +69,35 @@ export function buildTestKey(
 }
 
 /**
+ * Build the name the same test carries when it reaches CI Insights through
+ * Playwright's JUnit reporter instead of ours: `<classname>.<name>`, where
+ * Playwright sets `classname` to the file suite title and `name` to the
+ * describes and title joined with ` › ` (U+203A). Quarantine entries created
+ * from those runs are stored in this form, so matching only `buildTestKey`
+ * would leave them permanently unused.
+ *
+ * `fileTitlePath` is `[file, ...describes, title]`: `TestInfo.titlePath` as
+ * is, or `TestCase.titlePath().slice(2)` in the reporter.
+ */
+export function buildJUnitTestKey(fileTitlePath: readonly string[]): string {
+  const [file = '', ...rest] = fileTitlePath;
+  return `${file}.${rest.join(' › ')}`;
+}
+
+/**
+ * The quarantine entries naming this test, in either the reporter's form or
+ * the JUnit one. Empty when the test is not quarantined; both entries when the
+ * list holds the test under both names.
+ */
+export function matchQuarantineEntries(
+  quarantineSet: ReadonlySet<string>,
+  testKey: string,
+  junitTestKey: string
+): string[] {
+  return [testKey, junitTestKey].filter((name) => quarantineSet.has(name));
+}
+
+/**
  * Map a Playwright TestResult.status to our 3-value status.
  */
 export function mapStatus(
