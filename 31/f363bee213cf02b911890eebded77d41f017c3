@@ -1,0 +1,1 @@
+rebase on main after #390: the runner path now picks runner or runner-legacy by Vitest version, and the deselection change moved into the runner factory
