@@ -19,7 +19,8 @@ describe('selection', () => {
 
   it('beta', () => {
     ran('beta');
-    expect(1).toBe(1);
+    // The one test a verdict can be caught reporting as failed.
+    expect(process.env.MERGIFY_SELECTION_FAIL_BETA ? 0 : 1).toBe(1);
   });
 
   it('gamma', () => {

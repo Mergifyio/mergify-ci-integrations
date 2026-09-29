@@ -1,71 +1,68 @@
-import { dirname, extname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import type {
   FlakyDetectionContext,
   FlakyDetectionMode,
   MergifyApiClient,
   SessionSpan,
+  SessionVerdictResult,
   TestCaseResult,
+  TestCollection,
   TestRunSession,
   TestSelection,
-  TestSelectionClient,
+  TestSelectionApplication,
+  TestSelectionClientIdentity,
   TracingContext,
 } from '@mergifyio/ci-core';
 import {
+  applyToCollected,
+  buildSessionVerdict,
   createApiClient,
   createTracing,
   emitTestCaseSpan,
   endSessionSpan,
   envToBool,
+  fallbackRefusalMessage,
   fetchFlakyDetectionContext,
   fetchQuarantineList,
   fetchTestSelection,
+  formatSessionVerdictResult,
+  formatTestSelectionReport,
   generateTestRunId,
   getRepoName,
   isInCI,
   isTestSelectionEnabled,
+  nativeTestCollectionFingerprint,
   resolveBranchFromAttributes,
   resolveSelectionCoordinates,
+  SessionVerdictFold,
+  SHARD_SLICE_UNAVAILABLE,
+  selectionEcho,
+  selectionResourceAttributes,
+  sendSessionVerdict,
   startSessionSpan,
   TEST_SELECTION_ENABLE_ENV,
   toTestSelection,
 } from '@mergifyio/ci-core';
 import type { ProvidedContext } from 'vitest';
-import type { Reporter, TestCase, TestModule, Vitest } from 'vitest/node';
+import type { Reporter, TestCase, TestModule, TestSpecification, Vitest } from 'vitest/node';
 import * as vitestResource from './resources/vitest.js';
-import type { MergifyReporterOptions } from './types.js';
+import {
+  collectionIdentity,
+  finalStatus,
+  mergifyRunnerPath,
+  selectionUnreachable,
+  shardSlice,
+} from './test-selection.js';
+import type { MergifyApiClientStandIn, MergifyReporterOptions } from './types.js';
 import { extractNamespace } from './utils.js';
 import { readPluginVersion } from './version.js';
 
 const DEFAULT_API_URL = 'https://api.mergify.com';
 
-/** Whether this Vitest exports its runner base class, `TestRunner`, from `vitest` (4.1 and later). */
-function exportsTestRunner(version: string): boolean {
-  const [major = 0, minor = 0] = version.split('.').map((part) => Number.parseInt(part, 10));
-  return major > 4 || (major === 4 && minor >= 1);
-}
-
-/**
- * Sharding is the hazard this feature still has on Vitest, and opting in is
- * what a user accepts when they take it on.
- *
- * On a sharded job every shard reports the same `job_name`, so each is served
- * the pooled failing set of all shards. A shard owning none of those tests
- * matches nothing, and `_reportSelection`'s stale-subset guard then fails the
- * run deliberately — correctly, since a run that skipped everything proves
- * nothing, but the batch cannot merge past it. `pytest-mergify` avoids this by
- * widening back to a full run; it can, because it sees the whole collection in
- * one process before anything executes. Here the collection is only complete
- * once the workers are done, so prevention is not available and the guard is
- * all that is left. It comes back the day a per-shard identity exists
- * (MRGFY-8629 and its successors); MRGFY-8906 carries the decision.
- *
- * Until then this is a documented limitation of the opt-in rather than a
- * second, Vitest-only switch: `VITEST_MERGIFY_TEST_SELECTION_ENABLE` existed
- * only to keep the feature off by default, and since MRGFY-9208 every client
- * is off by default anyway. Two names for one answer is what the ticket sends
- * us to remove.
- */
+/** How the terminal block names this client, in the two sentences that do. */
+const CLIENT: TestSelectionClientIdentity = {
+  name: '@mergifyio/vitest',
+  docsUrl: 'https://docs.mergify.com/ci-insights/test-frameworks/vitest/',
+};
 
 export class MergifyReporter implements Reporter {
   private vitest: Vitest | undefined;
@@ -87,7 +84,19 @@ export class MergifyReporter implements Reporter {
   }> = [];
   private _flakyPromise: Promise<void> | undefined;
   private selection: TestSelection | undefined;
-  private _selectionPromise: Promise<void> | undefined;
+  /** Set in `onInit` when this run may ask for a selection; asked in `onTestRunStart`. */
+  private selectionClient: MergifyApiClientStandIn | undefined;
+  /** The client the verdict goes through, once the run asked with a fingerprint. */
+  private verdictClient: MergifyApiClientStandIn | undefined;
+  /** What this leg is about to run, once it asked; the count is filled in at the end. */
+  private collection: TestCollection | undefined;
+  private application: TestSelectionApplication | undefined;
+  private verdictFold = new SessionVerdictFold();
+  /** Why the verdict cannot be trusted to name what failed, when it cannot. */
+  private verdictWithheld: string | undefined;
+  /** The stale-subset guard failed the run, and already said why. */
+  private subsetGuardFailed = false;
+  private verdictResult: SessionVerdictResult | undefined;
   private deselectedCount = 0;
   private selectedExecutedCount = 0;
 
@@ -166,7 +175,9 @@ export class MergifyReporter implements Reporter {
         toTestSelection('subset', 'reduced_rerun', this.options.testSelection)
       );
     } else if (this.tracing && apiClient) {
-      this._initTestSelection(vitest, apiClient);
+      // Asked in `onTestRunStart`, the first hook that knows which files this
+      // run executes: the request carries their fingerprint.
+      this.selectionClient = apiClient;
     }
 
     // If flaky context was provided via options (for testing), use it directly
@@ -199,7 +210,20 @@ export class MergifyReporter implements Reporter {
     });
   }
 
-  private _initTestSelection(vitest: Vitest, client: Partial<TestSelectionClient>): void {
+  /**
+   * Ask Mergify what this leg should execute, and hand the answer to the
+   * runner before any worker starts.
+   *
+   * The request carries the fingerprint of the files this leg runs, which is
+   * how the engine finds the leg's own predecessor rather than every shard of
+   * the job at once. Nothing thrown here reaches Vitest: a failure part-way
+   * leaves tests selected, which runs MORE than intended, never fewer.
+   */
+  private async _selectTests(
+    vitest: Vitest,
+    client: MergifyApiClientStandIn,
+    specifications: ReadonlyArray<TestSpecification>
+  ): Promise<void> {
     const fetch = client.fetchTestSelection?.bind(client);
     // An injected stand-in predating this feature has no such method; that
     // reads as "no selection", i.e. run everything.
@@ -213,26 +237,77 @@ export class MergifyReporter implements Reporter {
     if (!coordinates) return;
 
     const log = (msg: string) => vitest.logger.log(`[@mergifyio/vitest] ${msg}`);
-    this._selectionPromise = fetchTestSelection(
+
+    const unreachable = selectionUnreachable(vitest, specifications);
+    if (unreachable) {
+      log(`${unreachable}; the full suite runs without a test selection`);
+      return;
+    }
+
+    let slice: ReadonlyArray<TestSpecification>;
+    try {
+      slice = await shardSlice(vitest, specifications);
+    } catch (err) {
+      log(`could not tell which files this shard runs (${String(err)}); the shard runs unreduced`);
+      // Nothing asked, nothing skipped: the leg runs its own share, exactly as
+      // it would have without Mergify, and the terminal block says why.
+      this.selection = {
+        selection: 'full',
+        reason: SHARD_SLICE_UNAVAILABLE,
+        tests: new Set(),
+        served: false,
+      };
+      return;
+    }
+
+    const fingerprint = nativeTestCollectionFingerprint(collectionIdentity(vitest, slice));
+    if (fingerprint === null) {
+      log('the bundled binding cannot fingerprint the collection; the full suite runs');
+      return;
+    }
+    this.collection = { fingerprint, count: 0 };
+    this.verdictClient = client;
+
+    const selection = await fetchTestSelection(
       { fetchTestSelection: fetch },
       coordinates,
-      log
-    ).then((selection) => {
-      this._applySelection(vitest, selection);
-    });
+      log,
+      fingerprint
+    );
+    this._applySelection(vitest, selection);
   }
 
   private _applySelection(vitest: Vitest, selection: TestSelection): void {
     this.selection = selection;
-    // Only a subset this run can act on reaches the workers. Everything else
-    // -- `full`, an `empty` or `refused` answer, a subset this client cannot
-    // honour -- runs the whole suite here: the two answers pytest-mergify
-    // acts on are not built for this reporter yet, and a job that opts in
-    // must never run less than everything on an answer it does not carry.
-    if (selection.selection !== 'subset' || selection.notAppliedReason !== undefined) return;
+    // An answer this client cannot act on runs the whole suite, and says so
+    // at the end: a job that opts in must never run less than everything on
+    // an answer it does not carry.
+    if (selection.notAppliedReason !== undefined) return;
 
-    this._provideToRunner(vitest, 'mergify:selection', [...selection.tests]);
-    this._configureRunner(vitest);
+    switch (selection.selection) {
+      case 'subset':
+        this._provideToRunner(vitest, 'mergify:selection', [...selection.tests]);
+        this._configureRunner(vitest);
+        return;
+      case 'empty':
+        // Deselecting every test rather than removing the files: Vitest ends a
+        // run whose tests are all skipped green, whereas a run left with no
+        // file exits 1 ("No test files found").
+        this._provideToRunner(vitest, 'mergify:selection', []);
+        this._configureRunner(vitest);
+        return;
+      case 'refused':
+        // Deliberately not the degradation path: Mergify holds several
+        // candidate predecessors for this job, so one job name stands for
+        // several runs and every future attempt would be reported wrong. It
+        // has to be seen and fixed, not absorbed into a full run nobody
+        // notices. The message is the server's, printed now so it is the first
+        // thing in the log; nothing runs, and the run fails in `onTestRunEnd`.
+        vitest.logger.error(selection.message ?? fallbackRefusalMessage(CLIENT));
+        this._provideToRunner(vitest, 'mergify:selection', []);
+        this._configureRunner(vitest);
+        return;
+    }
   }
 
   private _initFlakyDetection(
@@ -293,23 +368,7 @@ export class MergifyReporter implements Reporter {
     this._provideToRunner(vitest, 'mergify:quarantine', [...this.quarantineList]);
 
     // Auto-configure the custom runner if not already set.
-    //
-    // The runner is a sibling of this very module and always carries the same
-    // extension: tsdown emits `index.mjs` next to `runner.mjs` and `index.cjs`
-    // next to `runner.cjs`, and under vitest the sources run as `.ts`. There is
-    // no `runner.js` in any of those worlds, so deriving the extension from the
-    // module being executed is what keeps the pair in step — a hardcoded one
-    // resolved to a file that ships in no build at all, and vitest then failed
-    // the whole run with ERR_MODULE_NOT_FOUND the moment a repository had its
-    // first quarantined test (#87).
-    //
-    // Which runner depends on the Vitest running: its base class is exported
-    // from `vitest` since 4.1 and only from `vitest/runners` before, a subpath
-    // 4.1 deprecates and 5.0 removed. Loading the wrong one breaks the run the
-    // same way a missing file does.
-    const self = typeof __filename !== 'undefined' ? __filename : fileURLToPath(import.meta.url);
-    const entry = exportsTestRunner(vitest.version) ? 'runner' : 'runner-legacy';
-    const mergifyRunner = resolve(dirname(self), `${entry}${extname(self)}`);
+    const mergifyRunner = mergifyRunnerPath(vitest.version);
     if (!vitest.config.runner) {
       vitest.config.runner = mergifyRunner;
     } else if (vitest.config.runner !== mergifyRunner) {
@@ -319,7 +378,7 @@ export class MergifyReporter implements Reporter {
     }
   }
 
-  async onTestRunStart(): Promise<void> {
+  async onTestRunStart(specifications: ReadonlyArray<TestSpecification> = []): Promise<void> {
     // Wait for async initialization to complete
     if (this._quarantinePromise) {
       await this._quarantinePromise;
@@ -329,9 +388,16 @@ export class MergifyReporter implements Reporter {
       await this._flakyPromise;
       this._flakyPromise = undefined;
     }
-    if (this._selectionPromise) {
-      await this._selectionPromise;
-      this._selectionPromise = undefined;
+    const selectionClient = this.selectionClient;
+    if (selectionClient && this.vitest) {
+      this.selectionClient = undefined;
+      try {
+        await this._selectTests(this.vitest, selectionClient, specifications);
+      } catch (err) {
+        this.vitest.logger.log(
+          `[@mergifyio/vitest] test selection could not be applied, the full suite runs: ${String(err)}`
+        );
+      }
     }
 
     const testRunId = this._testRunId ?? generateTestRunId();
@@ -439,7 +505,7 @@ export class MergifyReporter implements Reporter {
 
   async onTestRunEnd(
     testModules: ReadonlyArray<TestModule>,
-    _unhandledErrors: ReadonlyArray<unknown>,
+    unhandledErrors: ReadonlyArray<unknown>,
     reason: 'passed' | 'failed' | 'interrupted'
   ): Promise<void> {
     if (!this.session) return;
@@ -447,7 +513,13 @@ export class MergifyReporter implements Reporter {
     this.session.endTime = Date.now();
     this.session.status = reason;
 
-    this._reportSelection(testModules);
+    this._settleSelection(testModules);
+    this._foldVerdict(testModules, unhandledErrors);
+    // The verdict first, on purpose: it is what the next merge-queue rerun of
+    // this job is answered from, and it must never wait behind the trace
+    // upload's timeout and retries.
+    await this._sendVerdict();
+    this._reportTestSelection();
 
     // Print quarantine summary
     if (this.quarantineList.size > 0) {
@@ -507,68 +579,180 @@ export class MergifyReporter implements Reporter {
   }
 
   /**
-   * Print the selection report and enforce the rule no reduced rerun may break:
-   * a green run must have executed what it believed it would.
+   * Decide what the run did with Mergify's answer, now that the collection is
+   * known, and enforce the rule no reduced rerun may break: a green run must
+   * have executed what it believed it would.
    *
-   * The subset is matched against the tests Vitest actually collected. Served
-   * names missing from the collection are ignored — a test may legitimately
-   * have been deleted — but a subset matching *nothing* means the identifiers
-   * are stale, and the run just skipped everything. That run proves nothing, so
-   * it is failed rather than allowed to report green.
-   *
-   * pytest-mergify degrades the same situation to running the full suite,
-   * because its filter sees the whole collection before anything runs. Here the
-   * collection is only complete once the workers are done, so prevention is not
-   * available and the guard is a loud failure instead. Same invariant, later
-   * and noisier.
+   * A served subset matching *nothing* collected here means the identifiers
+   * are stale, and the run just skipped everything. That run proves nothing,
+   * so it is failed rather than allowed to report green. pytest-mergify and
+   * Playwright degrade the same situation to a full run, because they see the
+   * whole collection before anything runs; here the tests are only known once
+   * the workers are done, so prevention is not available and the guard is a
+   * loud failure instead. Under the collection fingerprint the engine only
+   * serves a leg the failures of a leg that ran the same files, so the guard
+   * is for a defect, not for sharding.
    */
-  private _reportSelection(testModules: ReadonlyArray<TestModule>): void {
+  private _settleSelection(testModules: ReadonlyArray<TestModule>): void {
     const selection = this.selection;
-    if (
-      !selection ||
-      selection.selection !== 'subset' ||
-      selection.notAppliedReason !== undefined
-    ) {
-      return;
-    }
+    if (!selection) return;
 
-    const logger = this.vitest?.logger;
+    // Distinct identities, in collection order: two tests with the same
+    // suite and name in different files are one identity to the engine.
     const collected = new Set<string>();
     for (const module of testModules) {
       for (const test of module.children.allTests()) collected.add(test.fullName);
     }
-    const matched = [...selection.tests].filter((name) => collected.has(name));
+    const ids = [...collected];
+    if (this.collection) this.collection.count = ids.length;
 
-    logger?.log('');
-    logger?.log('[@mergifyio/vitest] Test selection report:');
-    logger?.log(`  Selection: subset (reason: ${selection.reason})`);
-    logger?.log(
-      `  Reduced rerun: executed ${this.selectedExecutedCount} previously-failing test(s), ${this.deselectedCount} deselected`
-    );
-    // The two can differ legitimately: a served test the user's own filter
-    // excluded is matched but not executed. Say so rather than let the counts
-    // look inconsistent.
-    if (matched.length !== this.selectedExecutedCount) {
-      logger?.log(
-        `  ${matched.length - this.selectedExecutedCount} served test(s) were excluded by your own filters`
-      );
+    if (selection.selection === 'refused' && selection.notAppliedReason === undefined) {
+      this.application = applyToCollected(selection, ids);
+      this.session!.status = 'failed';
+      process.exitCode = 1;
+      return;
     }
 
-    // The stale-subset guard reads `matched`, not the executed count: a subset
-    // that matches collected tests the user then filtered out is the user's
-    // choice, not a broken selection.
-    if (collected.size > 0 && matched.length === 0) {
-      logger?.error(
+    if (selection.selection === 'empty' && selection.notAppliedReason === undefined) {
+      this.application = {
+        ...applyToCollected(selection, ids),
+        deselectedCount: this.deselectedCount,
+      };
+      return;
+    }
+
+    if (selection.selection !== 'subset' || selection.notAppliedReason !== undefined) {
+      this.application = applyToCollected(selection, ids);
+      return;
+    }
+
+    const matched = ids.filter((name) => selection.tests.has(name));
+    if (matched.length !== selection.tests.size) {
+      // All or nothing, as core's `applyToCollected` rules: a served test
+      // missing here was not re-run anywhere, and a green run over the rest
+      // would merge the batch without it.
+      this.application = applyToCollected(selection, ids);
+      this.subsetGuardFailed = true;
+      const missing = selection.tests.size - matched.length;
+      this.vitest?.logger.error(
         `[@mergifyio/vitest] Failing this run deliberately: Mergify served ${selection.tests.size} test(s) to replay, ` +
-          'and not one of them matches a test collected here, so the run skipped everything and proves nothing.\n' +
+          `and ${missing === selection.tests.size ? 'not one' : missing} of them match${missing === 1 ? 'es' : ''} no test collected here, ` +
+          'so this run cannot prove what failed before now passes.\n' +
           '  Two things cause this:\n' +
-          '    - the tests were renamed or moved since the previous attempt, so the served identifiers no longer exist;\n' +
+          '    - the tests were renamed since the previous attempt, or their names change from one run to the next;\n' +
           '    - this is one branch of a matrix job whose branches share a job name, and the failures belong to a sibling branch.\n' +
           `  To get a full run instead, unset ${TEST_SELECTION_ENABLE_ENV}.`
       );
       this.session!.status = 'failed';
       process.exitCode = 1;
+      return;
     }
+
+    this.application = {
+      selection,
+      outcome: 'subset',
+      keep: new Set(matched),
+      keptTests: matched,
+      keptCount: matched.length,
+      deselectedCount: this.deselectedCount,
+    };
+  }
+
+  /**
+   * Fold every test this run reported to its final status, once the run is
+   * over: tests the selection removed are left out, and so are tests that
+   * never finished (a cancelled or bailed run), which is what makes such a
+   * session read as incomplete and its retry run in full.
+   *
+   * The verdict is withheld whenever the run failed somewhere no test
+   * carries: an unhandled error, a failing hook, a file that did not import.
+   * Its tests then read as passed or skipped, and a verdict naming no failure
+   * would have the retry run nothing and turn green on the same bug. Without a
+   * verdict the retry runs the whole suite, which is always safe.
+   */
+  private _foldVerdict(
+    testModules: ReadonlyArray<TestModule>,
+    unhandledErrors: ReadonlyArray<unknown>
+  ): void {
+    const fold = new SessionVerdictFold();
+    let brokenOutsideTests = unhandledErrors.length > 0;
+    for (const module of testModules) {
+      if (module.errors().length > 0) brokenOutsideTests = true;
+      for (const suite of module.children.allSuites()) {
+        if (suite.errors().length > 0) brokenOutsideTests = true;
+      }
+      for (const test of module.children.allTests()) {
+        const meta = test.meta() as Record<string, unknown>;
+        if (meta.mergifyDeselected === true) continue;
+        const state = test.result().state;
+        if (state === 'pending') continue;
+        fold.recordDuration(test.diagnostic()?.duration ?? 0);
+        fold.record(test.fullName, finalStatus(state, meta));
+      }
+    }
+    this.verdictFold = fold;
+    if (brokenOutsideTests) this.verdictWithheld = 'it failed outside any test';
+  }
+
+  private _echo() {
+    return this.application ? selectionEcho(this.application) : undefined;
+  }
+
+  /**
+   * Write what this session concluded to Mergify, and put the collection and
+   * the answer on the trace resource. Sent exactly when the run asked with a
+   * fingerprint -- including when that request failed: the API may be back by
+   * now, and the verdict is what the NEXT rerun of this job needs. Never fails
+   * the run.
+   */
+  private async _sendVerdict(): Promise<void> {
+    const collection = this.collection;
+    if (!collection || !this.tracing) return;
+
+    Object.assign(
+      this.tracing.resourceAttributes,
+      selectionResourceAttributes(collection, this._echo())
+    );
+
+    const client = this.verdictClient;
+    if (!client || this.verdictWithheld) return;
+    const verdict = buildSessionVerdict({
+      testRunId: this._testRunId!,
+      attributes: this.tracing.resourceAttributes,
+      collection,
+      fold: this.verdictFold,
+      selection: this._echo(),
+    });
+    if (!verdict) return;
+    if (envToBool(process.env.MERGIFY_CI_DEBUG, false)) {
+      // The same switch that dumps the trace to stderr instead of uploading it.
+      process.stderr.write(`[mergify] session verdict ${JSON.stringify(verdict)}\n`);
+      this.verdictResult = { sent: true, truncated: false };
+      return;
+    }
+    this.verdictResult = await sendSessionVerdict(client, verdict);
+  }
+
+  /**
+   * Say what the reduction did, or why it did not happen. Silence is reserved
+   * for "we never asked"; a failed stale subset has already said everything
+   * in its own error.
+   */
+  private _reportTestSelection(): void {
+    const application = this.application;
+    if (!application) return;
+    const logger = this.vitest?.logger;
+    if (!this.subsetGuardFailed) {
+      logger?.log('');
+      logger?.log(formatTestSelectionReport(application, CLIENT).trimEnd());
+    }
+    if (this.verdictWithheld && this.collection) {
+      logger?.log(
+        `Mergify wasn't sent this run's results: ${this.verdictWithheld}. If this merge-queue batch is retried, this job will run its full test suite.`
+      );
+    }
+    const verdictLine = this.verdictResult && formatSessionVerdictResult(this.verdictResult);
+    if (verdictLine) logger?.log(verdictLine.trimEnd());
   }
 
   getSession(): TestRunSession | undefined {
