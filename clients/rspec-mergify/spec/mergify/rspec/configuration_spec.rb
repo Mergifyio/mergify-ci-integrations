@@ -11,6 +11,20 @@ RSpec.describe Mergify::RSpec::Configuration do
     end
   end
 
+  describe '.select_examples' do
+    it 'reports a failure of its own and lets the whole suite run' do
+      insights = instance_double(Mergify::RSpec::CIInsights)
+      allow(insights).to receive(:on_examples_collected).and_raise(RuntimeError, 'boom')
+      allow(Mergify::RSpec).to receive(:ci_insights).and_return(insights)
+      error_stream = StringIO.new
+      allow(RSpec.configuration).to receive(:error_stream).and_return(error_stream)
+
+      expect { described_class.select_examples }.not_to raise_error
+      expect(error_stream.string)
+        .to eq("Mergify Test Selection failed, so the full suite runs: RuntimeError: boom\n")
+    end
+  end
+
   # RSpec only adds its default formatter when no other was added, and it
   # decides that only when the run starts. So this has to be a real run: in
   # this process the suite has long started.

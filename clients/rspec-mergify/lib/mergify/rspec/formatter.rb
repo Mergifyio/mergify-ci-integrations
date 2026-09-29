@@ -2,6 +2,7 @@
 
 require 'rspec/core/formatters/base_formatter'
 require_relative 'trace'
+require_relative 'configuration'
 
 require 'mergify/rspec/native'
 
@@ -15,6 +16,12 @@ module Mergify
       # What it listens to once attached, `start` excepted: it is attached after
       # that notification, and handed it directly.
       NOTIFICATIONS = %i[example_started example_finished example_pending stop].freeze
+
+      # @mergifyio/vitest's sentence, for the same withheld verdict.
+      WITHHELD_VERDICT = TestSelection.wrap(
+        "Mergify wasn't sent this run's results: it failed outside any example. If this merge-queue " \
+        'batch is retried, this job will run its full test suite.'
+      )
 
       ::RSpec::Core::Formatters.register self, :start, *NOTIFICATIONS
 
@@ -46,7 +53,7 @@ module Mergify
         @example_spans[example.id] = span
       end
 
-      # rubocop:disable-next Metrics/MethodLength
+      # rubocop:disable-next Metrics/MethodLength,Metrics/AbcSize
       def example_finished(notification)
         return unless @example_spans
 
@@ -55,6 +62,7 @@ module Mergify
         return unless span
 
         result = example.execution_result
+        @ci_insights.session_verdict.record(example.id, verdict_status(example), result.run_time)
         status = result.status.to_s
         span.set_attribute('test.case.result.status', status)
         set_flaky_attributes(span, example)
@@ -77,16 +85,49 @@ module Mergify
         return unless span
 
         span.set_attribute('test.case.result.status', 'skipped')
+        @ci_insights.session_verdict.record(example.id, verdict_status(example), example.execution_result.run_time)
         @ci_insights.recorder.record(span)
       end
 
       def stop(_notification)
         finish_session_span
+        # The verdict first, on purpose: it is what the next merge-queue rerun
+        # of this job is answered from, and it must never wait behind the
+        # trace upload's timeout and retries.
+        send_session_verdict
         print_report
         flush_and_shutdown
       end
 
       private
+
+      # The status RSpec reported, which is the one that decided the exit
+      # code. A pending example is a skip, unless it is a failure the
+      # quarantine absorbed.
+      def verdict_status(example)
+        result = example.execution_result
+        case result.status
+        when :passed then 'passed'
+        when :failed then 'failed'
+        else
+          quarantined = example.metadata[:mergify_quarantined] &&
+                        result.pending_message == Configuration::QUARANTINE_MESSAGE
+          quarantined ? 'quarantined_failed' : 'skipped'
+        end
+      end
+
+      def send_session_verdict
+        return unless @ci_insights&.recorder
+
+        @ci_insights.send_session_verdict(failed_outside_examples: failed_outside_examples?)
+      end
+
+      # RSpec flags a failure no example carries -- a failing `after(:context)`
+      # or suite hook. A load error flags it too, but stops the run before the
+      # formatter is ever attached.
+      def failed_outside_examples?
+        ::RSpec.world.non_example_failure ? true : false
+      end
 
       def build_example_attributes(example, quarantined)
         {
@@ -148,6 +189,7 @@ module Mergify
         print_configuration_warnings
         print_flaky_report
         print_quarantine_report
+        print_test_selection_report
         output.puts "MERGIFY_TEST_RUN_ID=#{@ci_insights.test_run_id}"
         output.puts '------------------'
       end
@@ -182,6 +224,17 @@ module Mergify
 
         report = @ci_insights.quarantined_tests.report
         output.puts report if report
+      end
+
+      # One block whatever happened, once the job asked for a selection.
+      def print_test_selection_report
+        selection = @ci_insights.test_selection
+        return unless selection
+
+        output.puts selection.report
+        output.puts WITHHELD_VERDICT if @ci_insights.session_verdict_withheld
+        verdict_report = @ci_insights.session_verdict_result.report
+        output.puts verdict_report if verdict_report
       end
 
       # One upload, at the end. There is nothing to shut down any more: the

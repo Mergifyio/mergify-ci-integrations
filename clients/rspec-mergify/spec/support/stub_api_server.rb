@@ -12,8 +12,10 @@ require 'zlib'
 module StubApiServer
   # Serves one canned response to every request, then yields the base URL,
   # the paths it was asked for, and the request bodies (gunzipped), so a caller
-  # can assert on them.
-  def with_stub_api(status:, body:)
+  # can assert on them. `routes` answers the requests whose path contains a
+  # key with that key's `[status, body]` instead, for a run that asks several
+  # endpoints for different things.
+  def with_stub_api(status:, body:, routes: {})
     server = TCPServer.new('127.0.0.1', 0)
     paths = []
     bodies = []
@@ -23,15 +25,18 @@ module StubApiServer
         socket = server.accept
         request_line = socket.gets
         request_body = read_request_body(socket)
+        path = request_line.to_s.split[1]
         mutex.synchronize do
-          paths << request_line.to_s.split[1]
+          paths << path
           bodies << request_body
         end
+        route = routes.find { |fragment, _| path.to_s.include?(fragment) }
+        answer_status, answer_body = route ? route.last : [status, body]
         socket.print(
-          "HTTP/1.1 #{status} #{status == 200 ? 'OK' : 'Error'}\r\n" \
+          "HTTP/1.1 #{answer_status} #{answer_status == 200 ? 'OK' : 'Error'}\r\n" \
           "Content-Type: application/json\r\n" \
-          "Content-Length: #{body.bytesize}\r\n" \
-          "Connection: close\r\n\r\n#{body}"
+          "Content-Length: #{answer_body.bytesize}\r\n" \
+          "Connection: close\r\n\r\n#{answer_body}"
         )
         socket.close
       rescue StandardError
