@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  buildJUnitTestKey,
   buildTestKey,
   extractNamespace,
   mapStatus,
@@ -202,6 +203,18 @@ describe('buildTestKey — prefix argument', () => {
     expect(
       buildTestKey('tests/x.spec.ts', ['chromium', 'tests/x.spec.ts', 'my test'], 'my test')
     ).toBe('tests/x.spec.ts > my test');
+  });
+});
+
+describe('buildJUnitTestKey', () => {
+  it('joins the file and the titles the way JUnit reports reach CI Insights', () => {
+    expect(buildJUnitTestKey(['sub/x.spec.ts', 'outer', 'inner', 'my test'])).toBe(
+      'sub/x.spec.ts.outer › inner › my test'
+    );
+  });
+
+  it('puts the title right after the file when there is no describe', () => {
+    expect(buildJUnitTestKey(['x.spec.ts', 'my test'])).toBe('x.spec.ts.my test');
   });
 });
 

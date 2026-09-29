@@ -1,7 +1,14 @@
 import { relative } from 'node:path';
 import { test as baseTest, expect, type TestInfo } from '@playwright/test';
 import { readStateFile } from './state-file.js';
-import { buildTestKey, projectNamePrefix, resolveIncludeProject, toPosix } from './utils.js';
+import {
+  buildJUnitTestKey,
+  buildTestKey,
+  matchQuarantineEntries,
+  projectNamePrefix,
+  resolveIncludeProject,
+  toPosix,
+} from './utils.js';
 
 interface ApplyArgs {
   testInfo: TestInfo;
@@ -28,8 +35,13 @@ export function applyQuarantine({
   // (via `projectNameFromTest`). They return the same value — empty for the
   // implicit default project — so the keys match and quarantine lookups land.
   const prefix = includeProject ? projectNamePrefix(testInfo.project.name) : '';
-  const key = buildTestKey(filepath, testInfo.titlePath, testInfo.title, prefix);
-  if (!quarantineSet.has(key)) return;
+  // `TestInfo.titlePath` starts at the file (`[file, ...describes, title]`),
+  // while `buildTestKey` takes the reporter's `['', project, file, ...]`.
+  // Passing it unpadded drops the first describe and the key never matches.
+  const reporterTitlePath = ['', testInfo.project.name, ...testInfo.titlePath];
+  const key = buildTestKey(filepath, reporterTitlePath, testInfo.title, prefix);
+  const junitKey = buildJUnitTestKey(testInfo.titlePath);
+  if (matchQuarantineEntries(quarantineSet, key, junitKey).length === 0) return;
 
   // Mirror the actual status. Playwright reconciles a test as "expected" only
   // when `status === expectedStatus`, so setting `expectedStatus = 'failed'`

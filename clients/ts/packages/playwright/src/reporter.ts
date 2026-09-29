@@ -58,9 +58,11 @@ import { listPlaywrightSlice } from './shard.js';
 import { readStateFile, type SharedState } from './state-file.js';
 import type { MergifyReporterOptions } from './types.js';
 import {
+  buildJUnitTestKey,
   buildTestKey,
   extractNamespace,
   mapStatus,
+  matchQuarantineEntries,
   projectNameFromTest,
   projectNamePrefix,
   readonlyProjectNames,
@@ -187,10 +189,15 @@ export class MergifyReporter implements Reporter {
   private config: FullConfig | undefined;
   private quarantineFetchedCount = 0;
   private quarantineFetchedNames: string[] = [];
+  private quarantineFetchedSet: ReadonlySet<string> = new Set();
   // A Set so a fetched quarantine entry caught in multiple projects (same
   // unprefixed key when project prefixing is off) counts once, not once per
   // project — otherwise `caught` inflates and `unused` can go negative.
   private quarantinedCaught: Set<string> = new Set();
+  // The fetched entries the caught tests matched. Kept apart from
+  // `quarantinedCaught` because a test can match an entry stored in the JUnit
+  // form, or match two entries when the list holds it under both names.
+  private quarantineMatchedNames: Set<string> = new Set();
   private flakyResults: Array<{
     name: string;
     new: boolean;
@@ -538,6 +545,7 @@ export class MergifyReporter implements Reporter {
     if (state) {
       this.quarantineFetchedCount = state.quarantinedTests.length;
       this.quarantineFetchedNames = state.quarantinedTests;
+      this.quarantineFetchedSet = new Set(state.quarantinedTests);
       if (state.flakyMode) this.flakyMode = state.flakyMode;
       if (state.flakyContext) flakyContext = state.flakyContext;
     }
@@ -651,6 +659,10 @@ export class MergifyReporter implements Reporter {
     if (isQuarantined) {
       testCaseResult.quarantined = true;
       this.quarantinedCaught.add(key);
+      const junitKey = buildJUnitTestKey(titlePath.slice(2));
+      for (const name of matchQuarantineEntries(this.quarantineFetchedSet, key, junitKey)) {
+        this.quarantineMatchedNames.add(name);
+      }
     }
 
     // Record phase-1 outcome for candidates, used to compute repeat-each
@@ -762,21 +774,18 @@ export class MergifyReporter implements Reporter {
     this.reportTestSelection();
 
     if (this.quarantineFetchedCount > 0) {
-      const unused = this.quarantineFetchedCount - this.quarantinedCaught.size;
+      const unusedNames = this.quarantineFetchedNames.filter(
+        (n) => !this.quarantineMatchedNames.has(n)
+      );
       process.stderr.write('[@mergifyio/playwright] Quarantine report:\n');
       process.stderr.write(`  fetched: ${this.quarantineFetchedCount}\n`);
       process.stderr.write(`  caught:  ${this.quarantinedCaught.size}\n`);
       for (const name of this.quarantinedCaught) {
         process.stderr.write(`    - ${name}\n`);
       }
-      process.stderr.write(`  unused:  ${unused}\n`);
-      if (unused > 0) {
-        const unusedNames = this.quarantineFetchedNames.filter(
-          (n) => !this.quarantinedCaught.has(n)
-        );
-        for (const name of unusedNames) {
-          process.stderr.write(`    - ${name}\n`);
-        }
+      process.stderr.write(`  unused:  ${unusedNames.length}\n`);
+      for (const name of unusedNames) {
+        process.stderr.write(`    - ${name}\n`);
       }
     }
 
