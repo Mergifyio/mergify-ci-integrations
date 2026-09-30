@@ -1,7 +1,8 @@
 name: Build pytest-mergify wheels
 
-# Reusable maturin build: the per-platform abi3 wheels plus a source
-# distribution, all uploaded as `wheels-*` artifacts. Both stages of the release
+# Reusable maturin build: the per-platform abi3 wheels, uploaded as `wheels-*`
+# artifacts. No source distribution: maturin would vendor the whole workspace,
+# Rust core included, into it. Both stages of the release
 # call it: the draft stage to prove the build (and attach the artifacts for
 # review), the publish stage to build the artifacts that go to PyPI.
 #
@@ -41,8 +42,8 @@ jobs:
           # image does not, so `ring` (via reqwest/rustls) fails to compile. A
           # native runner sidesteps it -- the same fix mergify-cli uses.
           - { platform: linux-aarch64, runner: ubuntu-26.04-arm, target: aarch64, manylinux: auto }
-          # musllinux (Alpine/musl) wheels, so musl users get a prebuilt binary
-          # instead of falling back to compiling the sdist.
+          # musllinux (Alpine/musl) wheels: with no sdist published, a platform
+          # without a wheel cannot install pytest-mergify at all.
           - { platform: musllinux-x86_64, runner: ubuntu-26.04, target: x86_64, manylinux: musllinux_1_2 }
           - { platform: musllinux-aarch64, runner: ubuntu-26.04-arm, target: aarch64, manylinux: musllinux_1_2 }
           - { platform: macos-x86_64, runner: macos-latest, target: x86_64, manylinux: auto }
@@ -81,74 +82,3 @@ jobs:
         with:
           name: wheels-${{ matrix.platform }}
           path: dist/*.whl
-
-  # The source distribution is a fallback for platforms without a wheel: maturin
-  # vendors the path-dependency crates + the workspace manifest into the tarball,
-  # so `pip install` compiles the binding from source (needs a Rust toolchain).
-  # Built once (platform-independent); no compilation, so no manylinux container.
-  sdist:
-    name: sdist
-    runs-on: ubuntu-26.04
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Stamp the version from the tag
-        if: inputs.tag != ''
-        shell: bash
-        env:
-          TAG: ${{ inputs.tag }}
-        run: |
-          version="${TAG#pytest-mergify-v}"
-          sed -i.bak -E "s/^version = \"0.0.0\".*/version = \"${version}\"/" clients/pytest-mergify/pyproject.toml
-          rm -f clients/pytest-mergify/pyproject.toml.bak
-          grep '^version = ' clients/pytest-mergify/pyproject.toml
-      - name: Bundle the root LICENSE into the package
-        shell: bash
-        run: cp LICENSE clients/pytest-mergify/LICENSE
-      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
-        with:
-          command: sdist
-          args: --out dist --manifest-path clients/pytest-mergify/Cargo.toml
-      # maturin vendors the whole workspace into the sdist, so the LICENSE copied
-      # above lands nested under clients/pytest-mergify/ while PKG-INFO (at the
-      # sdist root) declares `License-File: LICENSE`; PyPI resolves that path from
-      # the sdist root and rejects the upload otherwise (this sank 2026.8.5.1).
-      # Move it to the root and drop the nested LICENSE duplicate it vendored, so
-      # the tarball carries a single copy. Done with tarfile (not shell tar) to
-      # stay portable and free of the AppleDouble members bsdtar would inject.
-      - name: Normalize sdist licenses (single LICENSE at root)
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import glob, io, os, tarfile
-          sdist = glob.glob("dist/*.tar.gz")[0]
-          with tarfile.open(sdist) as t:
-              names = t.getnames()
-              root = next(n for n in names if n.endswith("/PKG-INFO") and n.count("/") == 1).split("/")[0]
-              nested_license = f"{root}/clients/pytest-mergify/LICENSE"
-              if f"{root}/LICENSE" in names or nested_license not in names:
-                  raise SystemExit(0)  # already normalized / nothing to move
-              data = t.extractfile(nested_license).read()
-          # Drop the nested LICENSE (the build-time copy maturin vendored); the
-          # copy added at the root below is the single canonical one. Keep the
-          # nested README -- clients/pytest-mergify/Cargo.toml's `readme` points
-          # at it, so building the wheel from this sdist needs it.
-          drop = {nested_license}
-          tmp = sdist + ".tmp"
-          with tarfile.open(sdist) as src, tarfile.open(tmp, "w:gz") as w:
-              for m in src.getmembers():
-                  if m.name in drop:
-                      continue
-                  w.addfile(m, src.extractfile(m) if m.isfile() else None)
-              info = tarfile.TarInfo(f"{root}/LICENSE")
-              info.size = len(data)
-              info.mode = 0o644
-              w.addfile(info, io.BytesIO(data))
-          os.replace(tmp, sdist)
-          print(f"normalized: single {root}/LICENSE at root")
-          PY
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: wheels-sdist
-          path: dist/*.tar.gz
