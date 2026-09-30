@@ -198,7 +198,7 @@ jobs:
             --draft \
             --title "pytest-mergify ${TAG#pytest-mergify-v}" \
             --generate-notes \
-            dist/*.whl dist/*.tar.gz
+            dist/*.whl
 
   # ---------------- Step 2: publish (release: published) ----------------
   publish:
@@ -225,7 +225,7 @@ jobs:
           TAG: ${{ github.event.release.tag_name }}
         run: |
           gh release download "${TAG}" --repo "${REPO}" --dir dist \
-            --pattern '*.whl' --pattern '*.tar.gz'
+            --pattern '*.whl'
       # The draft stage checked these, but release assets are mutable where a
       # tag is not, so the same assertions run again on what actually came back.
       - name: Check the downloaded contents

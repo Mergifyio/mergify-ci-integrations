@@ -20,7 +20,6 @@ from __future__ import annotations
 import hashlib
 import pathlib
 import sys
-import tarfile
 import zipfile
 
 # One wheel per matrix leg in build-pytest-mergify-wheels.yml. Pinned as a set
@@ -160,30 +159,6 @@ def check_wheel(path: pathlib.Path, version: str, license_digest: str) -> str | 
     return platform_tag
 
 
-def check_sdist(path: pathlib.Path, version: str) -> None:
-    name = path.name
-    with tarfile.open(path) as tf:
-        names = tf.getnames()
-        root = f"pytest_mergify-{version}"
-
-        # PyPI resolves License-File from the sdist root and rejects the upload
-        # when it does not resolve -- which is what sank 2026.8.5.1.
-        if f"{root}/LICENSE" not in names:
-            fail(name, "no LICENSE at the sdist root")
-
-        # maturin vendors the workspace so the extension can build from the
-        # sdist; without the crates it is unbuildable and the upload is a lie.
-        if not any(n.startswith(f"{root}/crates/") for n in names):
-            fail(name, "no vendored crates/ -- the sdist cannot build the extension")
-
-        try:
-            meta = parse_headers(tf.extractfile(f"{root}/PKG-INFO").read().decode())
-            if meta.get("Version", [None])[0] != version:
-                fail(name, f"PKG-INFO Version is {meta.get('Version')}, expected {version}")
-        except (KeyError, AttributeError):
-            fail(name, "no readable PKG-INFO")
-
-
 def main() -> int:
     if len(sys.argv) != 3:
         print("usage: check-pytest-packages.py <dist-dir> <version>", file=sys.stderr)
@@ -208,22 +183,22 @@ def main() -> int:
     if extra:
         problems.append(f"unexpected wheel platform {', '.join(sorted(extra))}")
 
-    if len(sdists) != 1:
-        problems.append(f"expected exactly one sdist, found {len(sdists)}")
-    else:
-        check_sdist(sdists[0], version)
+    # maturin vendors the whole workspace into an sdist, Rust core included, so
+    # one reaching PyPI would publish the source the wheels exist to keep closed.
+    if sdists:
+        problems.append(f"unexpected sdist {', '.join(p.name for p in sdists)}")
 
     if problems:
         for p in problems:
             print(f"::error::{p}", file=sys.stderr)
         print(
             f"\n{len(problems)} problem(s) across "
-            f"{len(wheels)} wheel(s) and {len(sdists)} sdist(s)",
+            f"{len(wheels)} wheel(s)",
             file=sys.stderr,
         )
         return 1
 
-    print(f"ok: {len(wheels)} wheels + {len(sdists)} sdist, all at {version}")
+    print(f"ok: {len(wheels)} wheels, all at {version}")
     for platform in sorted(seen):
         print(f"  {platform}")
     return 0
