@@ -158,6 +158,9 @@ for (const name of tarballs) {
   for (const f of files) {
     if (f.startsWith('node_modules/') || f === '.npmrc' || f === '.env' || f.endsWith('.pem'))
       fail(name, `packed ${f}`);
+    // A source map carries the original TypeScript in `sourcesContent`, which
+    // would republish the wrapper source next to the bundle built from it.
+    if (f.endsWith('.map')) fail(name, `packed ${f}`);
   }
 
   // --- napi platform packages --------------------------------------------
