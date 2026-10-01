@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'spec_helper'
+require 'json'
 require 'mergify/rspec/native'
 
 RSpec.describe Mergify::RSpec::Native do
@@ -275,6 +276,101 @@ RSpec.describe Mergify::RSpec::Native do
           'min_budget_duration_ms' => 1000,
           'min_test_execution_count' => 2
         )
+      end
+    end
+  end
+
+  describe '.test_collection_fingerprint', if: described_class.available? do
+    # The recipe is the Rust core's and is pinned there; these pin that Ruby
+    # reaches that recipe, and not one of its own.
+    it 'is the shared recipe: sha256 of the sorted sha256 digests' do
+      expect(described_class.test_collection_fingerprint(['tests/test_a.py::test_x']))
+        .to eq('e34981c3d93045c70c9e6d00ff46ef54ff4211cb84e7eb79d54aa449ecf5aff6')
+      expect(described_class.test_collection_fingerprint([]))
+        .to eq('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
+    end
+
+    it 'does not depend on the order RSpec loaded the examples in' do
+      ids = ['./a_spec.rb[1:1]', './a_spec.rb[1:2]', './b_spec.rb[1:1]']
+
+      expect(described_class.test_collection_fingerprint(ids))
+        .to eq(described_class.test_collection_fingerprint(ids.reverse))
+    end
+  end
+
+  describe 'test selection and the session verdict', if: described_class.available? do
+    around do |example|
+      WebMock.allow_net_connect!
+      example.run
+    ensure
+      WebMock.disable_net_connect!
+    end
+
+    def client(url)
+      Mergify::RSpec::Native::Client.new(url, 'token', 'Mergifyio', 'rspec-mergify', '1.2.3')
+    end
+
+    def fetch(url)
+      client(url).fetch_test_selection('mq/main', 'cafe', 'CI', 'rspec', 'f1')
+    end
+
+    let(:verdict) do
+      {
+        'test_run_id' => '0123456789abcdef', 'head_sha' => 'cafe', 'head_branch' => 'mq/main',
+        'pipeline_name' => 'CI', 'job_name' => 'rspec', 'run_id' => 42, 'run_attempt' => 2,
+        'collection_fingerprint' => 'f1', 'collection_count' => 3,
+        'executed_count' => 1, 'passed_count' => 0, 'failed_count' => 1, 'skipped_count' => 0,
+        'total_test_runtime_ms' => 12, 'failing_tests' => ['./a_spec.rb[1:2]'], 'quarantined_failing_tests' => [],
+        'selection' => { 'answer' => 'subset', 'reason' => 'queue_rerun', 'kept_count' => 1 }
+      }
+    end
+
+    it "asks with the run's identity and fingerprint, and hands the answer back keyed" do
+      body = '{"selection":"subset","reason":"queue_rerun","tests":["./a_spec.rb[1:2]"]}'
+      with_stub_api(status: 200, body: body) do |url, paths|
+        expect(fetch(url)).to eq('selection' => 'subset', 'reason' => 'queue_rerun',
+                                 'tests' => ['./a_spec.rb[1:2]'], 'message' => nil)
+        expect(paths.first).to eq('/v1/ci/Mergifyio/repositories/rspec-mergify/test-selection' \
+                                  '?branch=mq%2Fmain&head_sha=cafe&pipeline_name=CI&job_name=rspec' \
+                                  '&collection_fingerprint=f1')
+      end
+    end
+
+    it 'hands an answer naming no test over with an empty list, and its message' do
+      body = '{"selection":"refused","reason":"ambiguous_test_sessions","message":"Stopped."}'
+      with_stub_api(status: 200, body: body) do |url, _paths|
+        expect(fetch(url)).to include('tests' => [], 'message' => 'Stopped.')
+      end
+    end
+
+    it 'answers nil when the repository has no such feature' do
+      with_stub_api(status: 402, body: '{}') do |url, _paths|
+        expect(fetch(url)).to be_nil
+      end
+    end
+
+    it 'raises on a failed request, which the gem turns into a full run' do
+      with_stub_api(status: 500, body: '{}') do |url, _paths|
+        expect { fetch(url) }.to raise_error(Mergify::RSpec::Native::ApiError, /500/)
+      end
+    end
+
+    it 'sends the verdict as the wire body, the run id as a string' do
+      with_stub_api(status: 200, body: '{}') do |url, paths, bodies|
+        expect(client(url).send_session_verdict(verdict)).to eq('truncated' => false)
+        expect(paths.first).to end_with('/test-session-verdicts')
+        expect(JSON.parse(bodies.first)).to include(verdict.merge('run_id' => '42', 'failing_tests_truncated' => false))
+      end
+    end
+
+    it 'reports a verdict missing a required key as a gem bug' do
+      expect { client('http://127.0.0.1:9').send_session_verdict(verdict.except('job_name')) }
+        .to raise_error(KeyError, /job_name/)
+    end
+
+    it 'raises when Mergify refuses the verdict' do
+      with_stub_api(status: 400, body: '{"detail":"no"}') do |url, _paths|
+        expect { client(url).send_session_verdict(verdict) }.to raise_error(Mergify::RSpec::Native::ApiError)
       end
     end
   end

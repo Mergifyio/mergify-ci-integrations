@@ -1,18 +1,28 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'test_selection'
 
 module Mergify
   module RSpec
     # Registers RSpec hooks for quarantine and flaky detection, and attaches the
     # Mergify Test Insights formatter when running inside CI.
+    # rubocop:disable-next Metrics/ModuleLength
     module Configuration
+      QUARANTINE_MESSAGE = 'Test is quarantined from Mergify Test Insights'
+
       module_function
 
       # rubocop:disable-next Metrics/MethodLength,Metrics/BlockLength,Metrics/AbcSize
       # rubocop:disable-next Metrics/CyclomaticComplexity,Metrics/PerceivedComplexity
       def setup!
         ::RSpec.configure do |config|
+          # Registered before the formatter's hook so that it runs after it --
+          # each `prepend_before` goes to the front: the formatter has to be
+          # attached already for the run's report and verdict to see what the
+          # selection did.
+          config.prepend_before(:suite) { Configuration.select_examples } if Utils.in_ci?
+
           # Attached to the reporter once the suite starts, rather than added with
           # `add_formatter`: RSpec only sets up its default formatter when no
           # other was added, so adding this one took the progress output and the
@@ -53,8 +63,66 @@ module Mergify
             example.metadata[:mergify_quarantined_failure] = true
             example.instance_variable_set(:@exception, nil)
             example.execution_result.status = :pending
-            example.execution_result.pending_message = 'Test is quarantined from Mergify Test Insights'
+            example.execution_result.pending_message = QUARANTINE_MESSAGE
           end
+        end
+      end
+
+      # Fingerprint what this process is about to run, ask Mergify whether part
+      # of it is enough, and remove the rest.
+      #
+      # A `before(:suite)` hook, because that is the first moment RSpec has both
+      # loaded the spec files and applied its filters, and the last one before
+      # an example group starts. What each group runs is read from
+      # `RSpec.world.filtered_examples`, which RSpec memoized while counting the
+      # run; narrowing those lists is what deselects.
+      # rubocop:disable-next Metrics/MethodLength,Metrics/AbcSize,Metrics/CyclomaticComplexity,Metrics/PerceivedComplexity
+      def select_examples
+        ci = Mergify::RSpec.ci_insights
+        return unless ci
+
+        groups = ::RSpec.world.example_groups.flat_map(&:descendants)
+        ids = groups.flat_map { |group| ::RSpec.world.filtered_examples[group] }.map(&:id)
+        ci.on_examples_collected(ids)
+
+        begin
+          keep = ci.test_selection&.resolve(ids)
+        rescue TestSelectionRefused => e
+          ci.on_selection_resolved(0)
+          return refuse(e.message)
+        end
+
+        deselect(groups, keep) if keep
+        ci.on_selection_resolved(keep ? ids.count { |id| keep.include?(id) } : ids.size)
+      rescue StandardError => e
+        # This runs on every CI run, opted in or not, and RSpec would answer a
+        # raise here by running nothing: a fault of this gem must cost the run
+        # its reduction, never its tests.
+        ::RSpec.configuration.error_stream.puts(
+          "Mergify Test Selection failed, so the full suite runs: #{e.class}: #{e.message}"
+        )
+      end
+
+      # Stop the run before any example, the way RSpec stops one whose suite
+      # hook failed -- nothing runs, the exit code is red, and the summary
+      # counts an error outside of examples -- but with the server's
+      # explanation alone. Raised from the hook, the same failure is printed
+      # under a "Failure/Error:" header pointing at a line of this gem, which
+      # only buries the explanation.
+      def refuse(message)
+        ::RSpec.configuration.error_stream.puts("\n#{message}\n")
+        ::RSpec.world.wants_to_quit = true
+        reporter = ::RSpec.configuration.reporter
+        count = reporter.instance_variable_get(:@non_example_exception_count)
+        reporter.instance_variable_set(:@non_example_exception_count, count + 1) if count.is_a?(Integer)
+      end
+
+      # A group left with no example runs none of its `before(:context)`
+      # hooks: RSpec decides that from these same lists, once the group starts.
+      def deselect(groups, keep)
+        groups.each do |group|
+          ::RSpec.world.filtered_examples[group] =
+            ::RSpec.world.filtered_examples[group].select { |example| keep.include?(example.id) }
         end
       end
 

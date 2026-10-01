@@ -22,7 +22,10 @@ RSpec.describe Mergify::RSpec::Formatter do
       test_run_id: 'abc123',
       flaky_detector: nil,
       quarantined_tests: nil,
-      mark_test_as_quarantined_if_needed: false
+      mark_test_as_quarantined_if_needed: false,
+      session_verdict: Mergify::RSpec::SessionVerdict.new,
+      send_session_verdict: nil,
+      test_selection: nil
     )
     insights
   end
@@ -70,7 +73,7 @@ RSpec.describe Mergify::RSpec::Formatter do
 
   def build_passed_execution_result
     result = instance_double(RSpec::Core::Example::ExecutionResult)
-    allow(result).to receive_messages(status: :passed, exception: nil)
+    allow(result).to receive_messages(status: :passed, exception: nil, run_time: 0.01)
     result
   end
 
@@ -79,7 +82,7 @@ RSpec.describe Mergify::RSpec::Formatter do
     exception = instance_double(Exception)
     allow(exception).to receive_messages(message: exception_message, class: RSpec::Expectations::ExpectationNotMetError,
                                          backtrace: ['spec/foo_spec.rb:42:in `block`'])
-    allow(result).to receive_messages(status: :failed, exception: exception)
+    allow(result).to receive_messages(status: :failed, exception: exception, run_time: 0.01)
     result
   end
 
@@ -299,7 +302,7 @@ RSpec.describe Mergify::RSpec::Formatter do
       formatter.start(build_start_notification)
       formatter.example_started(notification)
       execution_result = instance_double(RSpec::Core::Example::ExecutionResult)
-      allow(execution_result).to receive(:status).and_return(:pending)
+      allow(execution_result).to receive_messages(status: :pending, run_time: 0.0, pending_message: 'skipped')
       allow(example).to receive(:execution_result).and_return(execution_result)
     end
 

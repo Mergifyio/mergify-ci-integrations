@@ -17,7 +17,7 @@ use magnus::{
 };
 use mergify_ci_api::{
     ApiConfig, AttrValue as ApiAttrValue, Client, ClientInfo, FlakyDetectionContext, Mode, Outcome,
-    SpanData, SpanStatus, budget,
+    SessionVerdict, SessionVerdictSelection, SpanData, SpanStatus, TestSelection, budget,
 };
 use mergify_ci_core::{AttrValue, CiContext};
 
@@ -55,6 +55,14 @@ fn detect_attributes(ruby: &Ruby) -> Result<RHash, Error> {
     Ok(hash)
 }
 
+/// The fingerprint of the tests this run collected, as lowercase hex SHA-256:
+/// the recipe every client shares, so a Ruby run and its rerun agree with each
+/// other exactly as two pytest runs do.
+#[allow(clippy::needless_pass_by_value)]
+fn test_collection_fingerprint(test_ids: Vec<String>) -> String {
+    mergify_ci_core::test_collection_fingerprint(&test_ids)
+}
+
 #[magnus::init]
 fn init(ruby: &Ruby) -> Result<(), Error> {
     let mergify = ruby.define_module("Mergify")?;
@@ -67,12 +75,24 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
         function!(detect_repository_name, 0),
     )?;
     native.define_singleton_method("detect_attributes", function!(detect_attributes, 0))?;
+    native.define_singleton_method(
+        "test_collection_fingerprint",
+        function!(test_collection_fingerprint, 1),
+    )?;
 
     let client = native.define_class("Client", ruby.class_object())?;
     client.define_singleton_method("new", function!(ApiClient::new, 5))?;
     client.define_method("fetch_quarantine", method!(ApiClient::fetch_quarantine, 1))?;
     client.define_method("fetch_flaky_context", method!(ApiClient::fetch_flaky_context, 0))?;
     client.define_method("upload_trace", method!(ApiClient::upload_trace, 2))?;
+    client.define_method(
+        "fetch_test_selection",
+        method!(ApiClient::fetch_test_selection, 5),
+    )?;
+    client.define_method(
+        "send_session_verdict",
+        method!(ApiClient::send_session_verdict, 1),
+    )?;
 
     let budget = native.define_module("Budget")?;
     budget.define_singleton_method("should_run", function!(should_run, 2))?;
@@ -158,6 +178,59 @@ impl ApiClient {
 
         without_gvl(|| rb_self.runtime.block_on(rb_self.client.upload_trace(&resource, &spans)))
             .map_err(|error| api_error(ruby, error.to_string()))
+    }
+
+    /// The test selection for this run as a Hash -- `selection`, `reason`,
+    /// `tests` (an Array, empty on every answer that names no test) and
+    /// `message` (`nil` unless the server wrote one) -- or `nil` when the
+    /// repository has no such feature. Raises on a genuine failure, which the
+    /// gem turns into a full run.
+    #[allow(clippy::needless_pass_by_value)]
+    fn fetch_test_selection(
+        ruby: &Ruby,
+        rb_self: &Self,
+        branch: String,
+        head_sha: String,
+        pipeline_name: String,
+        job_name: String,
+        collection_fingerprint: String,
+    ) -> Result<Option<RHash>, Error> {
+        match without_gvl(|| {
+            rb_self.runtime.block_on(rb_self.client.fetch_test_selection(
+                &branch,
+                &head_sha,
+                &pipeline_name,
+                &job_name,
+                Some(&collection_fingerprint),
+            ))
+        }) {
+            Outcome::Ready(selection) => test_selection_hash(ruby, &selection).map(Some),
+            Outcome::Dormant => Ok(None),
+            Outcome::Failed(message) => Err(api_error(ruby, message)),
+        }
+    }
+
+    /// Send the session verdict, a Hash shaped like the wire body (see
+    /// `SessionVerdict` in mergify-ci-api). Answers `{ "truncated" => bool }`
+    /// once the engine has it, `nil` when the feature is not enabled for the
+    /// repository, and raises on a failure the gem reports without failing
+    /// the run.
+    #[allow(clippy::needless_pass_by_value)]
+    fn send_session_verdict(
+        ruby: &Ruby,
+        rb_self: &Self,
+        verdict: RHash,
+    ) -> Result<Option<RHash>, Error> {
+        let verdict = verdict_from_hash(ruby, verdict)?;
+        match without_gvl(|| rb_self.runtime.block_on(rb_self.client.send_session_verdict(verdict))) {
+            Outcome::Ready(receipt) => {
+                let hash = ruby.hash_new();
+                hash.aset("truncated", receipt.truncated)?;
+                Ok(Some(hash))
+            }
+            Outcome::Dormant => Ok(None),
+            Outcome::Failed(message) => Err(api_error(ruby, message)),
+        }
     }
 
     /// The flaky-detection context as a Hash, or `nil` when it is not enabled.
@@ -255,6 +328,65 @@ fn flaky_context_hash(ruby: &Ruby, context: &FlakyDetectionContext) -> Result<RH
     hash.aset("min_budget_duration_ms", context.min_budget_duration_ms)?;
     hash.aset("min_test_execution_count", context.min_test_execution_count)?;
     Ok(hash)
+}
+
+/// Mirrors the `PyO3` binding's dict, key for key. `tests` is never `nil`: an
+/// answer naming no test hands over an empty Array, and what that means is
+/// decided in Ruby from `selection` and the list together.
+fn test_selection_hash(ruby: &Ruby, selection: &TestSelection) -> Result<RHash, Error> {
+    let hash = ruby.hash_new();
+    hash.aset("selection", selection.selection.clone())?;
+    hash.aset("reason", selection.reason.clone())?;
+    hash.aset("tests", selection.tests.clone().unwrap_or_default())?;
+    hash.aset("message", selection.message.clone())?;
+    Ok(hash)
+}
+
+/// The gem's verdict Hash, into the wire model. A missing key is a `KeyError`
+/// rather than a 422 from the engine: the Hash is built by the gem itself, so
+/// a missing key is a gem bug and should read as one.
+fn verdict_from_hash(ruby: &Ruby, verdict: RHash) -> Result<SessionVerdict, Error> {
+    let selection = match verdict.get("selection") {
+        Some(value) => {
+            let selection = RHash::try_convert(value)?;
+            Some(SessionVerdictSelection {
+                answer: required(ruby, selection, "answer")?,
+                reason: required(ruby, selection, "reason")?,
+                kept_count: required(ruby, selection, "kept_count")?,
+                not_applied_reason: selection
+                    .get("not_applied_reason")
+                    .map(String::try_convert)
+                    .transpose()?,
+            })
+        }
+        None => None,
+    };
+    Ok(SessionVerdict {
+        test_run_id: required(ruby, verdict, "test_run_id")?,
+        head_sha: required(ruby, verdict, "head_sha")?,
+        head_branch: verdict.get("head_branch").map(String::try_convert).transpose()?,
+        pipeline_name: required(ruby, verdict, "pipeline_name")?,
+        job_name: required(ruby, verdict, "job_name")?,
+        // A string on the wire whatever the provider reports -- GitHub's run
+        // id is an Integer, Jenkins' a String -- so it is stringified here
+        // rather than making the gem know which it has.
+        run_id: verdict
+            .get("run_id")
+            .map(|value| value.to_r_string().and_then(magnus::RString::to_string))
+            .transpose()?,
+        run_attempt: verdict.get("run_attempt").map(u32::try_convert).transpose()?,
+        collection_fingerprint: required(ruby, verdict, "collection_fingerprint")?,
+        collection_count: required(ruby, verdict, "collection_count")?,
+        executed_count: required(ruby, verdict, "executed_count")?,
+        passed_count: required(ruby, verdict, "passed_count")?,
+        failed_count: required(ruby, verdict, "failed_count")?,
+        skipped_count: required(ruby, verdict, "skipped_count")?,
+        total_test_runtime_ms: required(ruby, verdict, "total_test_runtime_ms")?,
+        failing_tests: required(ruby, verdict, "failing_tests")?,
+        quarantined_failing_tests: required(ruby, verdict, "quarantined_failing_tests")?,
+        failing_tests_truncated: false,
+        selection,
+    })
 }
 
 /// Span attributes, each typed by its Ruby class. A `nil` value is dropped, as
@@ -383,7 +515,7 @@ where
         Some(value) => T::try_convert(value),
         None => Err(Error::new(
             ruby.exception_key_error(),
-            format!("flaky detection context is missing {key}"),
+            format!("missing key: {key}"),
         )),
     }
 }
