@@ -1,210 +1,25 @@
-name: Release pytest-mergify
+name: Publish pytest-mergify
 
-# Two-step release, inspired by mergify-cli (simplified: PyPI-only, no binary
-# assets). Splitting build from publish means a maturin cross-compile failure is
-# caught BEFORE anything is published -- important because the repo uses
-# immutable releases, so a published release + its tag are frozen and can't be
-# retried.
+# The PyPI half of the publish stage of release.yml (see there for the whole
+# flow). Publishing the draft fires this, which uploads the wheels the draft
+# carries to PyPI via Trusted Publishing (PEP 740 attestations on by default).
+# It deliberately does not rebuild: what was reviewed on the draft is what
+# reaches the index, byte for byte.
 #
-# Step 1 -- prepare the draft (`workflow_dispatch`):
-#   Resolve the release tag -- validating a supplied one, or auto-computing the
-#   next CalVer when none is given -- build the per-platform abi3 wheels from the
-#   current commit, and create a DRAFT GitHub Release with them attached +
-#   generated notes. GitHub doesn't fire release events on draft saves, so this
-#   stage is dispatch-driven, the way mergify-cli's is.
-#
-# Step 2 -- publish (`release: published`):
-#   The maintainer reviews the draft and publishes it; that fires this stage,
-#   which downloads the distributions the draft attached and uploads those to
-#   PyPI via Trusted Publishing (PEP 740 attestations on by default). It
-#   deliberately does not rebuild: what was reviewed on the draft is what
-#   reaches the index, byte for byte.
+# PyPI binds the trusted publisher to THIS workflow filename and the `release`
+# environment, so renaming the file is a breaking change.
 on:
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Release tag pytest-mergify-v<CalVer> (e.g. pytest-mergify-v2026.8.3.1). Leave empty to auto-compute the next CalVer for today."
-        type: string
-        required: false
-        default: ""
   release:
     types: [published]
 
 permissions: {}
 
-# Serialize runs that could collide on a tag. Empty-tag dispatches share the
-# `auto` key so two near-simultaneous runs can't resolve the same CalVer and
-# then 422 on a duplicate; explicit-tag and publish runs key off the tag itself.
 concurrency:
-  group: release-pytest-mergify-${{ github.event_name }}-${{ inputs.tag || github.event.release.tag_name || 'auto' }}
+  group: release-pytest-mergify-${{ github.event.release.tag_name }}
   cancel-in-progress: false
 
 jobs:
-  # ---------------- Step 1: prepare the draft (workflow_dispatch) ----------------
-  # Validate a supplied tag, or auto-compute the next CalVer when none is given,
-  # matching mergify-cli's compute-tag: today's UTC date plus one past the
-  # highest existing serial for the day, read from the git tag list (a
-  # pytest-mergify tag exists once its release is published). Both paths validate
-  # the final tag against the calver shape, so a typo or a date-arithmetic bug
-  # can't drift through the matrix. The resolved tag is the single value every
-  # downstream job stamps and releases.
-  resolve-tag:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-26.04
-    permissions:
-      contents: read # checkout + read the tag list
-    outputs:
-      tag: ${{ steps.resolve.outputs.tag }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # The full tag list is needed to find today's highest serial.
-          fetch-depth: 0
-          fetch-tags: true
-      - name: Resolve the release tag
-        id: resolve
-        shell: bash
-        env:
-          TAG: ${{ inputs.tag }}
-        run: |
-          set -euo pipefail
-          if [ -n "${TAG}" ]; then
-            echo "Using explicit tag: ${TAG}"
-          else
-            # `%-m`/`%-d` drop the leading zero to match the historic calver
-            # (2026.8.4.1, not 2026.08.04.01); UTC so the rollover is the same
-            # whoever triggers the run.
-            today="$(date -u +'%Y.%-m.%-d')"
-            # `grep` exiting 1 on no match is the legitimate "nothing shipped
-            # today yet" path -- swallow only that, keeping pipefail otherwise.
-            last_n="$(git tag -l "pytest-mergify-v${today}.*" \
-              | { grep -E "^pytest-mergify-v${today//./\\.}\\.[0-9]+$" || true; } \
-              | awk -F. '{print $NF}' \
-              | sort -n \
-              | tail -1)"
-            TAG="pytest-mergify-v${today}.$(( ${last_n:-0} + 1 ))"
-            echo "Auto-computed tag: ${TAG}"
-          fi
-          # Final shape check for both paths -- `gh release create` would accept
-          # any string, so validation lives here.
-          if ! [[ "${TAG}" =~ ^pytest-mergify-v[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}\.[0-9]+$ ]]; then
-            echo "::error::tag '${TAG}' must be pytest-mergify-v<YYYY.M.D.N>"
-            exit 1
-          fi
-          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
-
-  build-draft:
-    if: github.event_name == 'workflow_dispatch'
-    needs: resolve-tag
-    # Grant the reusable workflow read access; without it the top-level
-    # `permissions: {}` would leave checkout of this private repo unauthorized.
-    permissions:
-      contents: read
-    uses: ./.github/workflows/build-pytest-mergify-wheels.yml
-    with:
-      tag: ${{ needs.resolve-tag.outputs.tag }}
-
-  # Everything below inspects the distributions build-draft produced -- the ones
-  # the publish stage uploads, since it no longer rebuilds. A maturin build
-  # exits 0 whether or not the compiled extension ended up in the wheel and
-  # whether or not the pytest11 entry point still names something importable,
-  # and a wheel missing that entry point installs perfectly and then does
-  # nothing at all, for every user, silently.
-  check-packages:
-    if: github.event_name == 'workflow_dispatch'
-    needs: [resolve-tag, build-draft]
-    runs-on: ubuntu-26.04
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          path: dist
-          pattern: wheels-*
-          merge-multiple: true
-      - name: Check the built contents
-        env:
-          TAG: ${{ needs.resolve-tag.outputs.tag }}
-        run: python3 .github/scripts/check-pytest-packages.py dist "${TAG#pytest-mergify-v}"
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-      # abi3audit proves the abi3 wheels really are abi3 -- that the extension
-      # uses no CPython API outside the stable ABI it claims. Nothing else would
-      # catch a violation until a user on a different CPython hit a missing
-      # symbol, since the wheels are only ever built and tested on one.
-      #
-      # `twine check` was here and was removed: its single hard assertion is
-      # that long_description renders, which only ever fails for RST, and this
-      # project's readme is markdown. Deliberately mangled markdown passes it;
-      # a missing description only warns. The assertions worth having moved
-      # into check-pytest-packages.py, where they fail.
-      #
-      # `--only-group check` installs abi3audit without building the project,
-      # so linting a finished wheel does not pay for a maturin compile.
-      - name: Check the wheels are really abi3
-        working-directory: clients/pytest-mergify
-        run: |
-          uv sync --frozen --only-group check
-          uv run --frozen --no-sync abi3audit --strict "${GITHUB_WORKSPACE}"/dist/*.whl
-
-  # Install the wheel the way a user would and prove it works. Only the three
-  # natively executable platforms run here; the musl and linux-arm64 wheels
-  # would need a container or QEMU and are not covered.
-  check-install:
-    if: github.event_name == 'workflow_dispatch'
-    needs: [resolve-tag, build-draft]
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [ubuntu-26.04, windows-latest, macos-latest]
-    runs-on: ${{ matrix.runner }}
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          path: dist
-          pattern: wheels-*
-          merge-multiple: true
-      - name: Install and exercise the wheel
-        shell: bash
-        env:
-          TAG: ${{ needs.resolve-tag.outputs.tag }}
-        run: python3 .github/scripts/check-pytest-install.py dist "${TAG#pytest-mergify-v}"
-
-  create-draft:
-    if: github.event_name == 'workflow_dispatch'
-    needs: [resolve-tag, build-draft, check-packages, check-install]
-    runs-on: ubuntu-26.04
-    permissions:
-      contents: write # create the draft release
-    steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          path: dist
-          pattern: wheels-*
-          merge-multiple: true
-      - name: Create the draft release with the wheels attached
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          TAG: ${{ needs.resolve-tag.outputs.tag }}
-          SHA: ${{ github.sha }}
-        run: |
-          gh release create "${TAG}" \
-            --repo "${REPO}" \
-            --target "${SHA}" \
-            --draft \
-            --title "pytest-mergify ${TAG#pytest-mergify-v}" \
-            --generate-notes \
-            dist/*.whl
-
-  # ---------------- Step 2: publish (release: published) ----------------
   publish:
-    # A GitHub Release in this monorepo isn't client-scoped, so only act on
-    # pytest-mergify's tags; other clients get their own release workflows.
-    if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'pytest-mergify-v')
     runs-on: ubuntu-26.04
     # The `release` environment carries the PyPI Trusted Publishing identity.
     environment: release
@@ -212,26 +27,35 @@ jobs:
       contents: read # read the release assets
       id-token: write # PyPI Trusted Publishing (OIDC)
     steps:
-      # The draft attached these; rebuilding them here would have produced a
-      # second set of wheels from a floating maturin/Rust toolchain, published
-      # under a version number that promises they are the reviewed ones.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.release.tag_name }}
-      - name: Download the distributions the draft built
+      # Only release.yml creates releases now, and its tags are the bare
+      # version; anything else was cut by hand and has no business on PyPI.
+      - name: Check the tag is a release version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if ! [[ "${TAG}" =~ ^[0-9]{4}\.(1[0-2]|[1-9])\.[1-9][0-9]*$ ]]; then
+            echo "::error::tag '${TAG}' is not a <YYYY>.<M>.<N> release"
+            exit 1
+          fi
+      - name: Download the wheels the draft built
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           TAG: ${{ github.event.release.tag_name }}
-        run: |
-          gh release download "${TAG}" --repo "${REPO}" --dir dist \
-            --pattern '*.whl'
+        run: gh release download "${TAG}" --repo "${REPO}" --dir dist --pattern '*.whl'
       # The draft stage checked these, but release assets are mutable where a
       # tag is not, so the same assertions run again on what actually came back.
       - name: Check the downloaded contents
         env:
           TAG: ${{ github.event.release.tag_name }}
-        run: python3 .github/scripts/check-pytest-packages.py dist "${TAG#pytest-mergify-v}"
+        run: python3 .github/scripts/check-pytest-packages.py dist "${TAG}"
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           packages-dir: dist
+          # The three registries publish from separate jobs, so one can fail
+          # while the others succeed; skipping what PyPI already has makes a
+          # re-run of this job a recovery rather than a 400.
+          skip-existing: true

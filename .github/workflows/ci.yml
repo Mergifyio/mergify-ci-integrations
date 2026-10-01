@@ -360,7 +360,7 @@ jobs:
       # step copies it next to the gemspec. Releases are immutable, so a
       # packaging regression has to be caught on the PR, not at the tag.
       - name: Stage the release inputs
-        run: .github/scripts/stage-rspec-release.sh rspec-mergify-v0.0.1
+        run: .github/scripts/stage-rspec-release.sh 0.0.1
       - name: Build and inspect the package
         working-directory: clients/rspec-mergify
         run: |

@@ -4,7 +4,7 @@ name: Pack and check ts clients
 # load, from the native binaries the calling run already built (artifacts
 # `ts-native-*`). Leaves the tarballs as the `ts-packages` artifact.
 #
-# Called by release-ts.yml, where the tarballs become the draft release, and
+# Called by release.yml, where the tarballs join the draft release, and
 # by ci.yml on every pull request, so a change that breaks the packages or
 # these checks turns a pull request red instead of the next release: every
 # check below used to run at release time only, and four releases in a row
@@ -13,7 +13,7 @@ on:
   workflow_call:
     inputs:
       version:
-        description: "Version stamped on every package, without the ts-v prefix."
+        description: "Version stamped on every package (<YYYY>.<M>.<N>)."
         type: string
         required: true
 
