@@ -268,19 +268,17 @@ describe('the opt-in gate', () => {
     );
   });
 
-  it.each([
-    'false',
-    '',
-    'perhaps',
-    ' ',
-  ])('asks for nothing on %j, which is not a yes', async (value) => {
-    vi.stubEnv(TEST_SELECTION_ENABLE_ENV, value);
-    const apiClient = stubApiClient();
+  it.each(['false', '', 'perhaps', ' '])(
+    'asks for nothing on %j, which is not a yes',
+    async (value) => {
+      vi.stubEnv(TEST_SELECTION_ENABLE_ENV, value);
+      const apiClient = stubApiClient();
 
-    await runWith(apiClient);
+      await runWith(apiClient);
 
-    expect(apiClient.fetchTestSelection).not.toHaveBeenCalled();
-  });
+      expect(apiClient.fetchTestSelection).not.toHaveBeenCalled();
+    }
+  );
 
   it('is on for a yes a workflow author would plausibly write', () => {
     // Kept as a unit assertion next to the ones above: the values themselves

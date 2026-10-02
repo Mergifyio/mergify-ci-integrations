@@ -86,16 +86,16 @@ describe('Quarantine runner', () => {
     // prefix it — the one case where the two constructions handle an empty
     // suite chain rather than joining one.
     { fixture: 'root-level.test.ts', failing: 'fails outside any suite' },
-  ])('quarantines on the exact names the reporter uploads ($fixture)', async ({
-    fixture,
-    failing,
-  }) => {
-    const first = await runFixture(fixture, []);
-    expect(first.uploadedNames).toContain(failing);
+  ])(
+    'quarantines on the exact names the reporter uploads ($fixture)',
+    async ({ fixture, failing }) => {
+      const first = await runFixture(fixture, []);
+      expect(first.uploadedNames).toContain(failing);
 
-    const second = await runFixture(fixture, first.uploadedNames);
+      const second = await runFixture(fixture, first.uploadedNames);
 
-    expect(second.status).toBe('passed');
-    expect(second.quarantinedNames).toEqual([failing]);
-  });
+      expect(second.status).toBe('passed');
+      expect(second.quarantinedNames).toEqual([failing]);
+    }
+  );
 });
