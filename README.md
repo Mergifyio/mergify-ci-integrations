@@ -41,20 +41,28 @@ as per-platform packages, so `@mergifyio/ci-native` wraps the core behind napi
 and `@mergifyio/ci-core` consumes it for CI detection, fail-open — platforms
 without a prebuilt binary detect nothing rather than breaking the run. The
 API client goes through that same binding: `@mergifyio/ci-core` fetches
-quarantine and flaky-detection context from the Rust client. The packages
-release from this repo via `ts-v<SemVer>` tags (fixed version across the
-workspace, two-step draft-then-publish like pytest-mergify).
+quarantine and flaky-detection context from the Rust client.
 
 The RSpec gem under `clients/rspec-mergify/` (imported from
 [rspec-mergify](https://github.com/Mergifyio/rspec-mergify) with its git
 history) wraps the core behind magnus, and follows the bundled model the same
 way the wheel does rather than the way npm natives do: Ruby has no stable ABI,
 so a precompiled gem is *fat*, carrying one extension per supported Ruby. It
-still carries its own API calls and OpenTelemetry SDK export. It releases from
-this repo via `rspec-mergify-v<SemVer>` tags, two-step draft-then-publish like
-the others, to RubyGems over Trusted Publishing: seven platform gems plus a
-plain `ruby` gem that installs anywhere and reports CI as unknown, so an
-unsupported platform degrades rather than failing to install.
+still carries its own API calls and OpenTelemetry SDK export. It ships to
+RubyGems as seven platform gems plus a plain `ruby` gem that installs anywhere
+and reports CI as unknown, so an unsupported platform degrades rather than
+failing to install.
+
+## Release
+
+Every client releases together, under one `<YYYY>.<M>.<N>` version (`N`
+counts releases within the month), so the same version on PyPI, RubyGems and
+npm always means the same commit. Run the `Release` workflow from the Actions
+tab (leave the tag empty to auto-pick the next one): it builds and checks every
+client, then creates one draft release carrying the wheels, the gems and the
+npm tarballs. Publishing the draft fires the three `Publish` workflows, which
+upload those exact files to PyPI, RubyGems and npm over Trusted Publishing;
+each one can be re-run on its own and skips what already reached its registry.
 
 ## Develop
 
