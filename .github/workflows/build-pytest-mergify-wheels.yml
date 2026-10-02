@@ -2,19 +2,18 @@ name: Build pytest-mergify wheels
 
 # Reusable maturin build: the per-platform abi3 wheels, uploaded as `wheels-*`
 # artifacts. No source distribution: maturin would vendor the whole workspace,
-# Rust core included, into it. Both stages of the release
-# call it: the draft stage to prove the build (and attach the artifacts for
-# review), the publish stage to build the artifacts that go to PyPI.
+# Rust core included, into it. release.yml calls it to build the wheels the
+# draft release carries, which the publish stage then uploads unchanged.
 #
-# With a `tag` it stamps that CalVer into pyproject before maturin runs; without
-# one it leaves the 0.0.0 placeholder (so a smoke build never looks like a
-# release). Each caller's checkout ref is inherited -- the dispatch commit for
-# the draft, the tag's commit for publish -- so no explicit ref is needed here.
+# With a `version` it stamps that CalVer into pyproject before maturin runs;
+# without one it leaves the 0.0.0 placeholder (so a smoke build never looks like
+# a release). The caller's checkout ref is inherited, so no explicit ref is
+# needed here.
 on:
   workflow_call:
     inputs:
-      tag:
-        description: "Release tag to stamp (pytest-mergify-v<calver>); empty leaves 0.0.0."
+      version:
+        description: "Release version to stamp (<YYYY>.<M>.<N>); empty leaves 0.0.0."
         type: string
         required: false
         default: ""
@@ -52,15 +51,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # hatch-vcs is gone under maturin, so the version is a build-time stamp:
-      # rewrite the 0.0.0 placeholder to the tag's CalVer before maturin runs.
-      - name: Stamp the version from the tag
-        if: inputs.tag != ''
+      # rewrite the 0.0.0 placeholder to the release CalVer before maturin runs.
+      - name: Stamp the version
+        if: inputs.version != ''
         shell: bash
         env:
-          TAG: ${{ inputs.tag }}
+          VERSION: ${{ inputs.version }}
         run: |
-          version="${TAG#pytest-mergify-v}"
-          sed -i.bak -E "s/^version = \"0.0.0\".*/version = \"${version}\"/" clients/pytest-mergify/pyproject.toml
+          sed -i.bak -E "s/^version = \"0.0.0\".*/version = \"${VERSION}\"/" clients/pytest-mergify/pyproject.toml
           rm -f clients/pytest-mergify/pyproject.toml.bak
           grep '^version = ' clients/pytest-mergify/pyproject.toml
       # The repo keeps a single LICENSE at its root; copy it next to the

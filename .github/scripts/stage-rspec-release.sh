@@ -14,14 +14,13 @@
 # `release:guard_clean`.
 set -euo pipefail
 
-TAG="${1:?usage: stage-rspec-release.sh <rspec-mergify-v[SemVer]>}"
+version="${1:?usage: stage-rspec-release.sh <version>}"
 
-if ! [[ "${TAG}" =~ ^rspec-mergify-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "::error::tag '${TAG}' must be rspec-mergify-v<major.minor.patch>" >&2
+if ! [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "::error::version '${version}' must have three numeric components" >&2
   exit 1
 fi
 
-version="${TAG#rspec-mergify-v}"
 root="$(git rev-parse --show-toplevel)"
 gem_dir="${root}/clients/rspec-mergify"
 version_rb="${gem_dir}/lib/mergify/rspec/version.rb"
@@ -37,6 +36,6 @@ fi
 
 cp "${root}/LICENSE" "${gem_dir}/LICENSE"
 
-echo "staged ${TAG}:"
+echo "staged ${version}:"
 grep "VERSION = " "${version_rb}"
 echo "  LICENSE -> $(head -2 "${gem_dir}/LICENSE" | tail -1 | sed 's/^ *//')"

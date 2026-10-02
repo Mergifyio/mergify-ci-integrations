@@ -1,0 +1,385 @@
+name: Release
+
+# One release for every client: pytest-mergify's wheels, rspec-mergify's gems
+# and the ts workspace's npm tarballs all ship together, under one CalVer
+# version, from one draft GitHub Release. A release is never partial, so
+# whichever registry a user installs from, the same version means the same
+# commit -- and the same core.
+#
+# Version: <YYYY>.<M>.<N>, N counting releases within the month from 1 (e.g.
+# 2026.10.1). Three components because npm takes nothing but SemVer, and a
+# fourth would not parse there; PyPI and RubyGems order it correctly after the
+# four-component pytest-mergify versions and the 0.x SemVer lines before it.
+# The tag is the bare version, the way mergify-cli tags its releases.
+#
+# Step 1 -- prepare the draft (this workflow, `workflow_dispatch`):
+#   Resolve the tag, build and check every client from the current commit, and
+#   create a DRAFT release with all of it attached. The draft only exists once
+#   every check has passed, for every client: releases are immutable, so a
+#   published release and its tag are frozen and can't be retried.
+#
+# Step 2 -- publish (`release: published`):
+#   The maintainer reviews the draft and publishes it. That fires
+#   release-pytest-mergify.yml, release-rspec.yml and release-ts.yml, each of
+#   which pushes its own share of the assets -- byte for byte, never rebuilt.
+#   They stay separate files because PyPI, RubyGems and npm bind Trusted
+#   Publishing to the workflow filename; moving the uploads here would mean
+#   reconfiguring the publisher on every package.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag <YYYY>.<M>.<N> (e.g. 2026.10.1). Leave empty to auto-compute the next one for this month."
+        type: string
+        required: false
+        default: ""
+      dry_run:
+        description: "Build and check every client without creating the draft release -- to prove a release change from its branch before it merges."
+        type: boolean
+        required: false
+        default: false
+
+permissions: {}
+
+# One group for every dispatch, whatever its tag: an auto run and an explicit
+# one naming the version auto would pick could otherwise build side by side and
+# race to create the same draft. Releases are rare enough that queueing them is
+# no cost.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # Validate a supplied tag, or auto-compute the next one: this month in UTC,
+  # one past the highest serial already taken for it. Both paths check the
+  # final shape, so a typo can't drift through the matrix, and both refuse a
+  # version already taken, before twenty minutes of builds rather than at
+  # `gh release create`. The resolved version is the single value every job
+  # below stamps.
+  resolve-tag:
+    runs-on: ubuntu-26.04
+    permissions:
+      # checkout + the tag list, and the release list: GitHub only lists draft
+      # releases to a token that can push, and a pending draft holds its version
+      # without any tag existing yet.
+      contents: write
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The full tag list is needed to find this month's highest serial.
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Resolve the release tag
+        id: resolve
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # A version is taken once a tag names it (the release was published)
+          # or a release does (including a draft still awaiting review, whose
+          # tag only appears when it is published).
+          taken="$( { git tag -l; gh api --paginate "repos/${REPO}/releases" --jq '.[].tag_name'; } | sort -u)"
+          if [ -n "${TAG}" ]; then
+            echo "Using explicit tag: ${TAG}"
+          else
+            # `%-m` drops the leading zero (2026.9, not 2026.09); UTC so the
+            # rollover is the same whoever triggers the run.
+            month="$(date -u +'%Y.%-m')"
+            # `grep` exiting 1 on no match is the legitimate "nothing shipped
+            # this month yet" path -- swallow only that, keeping pipefail
+            # otherwise. The anchored pattern keeps the old prefixed tags
+            # (pytest-mergify-v..., ts-v..., rspec-mergify-v...) out of it.
+            last_n="$(echo "${taken}" \
+              | { grep -E "^${month//./\\.}\\.[0-9]+$" || true; } \
+              | awk -F. '{print $NF}' \
+              | sort -n \
+              | tail -1)"
+            TAG="${month}.$(( ${last_n:-0} + 1 ))"
+            echo "Auto-computed tag: ${TAG}"
+          fi
+          # Final shape check for both paths -- `gh release create` would accept
+          # any string, and npm would refuse a fourth component only at publish.
+          if ! [[ "${TAG}" =~ ^[0-9]{4}\.(1[0-2]|[1-9])\.[1-9][0-9]*$ ]]; then
+            echo "::error::tag '${TAG}' must be <YYYY>.<M>.<N>"
+            exit 1
+          fi
+          if grep -qxF "${TAG}" <<<"${taken}"; then
+            echo "::error::${TAG} is already taken by a tag or a release (a pending draft included); publish or delete it first"
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+
+  # ---------------- pytest-mergify ----------------
+  build-wheels:
+    needs: resolve-tag
+    # Grant the reusable workflow read access; without it the top-level
+    # `permissions: {}` would leave checkout of this private repo unauthorized.
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-pytest-mergify-wheels.yml
+    with:
+      version: ${{ needs.resolve-tag.outputs.tag }}
+
+  # A maturin build exits 0 whether or not the compiled extension ended up in
+  # the wheel and whether or not the pytest11 entry point still names something
+  # importable, and a wheel missing that entry point installs perfectly and
+  # then does nothing at all, for every user, silently.
+  check-wheels:
+    needs: [resolve-tag, build-wheels]
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: dist
+          pattern: wheels-*
+          merge-multiple: true
+      - name: Check the built contents
+        env:
+          VERSION: ${{ needs.resolve-tag.outputs.tag }}
+        run: python3 .github/scripts/check-pytest-packages.py dist "${VERSION}"
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      # abi3audit proves the abi3 wheels really are abi3 -- that the extension
+      # uses no CPython API outside the stable ABI it claims. Nothing else would
+      # catch a violation until a user on a different CPython hit a missing
+      # symbol, since the wheels are only ever built and tested on one.
+      #
+      # `--only-group check` installs abi3audit without building the project,
+      # so linting a finished wheel does not pay for a maturin compile.
+      - name: Check the wheels are really abi3
+        working-directory: clients/pytest-mergify
+        run: |
+          uv sync --frozen --only-group check
+          uv run --frozen --no-sync abi3audit --strict "${GITHUB_WORKSPACE}"/dist/*.whl
+
+  # Install the wheel the way a user would and prove it works. Only the three
+  # natively executable platforms run here; the musl and linux-arm64 wheels
+  # would need a container or QEMU and are not covered.
+  check-wheels-install:
+    needs: [resolve-tag, build-wheels]
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-26.04, windows-latest, macos-latest]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: dist
+          pattern: wheels-*
+          merge-multiple: true
+      - name: Install and exercise the wheel
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve-tag.outputs.tag }}
+        run: python3 .github/scripts/check-pytest-install.py dist "${VERSION}"
+
+  # ---------------- ts clients ----------------
+  build-ts-native:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-ts-native.yml
+
+  # Packs, checks the contents and installs the tarballs on a matrix; leaves
+  # them as the `ts-packages` artifact.
+  pack-ts:
+    needs: [resolve-tag, build-ts-native]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/pack-ts.yml
+    with:
+      version: ${{ needs.resolve-tag.outputs.tag }}
+
+  # ---------------- rspec-mergify ----------------
+  # Nothing here ships Rust sources or compiles on install: the extension
+  # path-depends on crates/mergify-ci-core, which only resolves in a full
+  # checkout, so the gems are built here exactly as the wheels and the napi
+  # packages are. A platform we do not build for falls back to the `ruby` gem,
+  # whose loader reports the extension missing and lets detection degrade
+  # rather than failing to install.
+  build-gems:
+    needs: resolve-tag
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - x86_64-linux
+          - x86_64-linux-musl
+          - aarch64-linux
+          - aarch64-linux-musl
+          - x86_64-darwin
+          - arm64-darwin
+          - x64-mingw-ucrt
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
+        with:
+          working-directory: clients/rspec-mergify
+          bundler-cache: true
+      - name: Stage the release inputs
+        env:
+          VERSION: ${{ needs.resolve-tag.outputs.tag }}
+        run: .github/scripts/stage-rspec-release.sh "${VERSION}"
+      # rb-sys-dock run directly, rather than through oxidize-rb/actions/cross-gem
+      # which only wraps it: that action uses actions/cache and
+      # oxidize-rb/actions/cargo-binstall by tag, and this repository admits
+      # only actions pinned to a full SHA -- nested ones included -- so every
+      # leg was refused before its first step. Its cache is not missed: a
+      # cache that any branch can write has no business feeding published gems.
+      #
+      # rb-sys-dock bind-mounts the directory it is started from and works in
+      # --directory. Starting at the repository root is what keeps the crate's
+      # path dependency on crates/ inside the container, so this step must not
+      # get a working-directory of its own.
+      - name: Cross-compile the platform gem
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          BUNDLE_GEMFILE: ${{ github.workspace }}/clients/rspec-mergify/Gemfile
+        run: >-
+          bundle exec rb-sys-dock
+          --platform "${PLATFORM}"
+          --directory clients/rspec-mergify
+          --ruby-versions 3.1,3.2,3.3,3.4,4.0
+          --build
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: gem-${{ matrix.platform }}
+          path: clients/rspec-mergify/pkg/*-${{ matrix.platform }}.gem
+          if-no-files-found: error
+
+  build-ruby-gem:
+    needs: resolve-tag
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
+        with:
+          working-directory: clients/rspec-mergify
+          bundler-cache: true
+      - name: Stage the release inputs
+        env:
+          VERSION: ${{ needs.resolve-tag.outputs.tag }}
+        run: .github/scripts/stage-rspec-release.sh "${VERSION}"
+      - name: Build the platform-independent gem
+        working-directory: clients/rspec-mergify
+        run: bundle exec rake build
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: gem-ruby
+          path: clients/rspec-mergify/pkg/*.gem
+          if-no-files-found: error
+
+  # A build that succeeds proves nothing about what it produced, and this gem
+  # has a failure mode the other clients do not: a platform gem missing the
+  # extension for one Ruby installs, loads, and reports no CI at all, because
+  # the loader is deliberately fail-open. Detection would stop working for
+  # everyone on that Ruby with no error anywhere.
+  check-gems:
+    needs: [resolve-tag, build-gems, build-ruby-gem]
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: dist
+          pattern: gem-*
+          merge-multiple: true
+      - uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
+        with:
+          working-directory: clients/rspec-mergify
+      - name: Check the built gems
+        env:
+          VERSION: ${{ needs.resolve-tag.outputs.tag }}
+        run: ruby .github/scripts/check-rspec-gems.rb dist "${VERSION}"
+
+  # Installing and requiring is the easy half. The half that matters is that
+  # RSpec really registers the formatter: if that chain silently does not
+  # complete the gem installs, requires without error, and reports nothing.
+  #
+  # Only the platform this runner can execute is covered; musl and the foreign
+  # architectures would need a container or QEMU, the same gap the other two
+  # clients have.
+  check-gems-install:
+    needs: [resolve-tag, build-gems, build-ruby-gem]
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: dist
+          pattern: gem-*
+          merge-multiple: true
+      - uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
+        with:
+          working-directory: clients/rspec-mergify
+      - name: Install the gem and exercise it
+        env:
+          VERSION: ${{ needs.resolve-tag.outputs.tag }}
+        run: ruby .github/scripts/check-rspec-install.rb dist "${VERSION}"
+
+  # ---------------- the draft ----------------
+  # Needs every check of every client: a draft -- and the tag publishing it
+  # would create -- never exists for a set of packages that failed inspection,
+  # nor for a release missing one of the clients.
+  create-draft:
+    if: ${{ !inputs.dry_run }}
+    needs:
+      - resolve-tag
+      - check-wheels
+      - check-wheels-install
+      - pack-ts
+      - check-gems
+      - check-gems-install
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write # create the draft release
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: dist
+          pattern: wheels-*
+          merge-multiple: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: dist
+          pattern: gem-*
+          merge-multiple: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ts-packages
+          path: dist
+      - name: Create the draft release with every client attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ needs.resolve-tag.outputs.tag }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          ls -1 dist
+          gh release create "${TAG}" \
+            --repo "${REPO}" \
+            --target "${SHA}" \
+            --draft \
+            --title "${TAG}" \
+            --generate-notes \
+            dist/*.whl dist/*.gem dist/*.tgz
