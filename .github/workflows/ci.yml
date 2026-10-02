@@ -33,10 +33,9 @@ jobs:
           # setup-ruby resolves .ruby-version relative to working-directory,
           # and has no input for naming the file directly.
           working-directory: clients/rspec-mergify
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        with:
-          toolchain: stable
-          components: clippy
+      # The toolchain rust-toolchain.toml pins, with its components.
+      - name: Install the Rust toolchain
+        run: rustup toolchain install
       - run: cargo test --workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -53,9 +52,9 @@ jobs:
         with:
           python-version: "3.x"
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        with:
-          toolchain: stable
+      # The toolchain rust-toolchain.toml pins, with its components.
+      - name: Install the Rust toolchain
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       # The wheel now bundles the Rust binding, so it's a compiled abi3
       # extension built with maturin (one wheel per platform, CPython 3.8+).
@@ -81,9 +80,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        with:
-          toolchain: stable
+      # The toolchain rust-toolchain.toml pins, with its components.
+      - name: Install the Rust toolchain
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       # `uv run` builds the maturin extension (cargo) before the tests; the
       # committed uv.lock pins the known-good dev/runtime deps per Python.
@@ -101,9 +100,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        with:
-          toolchain: stable
+      # The toolchain rust-toolchain.toml pins, with its components.
+      - name: Install the Rust toolchain
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       # `uv run` builds the maturin extension before poe runs the linters.
       - name: Run ruff, mypy, yamllint
@@ -118,9 +117,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        with:
-          toolchain: stable
+      # The toolchain rust-toolchain.toml pins, with its components.
+      - name: Install the Rust toolchain
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       # codespell runs on 3.14 (its poe task pins UV_PYTHON); `uv run` builds
       # the maturin extension first, then --frozen uses the locked codespell.
@@ -187,9 +186,9 @@ jobs:
           require-lockfile: true
       # `pnpm -r run build` compiles the @mergifyio/ci-native binding (napi),
       # so the tests exercise the real Rust detection core.
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        with:
-          toolchain: stable
+      # The toolchain rust-toolchain.toml pins, with its components.
+      - name: Install the Rust toolchain
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: pnpm -r run build
       - run: pnpm -r test
@@ -287,9 +286,9 @@ jobs:
           ruby-version: ${{ matrix.ruby }}
           bundler-cache: true
           working-directory: clients/rspec-mergify
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        with:
-          toolchain: stable
+      # The toolchain rust-toolchain.toml pins, with its components.
+      - name: Install the Rust toolchain
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       # `rake spec` compiles the extension first. `bundle install` does not
       # build it for a path gem, and the loader fails open, so running rspec
