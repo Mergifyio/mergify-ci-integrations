@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
 import { join, resolve } from 'node:path';
 import { gunzipSync } from 'node:zlib';
@@ -19,7 +19,6 @@ const playwrightBin = resolve(
   '.bin',
   'playwright'
 );
-const packageRoot = resolve(import.meta.dirname, '..', '..');
 
 type Answer = Record<string, unknown>;
 
@@ -36,14 +35,6 @@ let requests: Request[];
 let answer: Answer;
 
 beforeAll(async () => {
-  const build = spawnSync('pnpm', ['-F', '@mergifyio/playwright', 'build'], {
-    cwd: packageRoot,
-    encoding: 'utf8',
-  });
-  if (build.status !== 0) {
-    throw new Error(`Package build failed:\n${build.stdout}\n${build.stderr}`);
-  }
-
   server = createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on('data', (chunk: Buffer) => chunks.push(chunk));

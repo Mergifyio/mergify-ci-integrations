@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { stateFilePath } from '../../src/state-file.js';
 
 const fixtureRoot = resolve(import.meta.dirname, '..', 'fixtures');
@@ -15,22 +15,9 @@ const playwrightBin = resolve(
   '.bin',
   'playwright'
 );
-const packageRoot = resolve(import.meta.dirname, '..', '..');
 
 let cacheRoot: string;
 let statePath: string;
-
-beforeAll(() => {
-  // `withMergify` in the fixture's playwright.config.ts imports from the
-  // compiled dist; make sure it's up-to-date before we exec the subprocess.
-  const build = spawnSync('pnpm', ['-F', '@mergifyio/playwright', 'build'], {
-    cwd: packageRoot,
-    encoding: 'utf8',
-  });
-  if (build.status !== 0) {
-    throw new Error(`Package build failed:\n${build.stdout}\n${build.stderr}`);
-  }
-}, 60_000);
 
 beforeEach(() => {
   cacheRoot = mkdtempSync(join(tmpdir(), 'mergify-integration-'));
