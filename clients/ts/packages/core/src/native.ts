@@ -64,6 +64,16 @@ function loadBinding(): NativeBinding | null {
 const binding = loadBinding();
 
 /**
+ * Whether the native binding loaded here. Everything below degrades to "off"
+ * without it, which a caller cannot tell apart from "nothing to do" — this is
+ * how it can say which one happened, e.g. inside a Cloudflare Workers pool,
+ * where no native module can load.
+ */
+export function isNativeBindingLoaded(): boolean {
+  return binding !== null;
+}
+
+/**
  * The detected CI provider via the bundled Rust core, or null when not in CI
  * (or without a binding). Re-detects on every call — the environment is read
  * at call time.

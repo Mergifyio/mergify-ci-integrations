@@ -5,7 +5,7 @@ export type { FlakyDetectionContext, FlakyDetectionMode } from './flaky-detectio
 // Flaky detection
 export { FlakyDetector, fetchFlakyDetectionContext } from './flaky-detection.js';
 export type { CiResourceAttributes } from './native.js';
-export { nativeTestCollectionFingerprint } from './native.js';
+export { isNativeBindingLoaded, nativeTestCollectionFingerprint } from './native.js';
 // Quarantine
 export { fetchQuarantineList } from './quarantine.js';
 // Resource detection

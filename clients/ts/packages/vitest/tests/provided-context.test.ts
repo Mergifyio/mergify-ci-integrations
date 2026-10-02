@@ -21,12 +21,10 @@ const flakyContext: FlakyDetectionContext = {
   min_test_execution_count: 2,
 };
 
-const RUNNER_KEYS = [
-  'mergify:quarantine',
-  'mergify:selection',
-  'mergify:flakyContext',
-  'mergify:flakyMode',
-] as const;
+// What browser projects never receive: the flaky-detection context carries
+// every test name of the default branch, and a page cannot run flaky detection
+// (see setup-browser.ts). Quarantine and selection are small and apply there.
+const FLAKY_KEYS = ['mergify:flakyContext', 'mergify:flakyMode'] as const;
 
 describe('values provided to the runner', () => {
   let vitest: Vitest | undefined;
@@ -36,7 +34,7 @@ describe('values provided to the runner', () => {
     vitest = undefined;
   });
 
-  it('reach a node project and stay out of a browser one', async () => {
+  it('reach a node project, and a browser one gets all but the flaky context', async () => {
     const reporter = new MergifyReporter({
       quarantineList: ['math > adds numbers'],
       testSelection: ['math > adds numbers'],
@@ -53,8 +51,7 @@ describe('values provided to the runner', () => {
       ],
     });
     // Starting a real browser needs a provider this package does not ship;
-    // the flag is all the reporter reads, and all the browser tester changes
-    // that matter here is that it never loads our runner.
+    // the flag is all the reporter reads.
     const web = vitest.projects.find((p) => p.name === 'web')!;
     web.config.browser.enabled = true;
 
@@ -70,11 +67,17 @@ describe('values provided to the runner', () => {
     // root-level `provide` used to land every test name of the repository in
     // each browser test file.
     const browser = web.getProvidedContext();
-    for (const key of RUNNER_KEYS) expect(browser).not.toHaveProperty(key);
+    expect(browser['mergify:quarantine']).toEqual(['math > adds numbers']);
+    expect(browser['mergify:selection']).toEqual(['math > adds numbers']);
+    for (const key of FLAKY_KEYS) expect(browser).not.toHaveProperty(key);
   });
 
-  it('still reach a browser project that routes files to a Node pool', async () => {
-    const reporter = new MergifyReporter({ quarantineList: ['math > adds numbers'] });
+  it('reach, flaky context included, a browser project that routes files to a Node pool', async () => {
+    const reporter = new MergifyReporter({
+      quarantineList: ['math > adds numbers'],
+      flakyContext,
+      flakyMode: 'new',
+    });
     vitest = await createVitest('test', {
       root: fixturesDir,
       watch: false,
@@ -82,9 +85,8 @@ describe('values provided to the runner', () => {
       projects: [{ test: { name: 'web', include: ['passing.test.ts'] } }],
     });
     // Vitest 3's `poolMatchGlobs` wins over browser mode, so the files it
-    // matches run in Node, where a `runner` set on the project loads. The
-    // routing is Vitest's; what the reporter decides on is only that the
-    // option is set. Vitest 4 dropped it, hence the cast.
+    // matches run in Node. The routing is Vitest's; what the reporter decides
+    // on is only that the option is set. Vitest 4 dropped it, hence the cast.
     const web = vitest.projects[0];
     web.config.browser.enabled = true;
     (web.config as { poolMatchGlobs?: [string, string][] }).poolMatchGlobs = [
@@ -94,5 +96,6 @@ describe('values provided to the runner', () => {
     reporter.onInit(vitest);
 
     expect(web.getProvidedContext()['mergify:quarantine']).toEqual(['math > adds numbers']);
+    expect(web.getProvidedContext()['mergify:flakyContext']).toEqual(flakyContext);
   });
 });

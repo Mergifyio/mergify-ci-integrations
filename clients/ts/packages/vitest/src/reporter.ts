@@ -1,3 +1,5 @@
+import { dirname, extname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type {
   FlakyDetectionContext,
   FlakyDetectionMode,
@@ -47,9 +49,8 @@ import type { Reporter, TestCase, TestModule, TestSpecification, Vitest } from '
 import * as vitestResource from './resources/vitest.js';
 import {
   collectionIdentity,
+  exportsTestRunner,
   finalStatus,
-  mergifyRunnerPath,
-  selectionUnreachable,
   shardSlice,
 } from './test-selection.js';
 import type { MergifyApiClientStandIn, MergifyReporterOptions } from './types.js';
@@ -98,6 +99,13 @@ export class MergifyReporter implements Reporter {
   private subsetGuardFailed = false;
   private verdictResult: SessionVerdictResult | undefined;
   private deselectedCount = 0;
+  private setupInstalled = false;
+  private browserProjects = new Set<string>();
+  /** Per project: tests that ran, and how many of them the runner extension reached. */
+  private projectReach = new Map<
+    string,
+    { ran: number; extended: number; noFlaky: number; flakyBypassed: number }
+  >();
   private selectedExecutedCount = 0;
 
   constructor(options?: MergifyReporterOptions) {
@@ -238,12 +246,6 @@ export class MergifyReporter implements Reporter {
 
     const log = (msg: string) => vitest.logger.log(`[@mergifyio/vitest] ${msg}`);
 
-    const unreachable = selectionUnreachable(vitest, specifications);
-    if (unreachable) {
-      log(`${unreachable}; the full suite runs without a test selection`);
-      return;
-    }
-
     let slice: ReadonlyArray<TestSpecification>;
     try {
       slice = await shardSlice(vitest, specifications);
@@ -286,14 +288,14 @@ export class MergifyReporter implements Reporter {
 
     switch (selection.selection) {
       case 'subset':
-        this._provideToRunner(vitest, 'mergify:selection', [...selection.tests]);
+        this._provideToRunner(vitest, 'mergify:selection', [...selection.tests], { browser: true });
         this._configureRunner(vitest);
         return;
       case 'empty':
         // Deselecting every test rather than removing the files: Vitest ends a
         // run whose tests are all skipped green, whereas a run left with no
         // file exits 1 ("No test files found").
-        this._provideToRunner(vitest, 'mergify:selection', []);
+        this._provideToRunner(vitest, 'mergify:selection', [], { browser: true });
         this._configureRunner(vitest);
         return;
       case 'refused':
@@ -304,7 +306,7 @@ export class MergifyReporter implements Reporter {
         // notices. The message is the server's, printed now so it is the first
         // thing in the log; nothing runs, and the run fails in `onTestRunEnd`.
         vitest.logger.error(selection.message ?? fallbackRefusalMessage(CLIENT));
-        this._provideToRunner(vitest, 'mergify:selection', []);
+        this._provideToRunner(vitest, 'mergify:selection', [], { browser: true });
         this._configureRunner(vitest);
         return;
     }
@@ -325,21 +327,20 @@ export class MergifyReporter implements Reporter {
   }
 
   private _configureFlakyDetection(vitest: Vitest): void {
-    this._provideToRunner(vitest, 'mergify:flakyContext', this.flakyContext);
-    this._provideToRunner(vitest, 'mergify:flakyMode', this.flakyMode);
+    this._provideToRunner(vitest, 'mergify:flakyContext', this.flakyContext, { browser: false });
+    this._provideToRunner(vitest, 'mergify:flakyMode', this.flakyMode, { browser: false });
     this._configureRunner(vitest);
   }
 
   /**
-   * Hand a value to the runner, in every project but a browser one.
+   * Hand a value to the runner, per project.
    *
    * Vitest serialises a provided value into every test file it runs, and in
-   * browser mode it also parses it again in each file's iframe. The browser
-   * tester never loads a custom runner — it builds its own from
-   * `VitestTestRunner` whatever `runner` says — so nothing in a browser project
-   * reads these values, and the flaky-detection context alone carries every
-   * test name of the repository's default branch: tens of thousands of names,
-   * shipped and parsed once per file for nobody (MRGFY-9610).
+   * browser mode it also parses it again in each file's iframe. The
+   * flaky-detection context carries every test name of the repository's
+   * default branch — tens of thousands of names — and browser projects cannot
+   * use it (see `setup-browser.ts`), so it stays out of them (MRGFY-9610). The
+   * quarantine list and a served selection are small and do apply there.
    *
    * A root-level `vitest.provide` would reach browser projects anyway, since
    * each project inherits the root's values; providing per project is what
@@ -347,35 +348,59 @@ export class MergifyReporter implements Reporter {
    * entry in `vitest.projects`, so the runner there sees exactly what it did.
    *
    * Vitest 3 still honours the deprecated `poolMatchGlobs` ahead of browser
-   * mode, so a browser project can send some of its files to a Node pool,
-   * where a `runner` set on that project does load. Such a project keeps
-   * receiving everything: it pays what it paid before, and its Node files
-   * lose nothing. Vitest 4 removed the option.
+   * mode, so a browser project can send some of its files to a Node pool. Such
+   * a project keeps receiving everything: it pays what it paid before. Vitest 4
+   * removed the option.
    */
   private _provideToRunner<K extends keyof ProvidedContext & string>(
     vitest: Vitest,
     key: K,
-    value: ProvidedContext[K]
+    value: ProvidedContext[K],
+    { browser }: { browser: boolean }
   ): void {
     for (const project of vitest.projects) {
       const config = project.config as typeof project.config & { poolMatchGlobs?: unknown[] };
-      if (config.browser?.enabled && !config.poolMatchGlobs?.length) continue;
+      if (!browser && config.browser?.enabled && !config.poolMatchGlobs?.length) continue;
       project.provide(key, value);
     }
   }
 
   private _configureRunner(vitest: Vitest): void {
-    this._provideToRunner(vitest, 'mergify:quarantine', [...this.quarantineList]);
+    this._provideToRunner(vitest, 'mergify:quarantine', [...this.quarantineList], {
+      browser: true,
+    });
+    this._installSetup(vitest);
+  }
 
-    // Auto-configure the custom runner if not already set.
-    const mergifyRunner = mergifyRunnerPath(vitest.version);
-    if (!vitest.config.runner) {
-      vitest.config.runner = mergifyRunner;
-    } else if (vitest.config.runner !== mergifyRunner) {
-      vitest.logger.log(
-        `[@mergifyio/vitest] Custom runner already configured (${vitest.config.runner}), quarantine may not work`
-      );
+  /**
+   * Add the setup file that extends Vitest's runner to every project.
+   *
+   * This replaces a custom runner set through `config.runner`, which Vitest
+   * honours only for a Node-only root config: browser mode builds its own
+   * runner and `projects` never read the root's option, so quarantine, flaky
+   * detection and test selection did nothing there, silently. Setup files run
+   * in every project, in Node, in the browser and in custom pools alike, and
+   * a runner the user configured keeps working underneath.
+   *
+   * The files are siblings of this module and carry its extension: tsdown
+   * emits `index.mjs` next to `setup.mjs` and `index.cjs` next to `setup.cjs`,
+   * and under vitest the sources run as `.ts` — deriving the extension is what
+   * keeps the pair in step (#87). Which file depends on where it runs and on
+   * the Vitest version: the page cannot load ci-core's native binding, and the
+   * runner base class moved from `vitest/runners` to `vitest` in 4.1 (5.0
+   * removed the old subpath).
+   */
+  private _installSetup(vitest: Vitest): void {
+    const self = typeof __filename !== 'undefined' ? __filename : fileURLToPath(import.meta.url);
+    const suffix = exportsTestRunner(vitest.version) ? '' : '-legacy';
+    for (const project of vitest.projects) {
+      const kind = project.config.browser?.enabled ? 'setup-browser' : 'setup';
+      const setup = resolve(dirname(self), `${kind}${suffix}${extname(self)}`);
+      const setupFiles = project.config.setupFiles;
+      if (!setupFiles.includes(setup)) setupFiles.push(setup);
+      if (project.config.browser?.enabled) this.browserProjects.add(project.name);
     }
+    this.setupInstalled = true;
   }
 
   async onTestRunStart(specifications: ReadonlyArray<TestSpecification> = []): Promise<void> {
@@ -432,6 +457,23 @@ export class MergifyReporter implements Reporter {
 
     const result = testCase.result();
     if (result.state === 'pending') return;
+
+    // A type-checked test never goes through a runner, so it says nothing
+    // about whether the runner extension reached its project.
+    if ((result.state === 'passed' || result.state === 'failed') && meta.typecheck !== true) {
+      const project = testCase.project.name;
+      const reach = this.projectReach.get(project) ?? {
+        ran: 0,
+        extended: 0,
+        noFlaky: 0,
+        flakyBypassed: 0,
+      };
+      reach.ran++;
+      if (meta.mergifyApplied === true) reach.extended++;
+      if (meta.mergifyFlakyUnavailable === true) reach.noFlaky++;
+      if (meta.mergifyFlakyBypassed === true) reach.flakyBypassed++;
+      this.projectReach.set(project, reach);
+    }
 
     // Only a test that actually ran counts: a served test the user's own filter
     // skipped arrives here `skipped`, not `pending`, and reporting it as
@@ -520,6 +562,7 @@ export class MergifyReporter implements Reporter {
     // upload's timeout and retries.
     await this._sendVerdict();
     this._reportTestSelection();
+    this._reportReach();
 
     // Print quarantine summary
     if (this.quarantineList.size > 0) {
@@ -574,6 +617,63 @@ export class MergifyReporter implements Reporter {
         await endSessionSpan(this.tracing, this.sessionSpan, reason);
       } catch (err) {
         this.vitest?.logger.log(`[@mergifyio/vitest] Failed to flush spans: ${err}`);
+      }
+    }
+  }
+
+  /**
+   * Say where the features could not apply, instead of letting the quarantine
+   * report read as if they had.
+   *
+   * The runner extension marks every test it reaches, so a project whose tests
+   * ran without the mark is one where quarantine and flaky detection did not
+   * apply — a custom `runner` that overrides `onBeforeRunTask` without calling
+   * `super` does that, and so would a Vitest that stopped building its runners
+   * from the base class. Test selection is left out of that message: it is
+   * applied per file, by another hook, and still holds in that runner.
+   * Flaky detection has three more gaps: browser projects never receive it (its
+   * budget needs a native binding a page cannot load), a Node project whose
+   * workers cannot load that binding either — the Cloudflare Workers pool runs
+   * tests in workerd — marks the tests it could not check, and so does a
+   * runner that overrides `onBeforeTryTask` without calling `super`.
+   */
+  private _reportReach(): void {
+    if (!this.setupInstalled) return;
+    const logger = this.vitest?.logger;
+    const label = (project: string) => (project ? `project "${project}"` : 'this run');
+
+    for (const [project, reach] of this.projectReach) {
+      if (reach.ran > 0 && reach.extended === 0) {
+        logger?.log(
+          `[@mergifyio/vitest] Quarantine and flaky detection did not apply in ${label(project)}: ` +
+            `none of its ${reach.ran} test(s) went through Mergify's runner extension. ` +
+            'A custom `runner` that overrides `onBeforeRunTask` without calling `super` causes this.'
+        );
+      }
+      if (reach.noFlaky > 0) {
+        logger?.log(
+          `[@mergifyio/vitest] Flaky detection did not run in ${label(project)}: its tests run where the native ` +
+            `binding cannot load (the Cloudflare Workers pool does this), so ${reach.noFlaky} test(s) were not checked.`
+        );
+      }
+      if (reach.flakyBypassed > 0) {
+        logger?.log(
+          `[@mergifyio/vitest] Flaky detection did not run in ${label(project)}: a custom \`runner\` overrides ` +
+            `\`onBeforeTryTask\` without calling \`super\`, so ${reach.flakyBypassed} test(s) were not checked.`
+        );
+      }
+    }
+
+    if (this.flakyContext && this.flakyMode) {
+      const skipped = [...this.browserProjects].filter(
+        (p) => (this.projectReach.get(p)?.ran ?? 0) > 0
+      );
+      if (skipped.length > 0) {
+        logger?.log(
+          `[@mergifyio/vitest] Flaky detection does not run in browser projects yet, so tests in ${skipped
+            .map(label)
+            .join(', ')} were not checked for flakiness.`
+        );
       }
     }
   }

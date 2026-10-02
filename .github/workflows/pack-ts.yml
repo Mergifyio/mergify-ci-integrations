@@ -155,3 +155,58 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
         run: node .github/scripts/check-ts-install.mjs dist "${VERSION}"
+
+  # Run the packed @mergifyio/vitest against every Vitest major it declares
+  # support for (`vitest >=3.0.0`), in each config shape its run-time features
+  # have to reach. Those features ride on the runner Vitest builds, and both
+  # where that runner comes from (browser mode, `projects`, the Cloudflare
+  # Workers pool) and what it is built from (moved in 4.1, removed in 5.0) have
+  # silently turned them off or broken the run while the unit tests, pinned to
+  # one Vitest, stayed green. Browser mode uses a real headless Chromium.
+  check-vitest-compat:
+    name: vitest ${{ matrix.vitest }} (${{ matrix.shape }})
+    needs: [pack-packages]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { vitest: "~3.0.0", shape: node }
+          - { vitest: "~3.0.0", shape: browser }
+          - { vitest: "~3.0.0", shape: projects }
+          - { vitest: "~3.2.0", shape: node }
+          - { vitest: "~3.2.0", shape: browser }
+          - { vitest: "~3.2.0", shape: projects }
+          - { vitest: "~4.0.0", shape: node }
+          - { vitest: "~4.0.0", shape: browser }
+          - { vitest: "~4.0.0", shape: projects }
+          - { vitest: "~4.1.0", shape: node }
+          - { vitest: "~4.1.0", shape: browser }
+          - { vitest: "~4.1.0", shape: projects }
+          - { vitest: "~4.1.0", shape: cloudflare }
+          - { vitest: "~5.0.0", shape: node }
+          - { vitest: "~5.0.0", shape: browser }
+          - { vitest: "~5.0.0", shape: projects }
+    # Pinned like every other job here. 24.04 rather than the 26.04 the rest
+    # moved to: `playwright install --with-deps` installs Chromium's system
+    # libraries from this image, and that has only been proven on 24.04.
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # For node and pnpm to run the check with; nothing is installed from the
+      # workspace -- the script builds its own consumer project.
+      - uses: pnpm/setup@fbda4c85fc2e1e08721cd8763afea8f48d60f024 # v3.0.0
+        with:
+          working-directory: clients/ts
+          runtime: node
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ts-packages
+          path: dist
+      - name: Run the packed reporter against this Vitest and config shape
+        env:
+          VERSION: ${{ inputs.version }}
+          VITEST_RANGE: ${{ matrix.vitest }}
+          SHAPE: ${{ matrix.shape }}
+        run: node .github/scripts/check-vitest-compat.mjs dist "${VERSION}" "${VITEST_RANGE}" "${SHAPE}"

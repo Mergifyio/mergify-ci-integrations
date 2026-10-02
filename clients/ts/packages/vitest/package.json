@@ -17,26 +17,11 @@
         "types": "./dist/index.d.cts",
         "default": "./dist/index.cjs"
       }
-    },
-    "./runner": {
-      "import": {
-        "types": "./dist/runner.d.mts",
-        "default": "./dist/runner.mjs"
-      },
-      "require": {
-        "types": "./dist/runner.d.cts",
-        "default": "./dist/runner.cjs"
-      }
     }
   },
-  "sideEffects": false,
-  "typesVersions": {
-    "*": {
-      "runner": [
-        "./dist/runner.d.cts"
-      ]
-    }
-  },
+  "sideEffects": [
+    "./dist/setup*"
+  ],
   "files": [
     "dist"
   ],
