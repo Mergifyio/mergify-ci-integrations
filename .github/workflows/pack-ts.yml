@@ -186,10 +186,7 @@ jobs:
           - { vitest: "~5.0.0", shape: node }
           - { vitest: "~5.0.0", shape: browser }
           - { vitest: "~5.0.0", shape: projects }
-    # Pinned like every other job here. 24.04 rather than the 26.04 the rest
-    # moved to: `playwright install --with-deps` installs Chromium's system
-    # libraries from this image, and that has only been proven on 24.04.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
     steps:
