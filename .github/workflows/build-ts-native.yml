@@ -62,10 +62,16 @@ jobs:
           runtime: node
           cache: true
           require-lockfile: true
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        with:
-          toolchain: stable
-          targets: ${{ matrix.target }}
+      # The toolchain rust-toolchain.toml pins, with its components.
+      - name: Install the Rust toolchain
+        run: rustup toolchain install
+      # bash, so `${TARGET}` reads the environment on Windows too, where the
+      # default shell is PowerShell and that syntax names one of its variables.
+      - name: Add the build target
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: rustup target add "${TARGET}"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: ${{ matrix.target }}
