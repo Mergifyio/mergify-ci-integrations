@@ -235,8 +235,8 @@ pub(crate) mod tests {
     fn a_truncated_verdict_keeps_its_counts_and_drops_its_ids() {
         let mut truncated = verdict();
         truncated.truncate();
-        assert!(truncated.failing_tests.is_empty());
-        assert!(truncated.quarantined_failing_tests.is_empty());
+        assert_eq!(truncated.failing_tests, Vec::<String>::new());
+        assert_eq!(truncated.quarantined_failing_tests, Vec::<String>::new());
         assert!(truncated.failing_tests_truncated);
         assert_eq!(truncated.failed_count, 2);
         assert_eq!(truncated.selection, verdict().selection);

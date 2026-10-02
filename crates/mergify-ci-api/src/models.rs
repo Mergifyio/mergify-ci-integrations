@@ -147,8 +147,8 @@ mod tests {
             "min_test_execution_count": 3
         }"#;
         let ctx: FlakyDetectionContext = serde_json::from_str(json).unwrap();
-        assert!(ctx.flaky_test_names.is_empty());
-        assert!(ctx.broken_test_names.is_empty());
+        assert_eq!(ctx.flaky_test_names, Vec::<String>::new());
+        assert_eq!(ctx.broken_test_names, Vec::<String>::new());
         assert!(ctx.budget_ratio_for_test_retries.abs() < f64::EPSILON);
     }
 

@@ -1,3 +1,7 @@
+# Pinned so a new stable release can't break every open pull request with new
+# clippy lints on code nobody touched. Bump it in a pull request of its own,
+# fixing whatever the new lints flag in that same pull request. CI and the
+# release builds all install the toolchain from this file.
 [toolchain]
-channel = "stable"
+channel = "1.99"
 components = ["clippy", "rustfmt"]

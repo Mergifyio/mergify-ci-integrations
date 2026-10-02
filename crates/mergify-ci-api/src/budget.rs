@@ -287,7 +287,7 @@ mod tests {
 
         let result = retry_plan(&ctx, &names(&["a", "b", "c"]), &[], &[], false);
 
-        assert!(result.eligible_tests.is_empty());
+        assert_eq!(result.eligible_tests, Vec::<String>::new());
     }
 
     #[test]
