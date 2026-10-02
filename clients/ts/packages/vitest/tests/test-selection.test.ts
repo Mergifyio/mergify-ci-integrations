@@ -9,10 +9,8 @@ import {
   TEST_SELECTION_ENABLE_ENV,
 } from '@mergifyio/ci-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { TestSpecification, Vitest } from 'vitest/node';
-import { startVitest } from 'vitest/node';
+import { type Reporter, startVitest } from 'vitest/node';
 import { MergifyReporter } from '../src/reporter.js';
-import { selectionUnreachable } from '../src/test-selection.js';
 
 const fixturesDir = resolve(import.meta.dirname, 'fixtures');
 
@@ -339,13 +337,24 @@ async function runLoop(options: {
     },
   });
 
+  // What Vitest itself concluded for every test, read in the main process: the
+  // state its own summary counts from.
+  const states: Record<string, string> = {};
+  const vitestView: Reporter = {
+    onTestRunEnd(testModules) {
+      for (const module of testModules) {
+        for (const test of module.children.allTests()) states[test.fullName] = test.result().state;
+      }
+    },
+  };
+
   const include = options.include ?? ['selection.test.ts'];
   const vitest = await startVitest(
     'test',
     [],
     {
       root: fixturesDir,
-      reporters: [reporter],
+      reporters: [reporter, vitestView],
       watch: false,
       ...(options.projects ? { projects: [{ test: { name: 'unit', include } }] } : { include }),
       ...(options.shard ? { shard: options.shard } : {}),
@@ -362,7 +371,7 @@ async function runLoop(options: {
     : [];
   const requested = apiClient.fetchTestSelection.mock.calls[0]?.[4] as string | undefined;
   const resource = sink.getFinishedSpans()[0]?.resourceAttributes ?? {};
-  return { reporter, apiClient, verdicts, executed, requested, resource, output };
+  return { reporter, apiClient, verdicts, executed, requested, resource, output, states };
 }
 
 describe('the reduced-rerun loop', () => {
@@ -472,7 +481,7 @@ describe('the reduced-rerun loop', () => {
   });
 
   it('replays only the served subset, and says so', async () => {
-    const { executed, verdicts, output } = await runLoop({
+    const { executed, verdicts, output, states } = await runLoop({
       answer: { selection: 'subset', reason: 'reduced_rerun', tests: ['selection > beta'] },
     });
 
@@ -486,10 +495,17 @@ describe('the reduced-rerun loop', () => {
     });
     expect(output).toContain('Mergify re-executed only');
     expect(process.exitCode).toBeUndefined();
+    // Vitest's own summary shows the deselected tests as skipped, not merely
+    // counted in its total.
+    expect(states).toEqual({
+      'selection > alpha': 'skipped',
+      'selection > beta': 'passed',
+      'selection > gamma': 'skipped',
+    });
   });
 
   it('runs nothing on `empty`, and ends green', async () => {
-    const { executed, verdicts, output, reporter } = await runLoop({
+    const { executed, verdicts, output, reporter, states } = await runLoop({
       answer: { selection: 'empty', reason: 'predecessor_passed' },
     });
 
@@ -503,6 +519,7 @@ describe('the reduced-rerun loop', () => {
       selection: { answer: 'empty', keptCount: 0 },
     });
     expect(output).toContain('all 3 tests passed back then');
+    expect(Object.values(states)).toEqual(['skipped', 'skipped', 'skipped']);
   });
 
   it('keeps a shard served `empty` green', async () => {
@@ -534,22 +551,35 @@ describe('the reduced-rerun loop', () => {
     expect(process.exitCode).toBe(1);
   });
 
-  it('asks nothing under `test.projects`, where no project loads the runner', async () => {
-    const { apiClient, executed, verdicts } = await runLoop({ answer: full, projects: true });
+  // Under `test.projects` the runner Vitest builds for each project is
+  // extended by the setup file the reporter adds to it (MRGFY-9626), so the
+  // subset deselects there exactly as in a single config. Browser mode rides on
+  // the same extension; it runs in a real Chromium, in the compatibility matrix.
+  it('honours a subset under `test.projects`', async () => {
+    const { apiClient, executed, verdicts, states } = await runLoop({
+      answer: { selection: 'subset', reason: 'reduced_rerun', tests: ['selection > beta'] },
+      projects: true,
+    });
 
-    expect(apiClient.fetchTestSelection).not.toHaveBeenCalled();
-    expect(verdicts).toEqual([]);
-    expect(executed).toEqual(['alpha', 'beta', 'gamma']);
+    expect(apiClient.fetchTestSelection).toHaveBeenCalled();
+    expect(executed).toEqual(['beta']);
+    expect(verdicts[0]).toMatchObject({ executedCount: 1, selection: { answer: 'subset' } });
+    expect(states).toEqual({
+      'selection > alpha': 'skipped',
+      'selection > beta': 'passed',
+      'selection > gamma': 'skipped',
+    });
   });
 
-  it('asks nothing in browser mode, where the runner never loads', () => {
-    const root = { config: { browser: { enabled: true } } };
-    const vitest = { config: {}, getRootProject: () => root } as unknown as Vitest;
-    const specifications = [{ project: root }] as unknown as TestSpecification[];
+  it('runs nothing under `test.projects` when served `empty`', async () => {
+    const { executed, reporter, states } = await runLoop({
+      answer: { selection: 'empty', reason: 'predecessor_passed' },
+      projects: true,
+    });
 
-    expect(selectionUnreachable(vitest, specifications)).toMatch(/browser mode/);
-    root.config.browser.enabled = false;
-    expect(selectionUnreachable(vitest, specifications)).toBeUndefined();
+    expect(executed).toEqual([]);
+    expect(reporter.getSession()!.status).toBe('passed');
+    expect(Object.values(states)).toEqual(['skipped', 'skipped', 'skipped']);
   });
 });
 

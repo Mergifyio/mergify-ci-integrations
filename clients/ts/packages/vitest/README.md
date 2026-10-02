@@ -32,11 +32,44 @@ export default defineConfig({
 Set `MERGIFY_TOKEN` in your CI environment so the reporter can upload test
 traces. Without it, the reporter stays silent and tests run normally.
 
+### Where quarantine, flaky detection and test selection apply
+
+These three act on the run itself. The reporter adds a setup file to every
+project of your config, so quarantine and test selection apply the same way in
+each of the shapes below (flaky detection runs in Node projects only, see
+further down):
+- a single Node config;
+- each project under `test.projects` (or `test.workspace` before Vitest 3.2);
+- browser mode;
+- custom pools such as `@cloudflare/vitest-pool-workers`.
+
+A `runner` you configured yourself keeps running underneath. The reporter
+supports Vitest 3.0 through 5.0.
+
+The `@mergifyio/vitest/runner` entry point is gone: the reporter no longer
+installs a runner. If your config sets `runner: '@mergifyio/vitest/runner'`,
+remove that line; the reporter alone now applies everything it used to.
+
+Earlier versions applied them only to a single Node config. Under `projects`, in
+browser mode, or with a custom pool they did nothing, and the reporter printed
+no warning. If you use one of those shapes, quarantined failures now stop
+failing your job, and new tests are rerun in Node projects.
+
+Flaky detection needs a native binary to size its reruns. It runs only in Node
+projects:
+- browser projects do not rerun new tests;
+- a pool that cannot load native modules (the Cloudflare Workers pool) does
+  not either.
+
+The end-of-run output says which projects were not checked. It also names any
+project where none of the three applied: that happens when a custom `runner`
+overrides `onBeforeRunTask` without calling `super`.
+
 ### Reduced merge-queue reruns
 
 When the merge queue reruns a CI that failed — a `max_checks_retries` attempt or
 a bisection step — Mergify already knows which tests failed on the previous
-attempt. The reporter asks for that list and the bundled runner skips every
+attempt. The reporter asks for that list and skips every
 other test, so the rerun replays only what actually gated.
 
 **It is off until you turn it on, per job**: set
