@@ -336,6 +336,11 @@ async function runLoop(options: {
       done();
     },
   });
+  // Vitest pipes each worker's stdout and stderr into this stream, and a pipe
+  // ends its destination when the worker's side ends. When that beats
+  // `onTestRunEnd`, the reporter's closing lines are written after end and
+  // silently dropped, so the stream must outlive every worker.
+  capture.end = (() => capture) as Writable['end'];
 
   // What Vitest itself concluded for every test, read in the main process: the
   // state its own summary counts from.
