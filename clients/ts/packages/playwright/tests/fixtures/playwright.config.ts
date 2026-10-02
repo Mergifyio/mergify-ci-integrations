@@ -1,5 +1,6 @@
 import { withMergify } from '@mergifyio/playwright';
 import { defineConfig } from '@playwright/test';
+import { runOutputDir } from './output-dir.ts';
 
 const dir = process.env.PW_FIXTURE_DIR ?? './tests';
 // Opt-in retries so an integration test can exercise the retries > 0 path
@@ -14,7 +15,7 @@ const projects = (process.env.PW_FIXTURE_PROJECTS ?? 'node').split(',').map((nam
 export default withMergify(
   defineConfig({
     testDir: dir,
-    outputDir: './test-results',
+    outputDir: runOutputDir(),
     reporter: 'list',
     retries,
     use: {},
